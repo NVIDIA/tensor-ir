@@ -1,0 +1,35 @@
+@LIT_SITE_CFG_IN_HEADER@
+
+import sys
+
+config.llvm_obj_root = "@LLVM_BINARY_DIR@"
+config.llvm_tools_dir = "@LLVM_TOOLS_DIR@"
+config.llvm_lib_dir = "@LLVM_LIBRARY_DIR@"
+config.llvm_shlib_ext = "@CMAKE_SHARED_LIBRARY_SUFFIX@"
+config.python_executable = "@Python3_EXECUTABLE@"
+config.enable_bindings_python = @TENSOR_IR_ENABLE_BINDINGS_PYTHON@
+
+config.tensor_ir_tools_dir = "@TENSOR_IR_TOOLS_DIR@"
+config.tensor_ir_obj_root = "@TENSOR_IR_BINARY_DIR@"
+config.tensor_ir_install_root = "@TENSOR_IR_INSTALL_ROOT@"
+config.tensor_ir_python_package_prefix = "@TENSOR_IR_PYTHON_PACKAGE_PREFIX@"
+config.tensor_ir_lib_dir = "@TENSOR_IR_LIBRARY_DIR@"
+config.tensor_ir_include_tests = @TENSOR_IR_INCLUDE_TESTS@
+
+config.tensor_ir_excludes = [
+    entry for entry in "@TENSOR_IR_LIT_EXCLUDES@".split(";") if entry
+]
+
+
+if not hasattr(config, "tensor_ir_oss_layout"):
+    config.tensor_ir_oss_layout = True
+if not hasattr(config, "cuda_toolkit_path"):
+    config.cuda_toolkit_path = ""
+if not hasattr(config, "host_cuda_toolkit_path"):
+    config.host_cuda_toolkit_path = ""
+
+import lit.llvm
+lit.llvm.initialize(lit_config, config)
+
+# Let the main config do the real work
+lit_config.load_config(config, "@TENSOR_IR_SOURCE_DIR@/test/lit.cfg.py")

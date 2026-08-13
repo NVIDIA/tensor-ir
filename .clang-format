@@ -1,0 +1,17 @@
+BasedOnStyle: LLVM
+AlwaysBreakTemplateDeclarations: Yes
+InsertBraces: true
+ReflowComments: false
+
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"tensor_ir/'
+    Priority: 1
+  - Regex: '^"mlir.*'
+    Priority: 2
+  - Regex: '^"llvm.*'
+    Priority: 3
+  - Regex: '.*'
+    Priority: 4
+  - Regex: '^<.*'
+    Priority: 5
