@@ -13,6 +13,16 @@
 
 namespace mlir::nv_tensor_ir {
 namespace tensor_to_cuda_tile {
+
+void setInsertionPointBeforeTerminatorOrToEnd(RewriterBase &rewriter,
+                                              Block *block) {
+  if (!block->empty() && block->back().hasTrait<OpTrait::IsTerminator>()) {
+    rewriter.setInsertionPoint(&block->back());
+    return;
+  }
+  rewriter.setInsertionPointToEnd(block);
+}
+
 namespace {
 
 namespace tcg = mlir::nv_tensor_ir::tcutegen;
@@ -229,9 +239,11 @@ FailureOr<BlockStructure> buildCommonReduceBlockStructure(
       calculateReductionTileShape(reductionShape, reductionTileSize);
   tileShape.append(reductionTileShape);
 
-  // Use I32 type for the index values.
-  ShapedType indexType = cuda_tile::TileType::get(
-      /*shape=*/llvm::ArrayRef<int64_t>{}, rewriter.getI32Type());
+  ShapedType indexType =
+      !iterSpace.indexValues.empty()
+          ? cast<ShapedType>(iterSpace.indexValues.front().getType())
+          : cuda_tile::TileType::get(
+                /*shape=*/llvm::ArrayRef<int64_t>{}, rewriter.getI32Type());
 
   Location loc = op->getLoc();
   auto createIndex = [&](int64_t value) {
@@ -303,7 +315,7 @@ FailureOr<BlockStructure> buildCommonReduceBlockStructure(
     }
 
     // Update the insertion point.
-    rewriter.setInsertionPointToEnd(forOp.getBody());
+    setInsertionPointBeforeTerminatorOrToEnd(rewriter, forOp.getBody());
   }
 
   // Reduction operation has a single iteration space.
@@ -529,6 +541,8 @@ buildMatmulBlockStructure(RewriterBase &rewriter, MatmulOp matmulOp,
     int64_t size = contractionShape[idx];
     int64_t tileSize = contractionTileShape[idx];
     if (size == tileSize) {
+      lhsIndexValues[lhsContractingDims[idx]] = startIndex;
+      rhsIndexValues[rhsContractingDims[idx]] = startIndex;
       continue;
     }
 
@@ -550,7 +564,7 @@ buildMatmulBlockStructure(RewriterBase &rewriter, MatmulOp matmulOp,
     }
 
     // Update the insertion point.
-    rewriter.setInsertionPointToEnd(forOp.getBody());
+    setInsertionPointBeforeTerminatorOrToEnd(rewriter, forOp.getBody());
   }
 
   // Matmul operation has two iteration spaces.
@@ -577,7 +591,7 @@ FailureOr<BlockStructure> buildBlockStructure(
     RewriterBase &rewriter, Operation *op, const IterationSpace &iterSpace,
     const TypeConverter &typeConverter, int64_t reductionTileSize) {
   // Update the insertion point.
-  rewriter.setInsertionPointToEnd(iterSpace.insertionBlock);
+  setInsertionPointBeforeTerminatorOrToEnd(rewriter, iterSpace.insertionBlock);
 
   // Process the concatenation operation.
   if (auto concatOp = dyn_cast<ConcatenateOp>(op)) {
@@ -669,19 +683,24 @@ FailureOr<SmallVector<int>> deriveIterationSpaceIndexForOperand(Operation *op) {
 
 } // namespace
 
+/// Builds the structure rooted at `sourceBlock`. When it is null, the
+/// insertion block from `initial` supplies both the result terminator and the
+/// operations that define the iteration-space structure.
 FailureOr<DenseMap<Operation *, BlockStructure>>
 buildSkeleton(RewriterBase &rewriter, IterationSpace initial,
-              const TypeConverter &typeConverter, int64_t reductionTileSize) {
+              const TypeConverter &typeConverter, int64_t reductionTileSize,
+              Block *sourceBlock) {
   DenseMap<Operation *, BlockStructure> result;
+  sourceBlock = sourceBlock ? sourceBlock : initial.insertionBlock;
 
   // Get the terminator pointer before modifying the current block.
-  auto resultsOp = initial.insertionBlock->getTerminator();
+  auto resultsOp = sourceBlock->getTerminator();
 
   // Find all the operations that modify the iteration space and group them by
   // their iteration space ID. Only concatenation and reduction ops that carry
   // an `iterSpaceId` attribute are supported for now.
   DenseMap<int, SmallVector<Operation *>> iterSpaceOpMap;
-  initial.insertionBlock->walk([&](Operation *op) {
+  sourceBlock->walk([&](Operation *op) {
     // Supported operations: concatenation, reduction, matmul.
     if (isa<ConcatenateOp, ReduceOp, ReduceUDOp, MatmulOp>(op)) {
       if (auto iterSpaceId = op->getAttrOfType<IntegerAttr>(

@@ -258,3 +258,35 @@ nv_tensor_ir.graph @matmul_blockarg_lhs(
     : (tensor<128x64xf32>, tensor<64x128xf32>) -> tensor<128x128xf32>
   results %c : tensor<128x128xf32>
 }
+
+// -----
+
+// ============================================================================
+// TEST 10: Matmul with two contracting dimensions (one loop).
+// ============================================================================
+// CHECK-LABEL: @test_matmul_two_dimensions_one_loop
+// CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
+// CHECK-DAG: %[[CST1:.*]] = constant <i32: 1> : tile<i32>
+// CHECK-DAG: %[[CST3:.*]] = constant <i32: 3> : tile<i32>
+// CHECK-DAG: %[[INIT:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
+// CHECK: %[[RESULT:.*]] = for %[[IDX_K:.*]] in (%[[ZERO]] to %[[CST3]], step %[[CST1]])
+// CHECK-SAME: iter_values(%[[ACCUM:.*]] = %[[INIT]])
+// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak {{.*}}[%[[ZERO]], %[[ZERO]], %[[IDX_K]]] : {{.*}} -> tile<32x16x1xf32>
+// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak {{.*}}[%[[ZERO]], %[[IDX_K]], %[[ZERO]]] : {{.*}} -> tile<16x1x16xf32>
+// CHECK: %[[LHS2:.*]] = reshape %[[LHS]] : tile<32x16x1xf32> -> tile<32x16xf32>
+// CHECK: %[[RHS2:.*]] = reshape %[[RHS]] : tile<16x1x16xf32> -> tile<16x16xf32>
+// CHECK: %[[MMA:.*]] = mmaf %[[LHS2]], %[[RHS2]], %[[ACCUM]]
+// CHECK: continue %[[MMA]] : tile<32x16xf32>
+// CHECK: store_view_tko weak %[[RESULT]]
+
+nv_tensor_ir.graph @test_matmul_two_dimensions_one_loop(
+    %arg0: tensor<32x16x3xf32> {nv_tensor_ir.stride = "(1,32,1024)"},
+    %arg1: tensor<16x3x16xf32> {nv_tensor_ir.stride = "(16,1024,1)"}
+    ) -> (tensor<32x16xf32>)
+    attributes {tile_size = array<i32: 32, 16>} {
+  %lhs = reshape %arg0 : tensor<32x16x3xf32> -> tensor<32x48xf32>
+  %rhs = reshape %arg1 : tensor<16x3x16xf32> -> tensor<48x16xf32>
+  %out = matmul(%lhs, %rhs)
+    : (tensor<32x48xf32>, tensor<48x16xf32>) -> tensor<32x16xf32>
+  results %out : tensor<32x16xf32>
+}

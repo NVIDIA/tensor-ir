@@ -79,8 +79,11 @@ nv_tensor_ir.graph @broadcast_two_dimensions_col_major_output(
 // CHECK: %[[PVIEW1:.*]] = make_partition_view %[[TVIEW1]] : partition_view<tile=(1x1), tensor_view<16x1xf32, strides=[1,1]>>
 // CHECK: %[[LOAD1:.*]], {{.*}} = load_view_tko weak %[[PVIEW1]][{{.*}}, %[[ZERO]]]
 // CHECK: %[[TILE1:.*]] = broadcast %[[LOAD1]] : tile<1x1xf32> -> tile<1x16xf32>
-// CHECK: %[[TVIEW2:.*]] = make_tensor_view {{.*}}, shape = [1, 16], strides = [1, 1] : tensor_view<1x16xf32, strides=[1,1]>
-// CHECK: %[[PVIEW2:.*]] = make_partition_view %[[TVIEW2]] : partition_view<tile=(1x16), tensor_view<1x16xf32, strides=[1,1]>>
+// A collapsed broadcast dimension keeps the row-major pitch of the inner
+// dimensions (16) rather than a unit stride, so the innermost dimension stays
+// the contiguous one for downstream copy-atom selection.
+// CHECK: %[[TVIEW2:.*]] = make_tensor_view {{.*}}, shape = [1, 16], strides = [16, 1] : tensor_view<1x16xf32, strides=[16,1]>
+// CHECK: %[[PVIEW2:.*]] = make_partition_view %[[TVIEW2]] : partition_view<tile=(1x16), tensor_view<1x16xf32, strides=[16,1]>>
 // CHECK: %[[TILE2:.*]], {{.*}} = load_view_tko weak %[[PVIEW2]][%[[ZERO]], {{.*}}]
 // CHECK: %[[ADD:.*]] = addf %[[TILE1]], %[[TILE2]] : tile<1x16xf32>
 // CHECK: store_view_tko weak %[[ADD]]
@@ -95,5 +98,29 @@ module {
     %b2 = broadcast %r2 : tensor<1x16xf32> -> tensor<16x16xf32>
     %add = add %b1, %b2 : tensor<16x16xf32>
     results %add : tensor<16x16xf32>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: entry @broadcast_static_scale_to_dynamic_rows(
+// CHECK-SAME: %[[SCALE_PTR:[^, ]+]]: tile<ptr<f32>>
+// CHECK: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
+// CHECK: %[[SCALE_VIEW:.*]] = make_tensor_view %[[SCALE_PTR]], shape = [1, 32], strides = [32, 1] : tensor_view<1x32xf32, strides=[32,1]>
+// CHECK: %[[SCALE_PARTITION:.*]] = make_partition_view %[[SCALE_VIEW]] : partition_view<tile=(1x32), tensor_view<1x32xf32, strides=[32,1]>>
+// CHECK: %[[SCALE_TILE:.*]], {{.*}} = load_view_tko weak %[[SCALE_PARTITION]][%[[ZERO]], {{.*}}]
+// CHECK: %[[BROADCAST:.*]] = broadcast %[[SCALE_TILE]] : tile<1x32xf32> -> tile<4x32xf32>
+// CHECK: %[[RESULT:.*]] = mulf {{.*}}, %[[BROADCAST]] : tile<4x32xf32>
+// CHECK: store_view_tko weak %[[RESULT]]
+module {
+  nv_tensor_ir.graph @broadcast_static_scale_to_dynamic_rows(
+      %scale: tensor<1x32xf32> {nv_tensor_ir.stride = "(32,1)"},
+      %input: tensor<?x32xf32> {nv_tensor_ir.stride = "(32,1)"})
+      -> (tensor<?x32xf32> {nv_tensor_ir.stride = "(32,1)"})
+      attributes {tile_size = array<i32: 4, 32>} {
+    %scale_broadcasted = broadcast %scale
+        : tensor<1x32xf32> -> tensor<?x32xf32>
+    %result = mul %input, %scale_broadcasted : tensor<?x32xf32>
+    results %result : tensor<?x32xf32>
   }
 }

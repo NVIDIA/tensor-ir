@@ -37,6 +37,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 namespace tensor_ir::rt {
 
@@ -289,7 +290,7 @@ public:
 };
 
 /// Returns fixed grid dimensions that were determined at compile time.
-/// For static persistence, the caller (getLayoutPropGridSize) is responsible
+/// For static persistence, the caller (getLayoutPropGridInfo) is responsible
 /// for computing min(smCount * occupancy, totalTiles).
 template <typename Accessor>
 class StaticGridComputer final : public GridSizeComputer<Accessor> {
@@ -336,21 +337,70 @@ public:
             ? layout_.tensorDescs[shapeTensorIdx].rank
             : static_cast<int32_t>(layout_.tileSizes.size());
 
-    size_t numDimsToTile =
-        std::min(layout_.tileSizes.size(), static_cast<size_t>(tensorRank));
+    const bool hasNormalizedGridShape = !layout_.gridShape.empty();
+    if (hasNormalizedGridShape &&
+        (shapeTensorIdx < 0 ||
+         shapeTensorIdx >= static_cast<int32_t>(layout_.tensorDescs.size()) ||
+         layout_.gridShape.size() != layout_.tileSizes.size() ||
+         layout_.gridShapeDimMapping.size() != layout_.gridShape.size())) {
+      grid.x = 0;
+      return grid;
+    }
+    if (!hasNormalizedGridShape &&
+        (tensorRank < 0 ||
+         layout_.tileSizes.size() > static_cast<size_t>(tensorRank))) {
+      grid.x = 0;
+      return grid;
+    }
+
+    size_t numDimsToTile = layout_.tileSizes.size();
 
     int64_t totalTiles = 1;
+    constexpr int64_t maxI32 = std::numeric_limits<int32_t>::max();
     for (size_t i = 0; i < numDimsToTile; ++i) {
-      int64_t dimSize = operands.shape(shapeTensorIdx, static_cast<int32_t>(i));
-      int32_t tileSize = layout_.tileSizes[i];
-      if (tileSize > 0 && dimSize > 0) {
-        totalTiles *= (dimSize + tileSize - 1) / tileSize;
+      int64_t dimSize;
+      if (hasNormalizedGridShape) {
+        dimSize = layout_.gridShape[i];
+        int32_t tensorDim = layout_.gridShapeDimMapping[i];
+        if (dimSize == TensorArgDesc::kDynamic) {
+          if (tensorDim < 0 || tensorDim >= tensorRank ||
+              layout_.tensorDescs[shapeTensorIdx].staticShape[tensorDim] !=
+                  TensorArgDesc::kDynamic) {
+            grid.x = 0;
+            return grid;
+          }
+          dimSize = operands.shape(shapeTensorIdx, tensorDim);
+        } else if (tensorDim != -1) {
+          grid.x = 0;
+          return grid;
+        }
+      } else {
+        dimSize = operands.shape(shapeTensorIdx, static_cast<int32_t>(i));
       }
+      int32_t tileSize = layout_.tileSizes[i];
+      if (tileSize <= 0 || dimSize < 0) {
+        grid.x = 0;
+        return grid;
+      }
+      if (dimSize == 0) {
+        totalTiles = 0;
+        break;
+      }
+      int64_t tilesInDim =
+          dimSize / tileSize + static_cast<int64_t>(dimSize % tileSize != 0);
+      if (tilesInDim > maxI32 / totalTiles) {
+        totalTiles = maxI32;
+        break;
+      }
+      totalTiles *= tilesInDim;
     }
-    // TODO: For static persistence, clamp grid to min(smCount * occupancy,
-    // totalTiles). Currently always uses totalTiles which launches one CTA
-    // per tile (non-persistent). Needs persistence mode and SM count added
-    // to KernelArgLayout.
+    if (layout_.persistence == mlir::nv_tensor_ir::PersistenceMode::Static &&
+        layout_.smCount > 0 && layout_.occupancy > 0) {
+      int64_t persistentGridSize =
+          static_cast<int64_t>(layout_.smCount) * layout_.occupancy;
+      totalTiles = std::min(totalTiles, persistentGridSize);
+    }
+    totalTiles = std::min(totalTiles, maxI32);
     grid.x = static_cast<int32_t>(totalTiles);
     return grid;
   }

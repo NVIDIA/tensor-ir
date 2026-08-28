@@ -22,16 +22,21 @@ static int countDynamic(llvm::ArrayRef<int64_t> vals) {
                         [](int64_t v) { return v == TensorArgDesc::kDynamic; });
 }
 
-KernelArgLayout extractKernelArgLayout(mlir::nv_tensor_ir::GraphOp graphOp,
-                                       llvm::ArrayRef<int32_t> tileSizes,
-                                       bool uniformSignature) {
+KernelArgLayout extractKernelArgLayout(
+    mlir::nv_tensor_ir::GraphOp graphOp,
+    const mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions &options) {
   KernelArgLayout layout;
-  layout.uniformSignature = uniformSignature;
+  layout.uniformSignature = options.uniformSignature;
+  // Runtime launch metadata must use the same persistence contract as lowering
+  // for every code-generation strategy.
+  layout.persistence = options.persistence;
+  layout.smCount = options.smCount;
+  layout.occupancy = options.occupancy;
   auto funcType = graphOp.getFunctionType();
   layout.numInputs = funcType.getNumInputs();
 
   // Copy tile sizes from conversion options.
-  layout.tileSizes.assign(tileSizes.begin(), tileSizes.end());
+  layout.tileSizes.assign(options.tileSize.begin(), options.tileSize.end());
 
   // Retrieve stride information from the tensor descriptors.
   using TensorDescriptor = mlir::nv_tensor_ir::TensorDescriptor;

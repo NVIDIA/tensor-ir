@@ -138,6 +138,7 @@ makeCudaTileCompileOptions(MlirTensorIRCudaTileCompileOptions options) {
   }
   cudaTileOptions.artifactKind = *artifactKind;
 
+
   Status status = cudaTileOptions.validate();
   if (!status.ok()) {
     return status;
@@ -200,13 +201,11 @@ MlirLogicalResult reportStatus(Status status, MlirStringCallback errorCallback,
   return mlirLogicalResultFailure();
 }
 
-const CudaTileRuntimeKernel *
+static const CudaTileRuntimeKernel *
 getCudaTileRuntimeKernel(const IRuntimeKernelPtr &rtk) {
   if (!rtk) {
     return nullptr;
   }
-  // The public compiler currently constructs only CudaTile backend runtime
-  // kernels.
   return static_cast<const CudaTileRuntimeKernel *>(rtk.get());
 }
 
@@ -278,6 +277,10 @@ public:
   }
 
   StatusOr<llvm::ArrayRef<char>> getBytecode() const {
+    Status s = validate();
+    if (!s.ok()) {
+      return s;
+    }
     const CudaTileRuntimeKernel *rtk = getCudaTileRuntimeKernel(rtk_);
     if (!rtk) {
       return Status::NotSupported(

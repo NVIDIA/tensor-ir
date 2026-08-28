@@ -104,7 +104,12 @@ static int getMaxTileCandidatesFromEnvOrDefault(int defaultValue) {
   return defaultValue;
 }
 
-static mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions makePipelineOptions(
+} // namespace
+
+namespace mlir::nv_tensor_ir::backend::cuda_tile {
+
+mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions
+CudaTileCompiler::makePipelineOptions(
     const mlir::nv_tensor_ir::backend::cuda_tile::CudaTileCompileOptions
         &cudaTileOptions) {
   mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions pipelineOptions;
@@ -122,8 +127,8 @@ static mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions makePipelineOptions(
   return pipelineOptions;
 }
 
-static mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions
-makeFrontendOptions(
+mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions
+CudaTileCompiler::makeFrontendOptions(
     const mlir::nv_tensor_ir::backend::cuda_tile::CudaTileCompileOptions
         &cudaTileOptions,
     const mlir::nv_tensor_ir::backend::cuda_tile::IRDebugOptions &debug) {
@@ -136,10 +141,6 @@ makeFrontendOptions(
   applyBoolEnvVar("TENSOR_IR_PRINT_IR", options.debug.printCudaTileIR);
   return options;
 }
-
-} // namespace
-
-namespace mlir::nv_tensor_ir::backend::cuda_tile {
 
 bool CudaTileCompiler::canCompile(mlir::ModuleOp module,
                                   const CompileOptions &options) const {
@@ -163,6 +164,7 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
   if (!cudaTileOptions) {
     return Status::InvalidArgument("Invalid CudaTile compilation options");
   }
+
 
   IRDebugOptions debug = cudaTileOptions->irDebug;
   applyPathEnvVar("TENSOR_IR_DUMP_IR", debug.dumpCudaTileIRPath);

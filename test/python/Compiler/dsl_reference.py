@@ -137,7 +137,7 @@ def evaluate_trace_reference(
                 values[node_id] = node.kwargs["value"]
         elif node.kind == NodeKind.SPLAT:
             shape = node.tensor_info.shape
-            if node.tensor_info.dynamic_shape:
+            if "like" in node.kwargs:
                 shape = tuple(values[int(node.kwargs["like"])].shape)
             values[node_id] = torch.full(
                 shape,

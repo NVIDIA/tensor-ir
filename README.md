@@ -35,6 +35,10 @@ Python bindings (enabled by default):
 Pass `-DTENSOR_IR_ENABLE_BINDINGS_PYTHON=OFF` to build only the compiler
 without these Python binding dependencies.
 
+Python DSL profiling (optional):
+- cuda-python
+- cupti-python
+
 Testing/examples:
 - pytest and PyTorch, validated with pytest 8.3.4 and PyTorch 2.10
 
@@ -314,6 +318,25 @@ compiled = tir.compile(
 )
 compiled.run(a, b, bias, residual, output=output)
 ```
+
+The Python DSL provides a simple built-in profiling utility. Run the compiled
+kernel using the `run_profile` method, and it will print the kernel
+execution-time statistics after the run completes.
+
+```python
+compiled.run_profile(
+    a, b, bias, residual, output=output,
+    warmup=2,
+    iterations=50,
+)
+```
+
+Will output:
+
+```
+[TENSOR_IR_PROFILE] kernel_fused_gemm_epilogue: calls=50, min=28.320 us, max=28.992 us, median=28.672 us, avg=28.667 us, outliers=0
+```
+
 
 ## Testing
 

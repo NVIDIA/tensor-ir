@@ -137,8 +137,8 @@ createAffineMapConversionState(MLIRContext *context,
 /// State factory for the "layout_propagation" codegen strategy.
 std::unique_ptr<ConversionState> createLayoutPropagationConversionState(
     MLIRContext *context, const TypeConverter &typeConverter,
-    Attribute optimizationHints, bool uniformSignature,
-    int64_t reductionTileSize, bool enableExperimentalCudaTileOps);
+    Attribute optimizationHints, TensorToCudaTilePipelineOptions options,
+    bool enableExperimentalCudaTileOps);
 
 /// Verify that the layout-propagation TensorIR-to-CudaTile conversion can lower
 /// the whole graph, without running the IR-materializing conversion driver.

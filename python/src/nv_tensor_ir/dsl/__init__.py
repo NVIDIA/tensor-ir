@@ -14,8 +14,11 @@ from .dsl import (
     CompileOptions,
     CudaTileArtifactKind,
     compile,
+    compile_traced,
     kernel,
+    trace,
 )
+from . import cuda_tile_backend as _cuda_tile_backend
 from .dtypes import DataType
 from .tensor_spec import TensorSpec
 from . import ops as _ops
@@ -32,11 +35,15 @@ __all__ = [
     "TensorSpec",
     "CudaTileArtifactKind",
     "compile",
+    "compile_traced",
     "kernel",
+    "trace",
     *_ops.__all__,
 ]
 
 # Importing a package submodule automatically binds it as `dsl.ops`; remove that
 # implementation detail so the public API is only `dsl.<opname>`.
 globals().pop("ops", None)
-del _ops
+globals().pop("cuda_tile_backend", None)
+globals().pop("profile", None)
+del _cuda_tile_backend, _op_name, _ops

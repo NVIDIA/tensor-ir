@@ -144,6 +144,12 @@ func.func @tensor_dynamic_shape_1d(%in0: tensor<?xf32>) attributes {layout = #nv
   return
 }
 
+// CHECK-LABEL: func.func @tensor_dynamic_broadcast
+// CHECK-SAME: attributes {layout = #nv_tensor_ir.tensor_source<0, 0, "(?,32):(0,1)">}
+func.func @tensor_dynamic_broadcast(%in0: tensor<1x32xf32>) attributes {layout = #nv_tensor_ir.tensor_source<0, 0, "(?,32):(0,1)">} {
+  return
+}
+
 // CHECK-LABEL: func.func @tensor_dynamic_stride_1d
 // CHECK-SAME: attributes {layout = #nv_tensor_ir.tensor_source<0, 0, "(32):(?)", [0]>}
 func.func @tensor_dynamic_stride_1d(%in0: tensor<32xf32>) attributes {layout = #nv_tensor_ir.tensor_source<0, 0, "(32):(?)", [0]>} {

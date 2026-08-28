@@ -640,9 +640,12 @@ LogicalResult validateReductionOpLowerable(ReduceOp op) {
   if (!reductionSource) {
     return op.emitError("expected reduction layout");
   }
-  if (!tcg::is_static(reductionSource.getCuteLayout())) {
+  auto reductionView = reductionSource.getCuteLayout();
+  auto reductionDims = tcg::get(reductionView, tcg::rank(reductionView) - 1);
+  if (!tcg::is_static(reductionView.stride()) ||
+      !tcg::is_static(reductionDims.shape())) {
     return op.emitError(
-        "reduction view layout must have static shape and stride");
+        "reduction view must have static strides and reduction dimensions");
   }
 
   return success();

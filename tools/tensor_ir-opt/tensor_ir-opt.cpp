@@ -32,6 +32,22 @@ struct TensorToCudaTilePipelineCLOptions
       *this, "reduction-tile-size",
       llvm::cl::desc("Tile size for contracting dimensions"),
       llvm::cl::init(nv_tensor_ir::kDefaultReductionTileSize)};
+  PassOptions::Option<nv_tensor_ir::PersistenceMode> persistence{
+      *this, "persistence", llvm::cl::desc("Kernel persistence mode."),
+      llvm::cl::init(nv_tensor_ir::PersistenceMode::None),
+      llvm::cl::values(clEnumValN(nv_tensor_ir::PersistenceMode::None, "none",
+                                  "Normal kernel launch."),
+                       clEnumValN(nv_tensor_ir::PersistenceMode::Static,
+                                  "static", "Static persistent kernel.")
+                       )};
+  PassOptions::Option<int32_t> smCount{
+      *this, "sm-count",
+      llvm::cl::desc("Runtime SM count for persistent kernels."),
+      llvm::cl::init(0)};
+  PassOptions::Option<int32_t> occupancy{
+      *this, "occupancy",
+      llvm::cl::desc("Target occupancy for persistent kernels."),
+      llvm::cl::init(1)};
 };
 } // namespace
 
@@ -40,6 +56,9 @@ static void buildTensorToCudaTileConversionPassPipeline(
   nv_tensor_ir::TensorToCudaTilePipelineOptions options;
   options.tileSize.assign(opts.tileSize.begin(), opts.tileSize.end());
   options.reductionTileSize = opts.reductionTileSize;
+  options.persistence = opts.persistence;
+  options.smCount = opts.smCount;
+  options.occupancy = opts.occupancy;
   options.codegenStrategy =
       nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation;
   nv_tensor_ir::buildTensorToCudaTileConversionPipeline(pm, options);
@@ -74,6 +93,9 @@ static void buildVerifyLayoutPropLowerablePassPipeline(
     OpPassManager &pm, const TensorToCudaTilePipelineCLOptions &opts) {
   nv_tensor_ir::TensorToCudaTilePipelineOptions options;
   options.tileSize.assign(opts.tileSize.begin(), opts.tileSize.end());
+  options.persistence = opts.persistence;
+  options.smCount = opts.smCount;
+  options.occupancy = opts.occupancy;
   options.codegenStrategy =
       nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation;
   nv_tensor_ir::buildGraphAnalysisPipeline(pm, options);

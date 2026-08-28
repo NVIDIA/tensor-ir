@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from .dtypes import (
     DataType,
     FLOAT_DTYPES,
@@ -12,11 +14,19 @@ from .dtypes import (
 )
 from .tracing import BinaryOp, MovementOp, NodeKind, TensorInfo, TraceGraph, UnaryOp
 
+TensorInfoOverrides = Mapping[int, TensorInfo]
 
-def build_mlir_module(graph: TraceGraph, graph_name: str):
+
+def build_mlir_module(
+    graph: TraceGraph,
+    graph_name: str,
+    tensor_info_overrides: TensorInfoOverrides | None = None,
+):
+    """Build MLIR, optionally overriding tensor metadata by trace node ID."""
     from nv_tensor_ir._mlir import ir
     from nv_tensor_ir._mlir.dialects import nv_tensor_ir
 
+    tensor_info_overrides = tensor_info_overrides or {}
     context = ir.Context()
     # CompiledKernel keeps the MLIR context alive with the generated module.
     # Disable per-context worker threads to avoid accumulating thread pools.
@@ -25,14 +35,14 @@ def build_mlir_module(graph: TraceGraph, graph_name: str):
     with context, ir.Location.unknown(context):
         module = ir.Module.create()
         values: dict[int, object] = {}
-        output_infos = _output_infos(graph)
+        output_infos = _output_infos(graph, tensor_info_overrides)
 
         input_types = []
         input_attrs = []
         for node_id in graph.input_ids:
-            node = graph.nodes[node_id]
-            input_types.append(_tensor_type(node.tensor_info, ir))
-            input_attrs.append(_tensor_attr(node.tensor_info, ir))
+            info = _tensor_info(graph, node_id, tensor_info_overrides)
+            input_types.append(_tensor_type(info, ir))
+            input_attrs.append(_tensor_attr(info, ir))
 
         result_types = [_tensor_type(info, ir) for info in output_infos]
         result_attrs = [_tensor_attr(info, ir) for info in output_infos]
@@ -58,9 +68,16 @@ def build_mlir_module(graph: TraceGraph, graph_name: str):
                     # OUTPUT_REF nodes define graph result metadata only; they do
                     # not produce SSA values in the TensorIR graph body.
                     continue
-                result_info = node.tensor_info
+                result_info = _tensor_info(graph, node_id, tensor_info_overrides)
                 result_type = _node_result_type(node, result_info, ir)
-                result = _build_node(node, result_type, values, ir, nv_tensor_ir)
+                result = _build_node(
+                    node,
+                    result_info,
+                    result_type,
+                    values,
+                    ir,
+                    nv_tensor_ir,
+                )
                 values[node_id] = result
 
             nv_tensor_ir.ResultsOp(
@@ -70,9 +87,16 @@ def build_mlir_module(graph: TraceGraph, graph_name: str):
         return module, context
 
 
-def _build_node(node, result_type, values: dict[int, object], ir, nv_tensor_ir):
+def _build_node(
+    node,
+    result_info: TensorInfo,
+    result_type,
+    values: dict[int, object],
+    ir,
+    nv_tensor_ir,
+):
     if node.kind == NodeKind.CONSTANT:
-        value = _scalar_attr(node.kwargs["value"], node.tensor_info.dtype, ir)
+        value = _scalar_attr(node.kwargs["value"], result_info.dtype, ir)
         if node.kwargs.get("is_tensor", False):
             value = ir.DenseElementsAttr.get_splat(result_type, value)
         op = nv_tensor_ir.ConstantOp(
@@ -234,11 +258,21 @@ def _tensor_attr(info: TensorInfo, ir):
     )
 
 
-def _output_infos(graph: TraceGraph) -> list[TensorInfo]:
+def _tensor_info(
+    graph: TraceGraph,
+    node_id: int,
+    overrides: TensorInfoOverrides,
+) -> TensorInfo:
+    return overrides.get(node_id, graph.nodes[node_id].tensor_info)
+
+
+def _output_infos(
+    graph: TraceGraph,
+    overrides: TensorInfoOverrides,
+) -> list[TensorInfo]:
     infos: list[TensorInfo] = []
     for node_id in graph.output_ref_ids:
-        node = graph.nodes[node_id]
-        infos.append(node.tensor_info)
+        infos.append(_tensor_info(graph, node_id, overrides))
     return infos
 
 

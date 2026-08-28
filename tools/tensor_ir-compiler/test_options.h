@@ -102,6 +102,7 @@ struct Options {
                      "Request an eagerly assembled cubin")),
       llvm::cl::cat(CompileCat)};
 
+
   llvm::cl::opt<bool> timing{
       "timing",
       llvm::cl::desc("Enable MLIR pass timing (default: false)\n"

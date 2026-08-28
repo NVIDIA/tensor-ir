@@ -179,7 +179,9 @@ for k in [
     "CUDA_CACHE_DISABLE",
     "CUDA_DISABLE_PTX_JIT",
     "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
     "LOAD_EXE_BEFORE_EXECUTION",
+    "CI",  # ${tir-internal-release}
 ]:
     if os.environ.get(k):
         llvm_config.with_environment(k, os.environ.get(k))

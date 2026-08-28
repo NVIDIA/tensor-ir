@@ -5,6 +5,7 @@
 # REQUIRES: cuda-gpu
 
 from __future__ import annotations
+import os
 
 import pytest
 import torch
@@ -103,6 +104,19 @@ def test_add_sample_module_builder() -> None:
     _run_assert_trace(compiled, a, b, output=output)
 
 
+def test_trace_then_compile() -> None:
+    a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
+    b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
+    output = torch.empty_like(a)
+
+    graph = tir.trace(add_kernel, a, b, output=output)
+    compiled = tir.compile_traced(graph, name="traced_add")
+
+    assert compiled.graph is graph
+    assert "nv_tensor_ir.graph @traced_add" in _module_text(compiled)
+    _run_assert_trace(compiled, a, b, output=output)
+
+
 def test_add_kernel_ground_truth() -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
@@ -113,6 +127,26 @@ def test_add_kernel_ground_truth() -> None:
     compiled.run(a, b, output=output)
     torch.cuda.synchronize()
     torch.testing.assert_close(output, a + b, rtol=1e-3, atol=1e-3)
+
+
+def test_run_profile_executes_kernel() -> None:
+    import_or_skip = os.getenv("TENSOR_IR_DSL_TEST_FORCE_PROFILING") not in (
+        "1",
+        "true",
+    )
+    # ${tir-internal-release begin}
+    import_or_skip = import_or_skip and os.getenv("CI") not in ("1", "true")
+    # ${tir-internal-release end}
+    if import_or_skip:
+        pytest.importorskip("cupti")
+
+    a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
+    b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
+    output = torch.empty_like(a)
+    compiled = tir.compile(add_kernel, a, b, output=output, name="profile_add")
+
+    _require_runtime_launch()
+    compiled.run_profile(a, b, output=output, warmup=1, iterations=3)
 
 
 def test_dynamic_shape_pointwise_graph() -> None:
@@ -694,7 +728,9 @@ def test_public_api_surface() -> None:
             "TensorSpec",
             "CudaTileArtifactKind",
             "compile",
+            "compile_traced",
             "kernel",
+            "trace",
         }
         | expected_ops
     )

@@ -72,6 +72,31 @@ nv_tensor_ir.graph @reduce_broadcast_transition(
 
 // -----
 
+// A dynamic destination is also a non-unit expansion and creates a transition
+// when the dimension domain was previously defined.
+// CHECK-LABEL: nv_tensor_ir.graph @dynamic_broadcast_transition
+nv_tensor_ir.graph @dynamic_broadcast_transition(
+    %input: tensor<?x32xf32>,
+    %bias: tensor<?x?xf32>
+) -> tensor<?x?xf32> {
+  // CHECK: reduce
+  // CHECK-SAME: nv_tensor_ir.iter_space_id = 0 : i32
+  %reduced = reduce(%input) <dimensions = [1], reduction_mode = <add>>
+      : tensor<?x32xf32> -> tensor<?x1xf32>
+
+  // CHECK: broadcast
+  // CHECK-SAME: nv_tensor_ir.iter_space_id = 1 : i32
+  %broadcast = broadcast %reduced
+      : tensor<?x1xf32> -> tensor<?x?xf32>
+
+  // CHECK: add
+  // CHECK-SAME: nv_tensor_ir.iter_space_id = 1 : i32
+  %result = add %broadcast, %bias : tensor<?x?xf32>
+  results %result : tensor<?x?xf32>
+}
+
+// -----
+
 // CHECK-LABEL: nv_tensor_ir.graph @broadcast_reduce_broadcast
 // CHECK-SAME: nv_tensor_ir.iter_space_dim_domains = #nv_tensor_ir<iter_space_dim_domains[undef, undef, undef]>
 // CHECK-SAME: nv_tensor_ir.iter_space_ids = array<i32: 0>
@@ -272,4 +297,38 @@ nv_tensor_ir.graph @rmsnorm(
   // CHECK-SAME: nv_tensor_ir.iter_space_id = 0 : i32
   %result = mul %norm, %scale_b : tensor<64x128xf32>
   results %result : tensor<64x128xf32>
+}
+
+// -----
+
+// A shape-preserving conversion must not hide the source input's use in the
+// post-reduction iteration space.
+
+// CHECK-LABEL: nv_tensor_ir.graph @rmsnorm_input_convert
+// CHECK-SAME: nv_tensor_ir.iter_space_ids = array<i32: 0, 1>
+// CHECK-SAME: nv_tensor_ir.iter_space_ids = array<i32: 0>
+nv_tensor_ir.graph @rmsnorm_input_convert(
+    %input: tensor<8x16xf16>,
+    %scale: tensor<1x16xf16>
+) -> tensor<8x16xf16> {
+  // CHECK: convert
+  // CHECK-SAME: nv_tensor_ir.iter_space_id = 0 : i32
+  %input_f32 = convert %input : tensor<8x16xf16> -> tensor<8x16xf32>
+  %scale_f32 = convert %scale : tensor<1x16xf16> -> tensor<1x16xf32>
+  %squared = mul %input_f32, %input_f32 : tensor<8x16xf32>
+  %sum = reduce(%squared) <dimensions = [1], reduction_mode = <add>>
+      : tensor<8x16xf32> -> tensor<8x1xf32>
+  %inv = rsqrt %sum : tensor<8x1xf32>
+
+  // CHECK: broadcast
+  // CHECK-SAME: nv_tensor_ir.iter_space_id = 1 : i32
+  %inv_b = broadcast %inv : tensor<8x1xf32> -> tensor<8x16xf32>
+  %scale_b = broadcast %scale_f32 : tensor<1x16xf32> -> tensor<8x16xf32>
+
+  // CHECK: mul
+  // CHECK-SAME: nv_tensor_ir.iter_space_id = 1 : i32
+  %normalized = mul %input_f32, %inv_b : tensor<8x16xf32>
+  %result_f32 = mul %normalized, %scale_b : tensor<8x16xf32>
+  %result = convert %result_f32 : tensor<8x16xf32> -> tensor<8x16xf16>
+  results %result : tensor<8x16xf16>
 }

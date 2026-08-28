@@ -102,6 +102,7 @@ typedef enum MlirTensorIRCudaTileArtifactKind {
   MlirTensorIRCudaTileArtifactKindCubin = 1,
 } MlirTensorIRCudaTileArtifactKind;
 
+
 /// Configures compilation of a TensorIR module for the CUDA Tile runtime.
 ///
 /// Pointer and string fields are borrowed and need only remain valid for the
@@ -168,6 +169,7 @@ typedef struct MlirTensorIRCudaTileCompileOptions {
   /// MlirTensorIRArchPortabilityArchConditional. Zero-initialization requests
   /// TileIR bytecode.
   MlirTensorIRCudaTileArtifactKind artifactKind;
+
 } MlirTensorIRCudaTileCompileOptions;
 
 //===----------------------------------------------------------------------===//

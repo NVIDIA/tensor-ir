@@ -221,10 +221,14 @@ Attribute getLayoutSourceAttr(Value value) {
 SmallVector<int32_t> getDynamicValueMapping(const tcg::Layout &layout) {
   size_t dynamicCount = 0;
   for (size_t i = 0, n = tcg::rank(layout); i < n; ++i) {
-    if (!tcg::get(layout.shape(), i).isStatic()) {
+    auto shape = tcg::get(layout.shape(), i);
+    auto stride = tcg::get(layout.stride(), i);
+    bool isLogicalBroadcast =
+        !shape.isStatic() && stride.isStatic() && stride.as_int() == 0;
+    if (!shape.isStatic() && !isLogicalBroadcast) {
       ++dynamicCount;
     }
-    if (!tcg::get(layout.stride(), i).isStatic()) {
+    if (!stride.isStatic()) {
       ++dynamicCount;
     }
   }

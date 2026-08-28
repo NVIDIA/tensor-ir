@@ -118,6 +118,7 @@ createCompileOptions(const Options &options, const SmTarget &smTarget) {
   compileOptions.irDebug.printIRAfterAll = bool(options.printIrAfterAll);
   compileOptions.irDebug.printIRTreeDir = options.printIrTreeDir.getValue();
   compileOptions.irDebug.enableTiming = bool(options.timing);
+
   return compileOptions;
 }
 
@@ -144,7 +145,8 @@ Status dumpArtifact(IRuntimeKernel &runtimeKernel, const Options &options) {
       static_cast<CudaTileRuntimeKernel *>(&runtimeKernel);
   if (!tileRuntimeKernel->hasDeviceCode()) {
     return Status::InvalidArgument(
-        "Failed to dump artifact: runtime kernel has no CudaTile device code");
+        "Failed to dump artifact: runtime kernel has no CudaTile device "
+        "code");
   }
 
   std::error_code error;
@@ -170,9 +172,6 @@ Status dumpArtifact(IRuntimeKernel &runtimeKernel, const Options &options) {
                                                          : "cubin")
               << "\n";
   metadataOut << "runtime_kernel_name=" << tileRuntimeKernel->name() << "\n";
-  metadataOut << "kernel_name=" << tileRuntimeKernel->funcName() << "\n";
-  metadataOut << "runtime_api=cuLibraryLoadData,cuLibraryGetKernel,"
-                 "cuLaunchKernelEx\n";
   metadataOut.close();
 
   llvm::outs() << "  Wrote CudaTile artifact: " << options.dumpArtifactPath

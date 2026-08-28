@@ -140,9 +140,17 @@ TensorDescriptor applyLayout(OpBuilder &rewriter, const TensorDescriptor &desc,
   result.sizes.clear();
   for (size_t i = 0; i < rank; ++i) {
     auto cgSize = tcg::get(layout.shape(), i);
+    auto cgStride = tcg::get(layout.stride(), i);
     if (tcg::is_static(cgSize)) {
       result.sizes.push_back({tcg::static_size(cgSize), nullptr});
+    } else if (tcg::is_static(cgStride) && cgStride.as_int() == 0) {
+      // A dynamic zero-stride dimension is a logical broadcast extent. The
+      // source tensor has one physical element along this dimension and does
+      // not carry the consumer's runtime extent in its descriptor.
+      result.sizes.push_back({1, nullptr});
     } else {
+      assert(dynamicIter != dynamicValues.end() &&
+             "missing runtime value for dynamic layout size");
       result.sizes.push_back({ShapedType::kDynamic, *dynamicIter++});
     }
   }
@@ -154,6 +162,8 @@ TensorDescriptor applyLayout(OpBuilder &rewriter, const TensorDescriptor &desc,
     if (tcg::is_static(cgStride)) {
       result.strides.push_back({tcg::static_size(cgStride), nullptr});
     } else {
+      assert(dynamicIter != dynamicValues.end() &&
+             "missing runtime value for dynamic layout stride");
       result.strides.push_back({ShapedType::kDynamic, *dynamicIter++});
     }
   }
@@ -218,12 +228,39 @@ Value createPartitionView(OpBuilder &rewriter, const TensorDescriptor &desc,
     if (stride.dynamicValue) {
       dynamicStrides.push_back(stride.dynamicValue);
     }
-    // Fix broadcasted dimensions.
-    if (stride.staticValue == 0) {
-      assert(!size.dynamicValue && "broadcasted dimension cannot be dynamic");
-      staticSizes.back() = 1;
-      staticStrides.back() = 1;
+  }
+
+  // Fix broadcasted dimensions. A zero stride marks a logical broadcast: the
+  // tensor holds a single physical element along that dimension, so the size
+  // is one and the stride is never used to compute an address.
+  //
+  // The stride value is still load-bearing for downstream analysis. Emitting
+  // one makes an outer dimension look unit-strided, so downstream axis
+  // analysis picks it as the contiguous axis (`axis_analysis_leading_dim = 0`,
+  // `axis_analysis_vec_size = 1`). That disqualifies the TMA copy atom and
+  // degrades the whole tile to scalar `ld.global`. Use the row-major pitch of
+  // the inner dimensions instead, which keeps the innermost dimension the
+  // contiguous one and matches the stride the affine-map path emits.
+  for (size_t i = 0, e = staticStrides.size(); i < e; ++i) {
+    if (desc.strides[i].staticValue != 0) {
+      continue;
     }
+    assert(!desc.sizes[i].dynamicValue &&
+           "broadcasted dimension cannot be dynamic");
+    staticSizes[i] = 1;
+
+    // Smallest stride that clears every inner dimension. Falls back to one
+    // when an inner extent is dynamic, since no static pitch exists then.
+    int64_t pitch = 1;
+    for (size_t j = i + 1; j < e; ++j) {
+      if (staticSizes[j] == ShapedType::kDynamic ||
+          staticStrides[j] == ShapedType::kDynamic) {
+        pitch = 1;
+        break;
+      }
+      pitch = std::max(pitch, staticSizes[j] * staticStrides[j]);
+    }
+    staticStrides[i] = pitch;
   }
 
   // Create the tensor view.

@@ -12,6 +12,8 @@
 #ifndef TENSOR_IR_RUNTIME_CUDATILE_KERNEL_ARG_LAYOUT_H_
 #define TENSOR_IR_RUNTIME_CUDATILE_KERNEL_ARG_LAYOUT_H_
 
+#include "tensor_ir/Conversion/TensorToCudaTile/Options.h"
+
 #include "llvm/ADT/SmallVector.h"
 
 namespace tensor_ir::rt {
@@ -77,9 +79,27 @@ struct KernelArgLayout {
   /// to outputTensorStartIdx().
   int32_t gridShapeTensorIdx = 0;
 
+  /// Normalized iteration-space shape used for runtime grid computation.
+  ///
+  /// An empty vector preserves the legacy behavior of using the selected
+  /// tensor's shape directly. Dynamic dimensions use TensorArgDesc::kDynamic.
+  llvm::SmallVector<int64_t> gridShape;
+
+  /// Maps each normalized grid dimension to a dimension of
+  /// gridShapeTensorIdx. Static grid dimensions use -1.
+  llvm::SmallVector<int32_t> gridShapeDimMapping;
+
   /// When true, the kernel signature includes args for ALL tensor sizes and
   /// strides (uniform layout).  When false, only dynamic dims produce args.
   bool uniformSignature = false;
+
+  /// Optional runtime-grid persistence metadata. This is only consumed by
+  /// TileBasedGridComputer when the generated kernel IR also uses a static
+  /// persistence loop.
+  mlir::nv_tensor_ir::PersistenceMode persistence =
+      mlir::nv_tensor_ir::PersistenceMode::None;
+  int32_t smCount = 0;
+  int32_t occupancy = 1;
 
   bool hasDynamicShapes() const {
     for (const auto &d : tensorDescs) {

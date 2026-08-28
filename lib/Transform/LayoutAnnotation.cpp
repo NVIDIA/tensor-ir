@@ -308,7 +308,9 @@ private:
     for (size_t i = 0, n = tcg::rank(view) - 1; i < n; i++) {
       auto part = tcg::get(view, i);
       if (part.stride().as_int() != 0) {
-        expectedShape.push_back(part.shape().as_int());
+        expectedShape.push_back(tcg::is_static(part.shape())
+                                    ? tcg::static_size(part.shape())
+                                    : ShapedType::kDynamic);
       }
     }
     expectedShape.append(source.getReductionShape());

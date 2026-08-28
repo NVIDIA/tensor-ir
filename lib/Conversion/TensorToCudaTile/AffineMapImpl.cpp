@@ -1878,18 +1878,22 @@ generateTensorViews(ConversionPatternRewriter &rewriter,
 
 /// Use tensor descriptor information and iteration space affine maps to match
 /// each iteration space dimension to a dimension of a tensor view.
-static void
-locateIterationSpaceDimSizes(TensorToCudaTileConversionState &conversionState) {
+static LogicalResult
+locateIterationSpaceDimSizes(TensorToCudaTileConversionState &conversionState,
+                             cuda_tile::EntryOp entryOp) {
   KernelInfo &kernelInfo = conversionState.kernelInfo;
   int64_t iterSpaceRank = kernelInfo.getIterationSpaceRank();
 
   // Skip empty graph.
   if (iterSpaceRank == 0) {
-    return;
+    return success();
   }
 
   auto allDescriptors = conversionState.getInOutTensorDescriptors();
-  assert(!allDescriptors.empty() && "No tensor descriptors found");
+  if (allDescriptors.empty()) {
+    return entryOp.emitError(
+        "cannot locate iteration-space dimensions without tensor descriptors");
+  }
 
   // Process each iteration space separately.
   for (int32_t iterSpaceId : conversionState.getIterSpaceIds()) {
@@ -1981,13 +1985,17 @@ locateIterationSpaceDimSizes(TensorToCudaTileConversionState &conversionState) {
       llvm::dbgs() << "\n";
     });
 
-    assert(llvm::all_of(dimInfo.iterSpaceDimLocations,
-                        [](const IterSpaceDimLocation &location) {
-                          return location.first != nullptr &&
-                                 location.second != -1;
-                        }) &&
-           "Not all iteration space dimension locations have been identified");
+    for (auto [dimIdx, location] :
+         llvm::enumerate(dimInfo.iterSpaceDimLocations)) {
+      if (!location.first || location.second < 0) {
+        return entryOp.emitError()
+               << "failed to locate tensor dimension for iteration space "
+               << iterSpaceId << ", dimension " << dimIdx;
+      }
+    }
   }
+
+  return success();
 }
 
 AffineMap
@@ -2802,9 +2810,11 @@ static LogicalResult generateTileCountComputation(
       // Retrieve the tensor view and dimension index from the pre-computed
       // iteration space dimension locations for this iteration space.
       auto [tensorViewForDim, tensorDimIdx] = iterSpaceDimLocations[dimIdx];
-      assert(tensorViewForDim && "Tensor view should have been identified");
-      assert(tensorDimIdx >= 0 && "Tensor dimension index should be valid");
-      (void)tensorDimIdx;
+      if (!tensorViewForDim || tensorDimIdx < 0) {
+        return emitError(loc)
+               << "failed to locate tensor dimension for iteration space "
+               << iterSpaceId << ", dimension " << dimIdx;
+      }
 
       // Create a partition view with the tile sizes for the tensor view
       // dimensions.
@@ -3130,7 +3140,9 @@ public:
 
     // Map the iteration space dimensions to the corresponding dimension sizes
     // of the CUDA Tile tensor views.
-    locateIterationSpaceDimSizes(conversionState);
+    if (failed(locateIterationSpaceDimSizes(conversionState, entryOp))) {
+      return failure();
+    }
 
     // Create persistence strategy based on persistence mode.
     // Guard: Only consider persistence when iteration space and dimensions are

@@ -41,6 +41,15 @@ func.func @incorrect_dynamic_offsets(%in0: tensor<?x?xf32>)
 
 // -----
 
+// Logical dynamic broadcast extents must not claim a source runtime value.
+func.func @incorrect_dynamic_broadcast_offset(%in0: tensor<1x32xf32>)
+    // expected-error @+1 {{Layout has 0 dynamic size(s) but 1 dynamic offset(s) provided}}
+    attributes {layout = #nv_tensor_ir.tensor_source<0, 0, "(?,32):(0,1)", [0]>} {
+  return
+}
+
+// -----
+
 //===----------------------------------------------------------------------===//
 // CompositeSourceAttr invalid tests
 //===----------------------------------------------------------------------===//
@@ -108,11 +117,21 @@ func.func @reduction_invalid_view(%in0: tensor<16x32xf32>)
 
 // -----
 
-// Dynamic dimensions are not supported.
-func.func @reduction_dynamic_dimension(%in0: tensor<?x32xf32>)
-    // expected-error @+1 {{Reduction view must have static shape and stride}}
-    attributes {layout = #nv_tensor_ir.reduction_source<"(?,(32)):(32,(1))",
-      #nv_tensor_ir.tensor_source<0, 0, "(?,32):(32,1)", [0]>>} {
+// Dynamic reduction dimensions are not supported.
+func.func @reduction_dynamic_dimension(%in0: tensor<16x?xf32>)
+    // expected-error @+1 {{Dynamic reduction dimensions are not supported: (16,(?)):(32,(1))}}
+    attributes {layout = #nv_tensor_ir.reduction_source<"(16,(?)):(32,(1))",
+      #nv_tensor_ir.tensor_source<0, 0, "(16,?):(32,1)", [0]>>} {
+  return
+}
+
+// -----
+
+// The reduction view must contain a reduction dimension.
+func.func @reduction_empty_view(%in0: tensor<1xf32>)
+    // expected-error @+1 {{Reduction view must have at least one dimension: ():()}}
+    attributes {layout = #nv_tensor_ir.reduction_source<"():()",
+      #nv_tensor_ir.tensor_source<0, 0, "(1):(1)">>} {
   return
 }
 

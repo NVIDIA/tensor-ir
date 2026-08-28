@@ -262,8 +262,12 @@ void SliceOp::getCanonicalizationPatterns(RewritePatternSet &results,
 OpFoldResult ConstantOp::fold(FoldAdaptor) { return getValueAttr(); }
 
 OpFoldResult ConvertOp::fold(FoldAdaptor) {
-  if (getInput().getType() == getOutput().getType()) {
-    return getInput();
+  // Dialect conversion may replace this op's operand before replacing the op
+  // itself. Avoid the typed getter here so folding remains valid during that
+  // transient state.
+  Value input = getOperation()->getOperand(0);
+  if (input.getType() == getOperation()->getResult(0).getType()) {
+    return input;
   }
   return {};
 }

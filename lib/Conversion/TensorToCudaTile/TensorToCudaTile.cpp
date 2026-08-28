@@ -107,6 +107,17 @@ public:
 
     // Create the main conversion state object.
     std::unique_ptr<tensor_to_cuda_tile::ConversionState> state;
+    TensorToCudaTilePipelineOptions options;
+    options.tileSize.assign(tile_size.begin(), tile_size.end());
+    options.numCTAs = num_ctas;
+    options.occupancy = occupancy;
+    options.numWarps = num_warps;
+    options.smCount = sm_count;
+    options.reductionTileSize = reduction_tile_size;
+    options.uniformSignature = uniform_signature;
+    options.persistence = persistence;
+    options.codegenStrategy = codegen_strategy;
+
     const bool useLayoutPropagation =
         codegen_strategy == CudaTileCodegenStrategy::LayoutPropagation;
     if (useLayoutPropagation) {
@@ -114,17 +125,9 @@ public:
           tensor_to_cuda_tile::createEntryOptimizationHints(
               ctx, num_ctas, occupancy, num_warps);
       state = tensor_to_cuda_tile::createLayoutPropagationConversionState(
-          ctx, typeConverter, optimizationHints, uniform_signature,
-          reduction_tile_size, enableExperimentalCudaTileOps);
+          ctx, typeConverter, optimizationHints, std::move(options),
+          enableExperimentalCudaTileOps);
     } else {
-      TensorToCudaTilePipelineOptions options;
-      options.tileSize.assign(tile_size.begin(), tile_size.end());
-      options.numCTAs = num_ctas;
-      options.occupancy = occupancy;
-      options.numWarps = num_warps;
-      options.smCount = sm_count;
-      options.uniformSignature = uniform_signature;
-      options.persistence = persistence;
       state = tensor_to_cuda_tile::createAffineMapConversionState(
           ctx, typeConverter, options);
     }

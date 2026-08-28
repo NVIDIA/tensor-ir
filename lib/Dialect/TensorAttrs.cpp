@@ -56,22 +56,45 @@ int64_t product(ArrayRef<int64_t> values) {
                          std::multiplies<int64_t>());
 }
 
-/// Calculate number of dynamic sizes in a tcutegen layout.
+/// Calculate the number of runtime-backed dynamic values in a cutegen layout.
+/// Dynamic shape leaves with static zero stride are logical broadcast extents
+/// and do not consume a runtime value from the source tensor descriptor.
 size_t countDynamicSizes(const tcg::Layout &layout) {
-  std::function<size_t(ArrayRef<tcg::detail::RecursiveDimValue>)> countDynamic =
-      [&](ArrayRef<tcg::detail::RecursiveDimValue> values) {
-        size_t count = 0;
-        for (const auto &value : values) {
-          if (!value.isLeaf()) {
-            count += countDynamic(value.getValues());
-          } else if (!value.isStatic()) {
-            count++;
+  using RecursiveDimValue = tcg::detail::RecursiveDimValue;
+  std::function<size_t(const RecursiveDimValue &, const RecursiveDimValue &)>
+      countDynamic = [&](const RecursiveDimValue &shape,
+                         const RecursiveDimValue &stride) {
+        assert(shape.isLeaf() == stride.isLeaf() &&
+               "layout shape and stride must be congruent");
+        if (!shape.isLeaf()) {
+          assert(shape.getValues().size() == stride.getValues().size() &&
+                 "layout shape and stride must be congruent");
+          size_t count = 0;
+          for (auto [shapePart, stridePart] :
+               llvm::zip_equal(shape.getValues(), stride.getValues())) {
+            count += countDynamic(shapePart, stridePart);
           }
+          return count;
         }
-        return count;
+
+        bool isLogicalBroadcast =
+            !shape.isStatic() && stride.isStatic() && stride.as_int() == 0;
+        return static_cast<size_t>(!shape.isStatic() && !isLogicalBroadcast) +
+               static_cast<size_t>(!stride.isStatic());
       };
-  return countDynamic(layout.shape().getValues()) +
-         countDynamic(layout.stride().getValues());
+
+  size_t count = 0;
+  for (auto [shape, stride] : llvm::zip_equal(layout.shape().getValues(),
+                                              layout.stride().getValues())) {
+    count += countDynamic(shape, stride);
+  }
+  return count;
+}
+
+SmallVector<int32_t> getIdentityDynamicValueMapping(const tcg::Layout &layout) {
+  SmallVector<int32_t> result(countDynamicSizes(layout));
+  std::iota(result.begin(), result.end(), 0);
+  return result;
 }
 
 /// Build an iteration space that is compatible with every input shape.
@@ -390,7 +413,8 @@ TensorSourceAttr::broadcast(ArrayRef<int64_t> newShape) const {
       currentShape.size() == newShape.size() &&
       llvm::all_of(llvm::zip_equal(currentShape, newShape), [](auto pair) {
         auto [oldDim, newDim] = pair;
-        return oldDim == newDim || (oldDim == 1 && newDim > 0);
+        return oldDim == newDim ||
+               (oldDim == 1 && (newDim > 0 || ShapedType::isDynamic(newDim)));
       });
   if (!isValid) {
     return nullptr;
@@ -398,13 +422,30 @@ TensorSourceAttr::broadcast(ArrayRef<int64_t> newShape) const {
 
   // Build resulting layout.
   auto layout = getCuteLayout();
-  std::vector<tcg::Layout> parts;
+  tcg::Shape resultShape;
+  tcg::Stride resultStride;
   for (size_t i = 0; i < newShape.size(); ++i) {
-    parts.push_back(currentShape[i] == 1 ? tcg::Layout(newShape[i], 0)
-                                         : tcg::get(layout, i));
+    bool isExpanded = currentShape[i] == 1 && newShape[i] != 1;
+    if (!isExpanded) {
+      auto shapePart = *std::next(layout.shape().begin(), i);
+      auto stridePart = *std::next(layout.stride().begin(), i);
+      resultShape.append(std::move(shapePart));
+      resultStride.append(std::move(stridePart));
+      continue;
+    }
+
+    if (ShapedType::isDynamic(newShape[i])) {
+      resultShape.appendDynamic();
+    } else {
+      resultShape.append(newShape[i]);
+    }
+    resultStride.append(0);
   }
 
-  auto newLayout = tcg::make_layout(parts);
+  tcg::Layout newLayout(resultShape, resultStride);
+  if (tcg::has_error(newLayout)) {
+    return nullptr;
+  }
   return TensorSourceAttr::get(getContext(), getTensorId(), getOffset(),
                                newLayout.toString(), getDynamicValueMapping());
 }
@@ -437,7 +478,11 @@ TensorSourceAttr::transpose(ArrayRef<int64_t> permutation) const {
     // Rearrange dynamic dimensions.
     SmallVector<int32_t> dynamicDims(rank, -1);
     for (size_t i = 0; i < rank; ++i) {
-      if (!tcg::is_static(tcg::get(layout.shape(), i))) {
+      auto shape = tcg::get(layout.shape(), i);
+      auto stride = tcg::get(layout.stride(), i);
+      bool isLogicalBroadcast = !tcg::is_static(shape) &&
+                                tcg::is_static(stride) && stride.as_int() == 0;
+      if (!tcg::is_static(shape) && !isLogicalBroadcast) {
         assert(src != dynamicValueMapping.end() &&
                "Incorrect dynamic value mapping");
         dynamicDims[i] = *src++;
@@ -1072,13 +1117,23 @@ LogicalResult ReductionSourceAttr::verify(
   if (!cgView.has_value()) {
     return emitError() << "Invalid view: " << view;
   }
-  if (!tcg::is_static(*cgView)) {
-    return emitError() << "Reduction view must have static shape and stride: "
+  if (tcg::rank(*cgView) == 0) {
+    return emitError() << "Reduction view must have at least one dimension: "
+                       << view;
+  }
+  if (!tcg::is_static(cgView->stride())) {
+    return emitError() << "Reduction view must have static strides: " << view;
+  }
+
+  auto reductionLayout = tcg::get(*cgView, tcg::rank(*cgView) - 1);
+  if (!tcg::is_static(reductionLayout.shape())) {
+    return emitError() << "Dynamic reduction dimensions are not supported: "
                        << view;
   }
 
-  if (product(source.getShape()) == kDynamic) {
-    return emitError() << "Dynamic shapes for reduction are not supported";
+  SmallVector<int64_t> sourceShape = source.getShape();
+  if (llvm::any_of(sourceShape, ShapedType::isDynamic)) {
+    return success();
   }
 
   // Verify that the view is valid for the provided source.
@@ -1094,7 +1149,6 @@ LogicalResult ReductionSourceAttr::verify(
   llvm::sort(parts, [](const tcg::Layout &a, const tcg::Layout &b) {
     return a.stride().as_int() < b.stride().as_int();
   });
-  SmallVector<int64_t> sourceShape = source.getShape();
   int64_t physicalSize = 1;
   int64_t expectedStride = parts.empty() ? 0 : parts.front().stride().as_int();
   bool isContiguous = !parts.empty() || product(sourceShape) == 1;
@@ -1138,14 +1192,17 @@ SmallVector<int64_t> ReductionSourceAttr::getShape() const {
   auto layout = getCuteLayout();
   SmallVector<int64_t> result;
   for (size_t i = 0, n = tcg::rank(layout) - 1; i < n; ++i) {
-    result.push_back(tcg::static_size(layout, i));
+    auto dim = tcg::get(layout.shape(), i);
+    result.push_back(tcg::is_static(dim) ? tcg::static_size(dim) : kDynamic);
   }
   return result;
 }
 
 LayoutSourceAttrInterface
 ReductionSourceAttr::reshape(ArrayRef<int64_t> newShape) const {
-  auto viewAttr = TensorSourceAttr::get(getContext(), 0, 0, getView(), {});
+  auto view = getCuteLayout();
+  auto viewAttr = TensorSourceAttr::get(getContext(), 0, 0, getView(),
+                                        getIdentityDynamicValueMapping(view));
   SmallVector<int64_t> shape(newShape.begin(), newShape.end());
   shape.push_back(getReductionSize());
   auto newAttr = dyn_cast_or_null<TensorSourceAttr>(viewAttr.reshape(shape));
@@ -1157,7 +1214,9 @@ ReductionSourceAttr::reshape(ArrayRef<int64_t> newShape) const {
 
 LayoutSourceAttrInterface
 ReductionSourceAttr::broadcast(ArrayRef<int64_t> newShape) const {
-  auto viewAttr = TensorSourceAttr::get(getContext(), 0, 0, getView(), {});
+  auto view = getCuteLayout();
+  auto viewAttr = TensorSourceAttr::get(getContext(), 0, 0, getView(),
+                                        getIdentityDynamicValueMapping(view));
   SmallVector<int64_t> shape(newShape.begin(), newShape.end());
   shape.push_back(getReductionSize());
   auto newAttr = dyn_cast_or_null<TensorSourceAttr>(viewAttr.broadcast(shape));
@@ -1169,7 +1228,9 @@ ReductionSourceAttr::broadcast(ArrayRef<int64_t> newShape) const {
 
 LayoutSourceAttrInterface
 ReductionSourceAttr::transpose(ArrayRef<int64_t> permutation) const {
-  auto viewAttr = TensorSourceAttr::get(getContext(), 0, 0, getView(), {});
+  auto view = getCuteLayout();
+  auto viewAttr = TensorSourceAttr::get(getContext(), 0, 0, getView(),
+                                        getIdentityDynamicValueMapping(view));
   SmallVector<int64_t> temp(permutation.begin(), permutation.end());
   temp.push_back(permutation.size());
   auto newAttr = dyn_cast_or_null<TensorSourceAttr>(viewAttr.transpose(temp));
@@ -1191,6 +1252,16 @@ LayoutSourceAttrInterface ReductionSourceAttr::normalize() const {
   [[maybe_unused]] llvm::StringRef kDebugIndent = "    ";
   LayoutSourceAttrInterface underlying = getSource();
   int64_t reductionSize = getReductionSize();
+
+  // Dynamic outer dimensions are already represented in the reduction view.
+  // Preserve that view while normalizing the underlying source. Reduction
+  // extents and all strides remain static, as enforced by verification.
+  if (!tcg::is_static(getCuteLayout().shape())) {
+    underlying = underlying.normalize();
+    return underlying
+               ? ReductionSourceAttr::get(getContext(), getView(), underlying)
+               : nullptr;
+  }
 
   // [1] Separate broadcasted and non-broadcasted layout components.
   tcg::Layout flat = tcg::coalesce(getCuteLayout());

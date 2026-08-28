@@ -9,6 +9,9 @@
 #include "llvm/Support/Debug.h"
 
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
+#include <algorithm>
+#include <limits>
+#include <utility>
 
 namespace tcg = mlir::nv_tensor_ir::tcutegen;
 
@@ -55,12 +58,11 @@ class ConversionStateImpl : public ConversionState {
 public:
   ConversionStateImpl(MLIRContext *context, const TypeConverter &typeConverter,
                       cuda_tile::OptimizationHintsAttr optimizationHints,
-                      bool uniformSignature, int64_t reductionTileSize,
+                      TensorToCudaTilePipelineOptions options,
                       bool enableExperimentalCudaTileOps)
       : typeConverter(typeConverter), conversionTarget(*context),
-        optimizationHints(optimizationHints),
-        uniformSignature(uniformSignature),
-        reductionTileSize(reductionTileSize),
+        optimizationHints(optimizationHints), options(std::move(options)),
+        uniformSignature(this->options.uniformSignature),
         enableExperimentalCudaTileOps(enableExperimentalCudaTileOps) {
     conversionTarget.addLegalDialect<cuda_tile::CudaTileDialect>();
     patterns = registerPatterns(context);
@@ -104,14 +106,20 @@ private:
   /// Optimization hints (common for all graphs).
   cuda_tile::OptimizationHintsAttr optimizationHints;
 
+  /// Tensor conversion options needed by graph-level lowering decisions.
+  TensorToCudaTilePipelineOptions options;
+
   /// When `uniformSignature` is true, all the dimension sizes are passed to the
   /// kernel as arguments, even for statically-known dimensions (such values
   /// are ignored).
   bool uniformSignature;
 
-  int64_t reductionTileSize;
-
   bool enableExperimentalCudaTileOps;
+
+  bool staticPersistenceActive = false;
+  bool staticPersistenceUsesRuntimeShape = false;
+  int64_t staticPersistenceGridSize = 0;
+  int64_t staticPersistenceTotalTiles = 0;
 
   /// Normalized layout for the graph output.
   LayoutSourceAttrInterface normalizedLayout;
@@ -312,6 +320,49 @@ public:
 // GraphOp conversion
 //===----------------------------------------------------------------------===//
 
+/// Build a tensor source from a descriptor so it can be reshaped into the
+/// normalized iteration space.
+static TensorSourceAttr buildTensorSource(const TensorDescriptor &desc) {
+  tcg::Shape cgShape;
+  for (auto &size : desc.sizes) {
+    if (size.staticValue != ShapedType::kDynamic) {
+      cgShape.append(size.staticValue);
+    } else {
+      cgShape.appendDynamic();
+    }
+  }
+  tcg::Stride cgStride;
+  for (auto &stride : desc.strides) {
+    if (stride.staticValue != ShapedType::kDynamic) {
+      cgStride.append(stride.staticValue);
+    } else {
+      cgStride.appendDynamic();
+    }
+  }
+  tcg::Layout layout(cgShape, cgStride);
+  return TensorSourceAttr::get(desc.pointer.getContext(), /*tensorId=*/-1,
+                               /*offset=*/0, layout.toString(),
+                               getDynamicValueMapping(layout));
+}
+
+static Value calculateRuntimeTotalTiles(OpBuilder &rewriter,
+                                        const TensorDescriptor &desc,
+                                        ArrayRef<int64_t> tileShape,
+                                        ShapedType indexType) {
+  Value partitionView = createPartitionView(rewriter, desc, tileShape);
+  SmallVector<Type> indexTypes(tileShape.size(), indexType);
+  auto indexSpaceShape = cuda_tile::GetIndexSpaceShapeOp::create(
+      rewriter, partitionView.getLoc(), indexTypes, partitionView);
+
+  Value totalTiles =
+      createConstant(rewriter, partitionView.getLoc(), indexType, int64_t{1});
+  for (Value dimTiles : indexSpaceShape.getResults()) {
+    totalTiles = cuda_tile::MulIOp::create(rewriter, partitionView.getLoc(),
+                                           totalTiles, dimTiles);
+  }
+  return totalTiles;
+}
+
 class GraphOpConversion : public ConversionPattern<GraphOp> {
 public:
   using ConversionPattern<GraphOp>::ConversionPattern;
@@ -361,42 +412,104 @@ public:
     }
     assert(args.empty() && "expected all arguments to be processed");
 
-    // Create the zero index value.
-    ShapedType indexType = cuda_tile::TileType::get(
-        /*shape=*/llvm::ArrayRef<int64_t>{}, rewriter.getI32Type());
-    state.zeroIndex =
-        createConstant(rewriter, graphOp.getLoc(), indexType, int64_t{0});
-
-    // Build virtual descriptor for the output tensor.
-    // Dynamic dimensions sizes follow the tensor pointer (block argument).
     TensorDescriptor outputDesc;
-    outputDesc.pointer = state.outputDescriptors[0].pointer;
-    size_t argIdx = cast<BlockArgument>(outputDesc.pointer).getArgNumber();
-
-    for (int64_t size : state.normalizedLayout.getShape()) {
-      Value dynamicSize = size == ShapedType::kDynamic
-                              ? entryBlock->getArgument(++argIdx)
-                              : nullptr;
-      outputDesc.sizes.push_back({size, dynamicSize});
-      outputDesc.strides.push_back({1, nullptr});
+    if (state.staticPersistenceUsesRuntimeShape) {
+      TensorSourceAttr outputSource =
+          buildTensorSource(state.outputDescriptors[0]);
+      outputSource = dyn_cast_if_present<TensorSourceAttr>(
+          outputSource.reshape(state.normalizedLayout.getShape()));
+      if (!outputSource) {
+        return graphOp.emitError(
+            "Failed to reshape the output layout to the iteration space");
+      }
+      outputDesc =
+          applyLayout(rewriter, state.outputDescriptors[0], outputSource);
+    } else {
+      // Preserve the virtual descriptor used by non-runtime persistence. Its
+      // unit strides keep iteration-space indexing independent of the output
+      // layout and avoid materializing a duplicate output view before loads.
+      outputDesc.pointer = state.outputDescriptors[0].pointer;
+      size_t argIdx = cast<BlockArgument>(outputDesc.pointer).getArgNumber();
+      for (int64_t size : state.normalizedLayout.getShape()) {
+        Value dynamicSize = size == ShapedType::kDynamic
+                                ? entryBlock->getArgument(++argIdx)
+                                : nullptr;
+        outputDesc.sizes.push_back({size, dynamicSize});
+        outputDesc.strides.push_back({1, nullptr});
+      }
     }
 
     // Build index values for the current tile.
     auto tileBlockIds =
         cuda_tile::GetTileBlockIdOp::create(rewriter, graphOp.getLoc());
+    Value tileIndex = tileBlockIds.getResult(0);
+    Block *rootInsertionBlock = entryBlock;
+    if (state.staticPersistenceActive) {
+      auto indexType = cast<ShapedType>(tileIndex.getType());
+      Value totalTiles;
+      Value gridSize;
+      if (state.staticPersistenceUsesRuntimeShape) {
+        indexType = cuda_tile::TileType::get(
+            /*shape=*/llvm::ArrayRef<int64_t>{}, rewriter.getI64Type());
+        tileIndex = cuda_tile::ExtIOp::create(rewriter, graphOp.getLoc(),
+                                              indexType, tileIndex,
+                                              cuda_tile::Signedness::Unsigned);
+
+        SmallVector<int64_t> tileShape =
+            state.blockStructures[nullptr].iterationSpaces.front().tileShape;
+        totalTiles = calculateRuntimeTotalTiles(rewriter, outputDesc, tileShape,
+                                                indexType);
+
+        int64_t persistentGridSize =
+            static_cast<int64_t>(state.options.smCount) *
+            state.options.occupancy;
+        persistentGridSize = std::min<int64_t>(
+            persistentGridSize, std::numeric_limits<int32_t>::max());
+        Value gridLimit = createConstant(rewriter, graphOp.getLoc(), indexType,
+                                         persistentGridSize);
+        Value launchGridSize = cuda_tile::MinIOp::create(
+            rewriter, graphOp.getLoc(), totalTiles, gridLimit,
+            cuda_tile::Signedness::Unsigned);
+        Value one =
+            createConstant(rewriter, graphOp.getLoc(), indexType, int64_t{1});
+        gridSize = cuda_tile::MaxIOp::create(rewriter, graphOp.getLoc(),
+                                             launchGridSize, one,
+                                             cuda_tile::Signedness::Unsigned);
+      } else {
+        totalTiles = createConstant(rewriter, graphOp.getLoc(), indexType,
+                                    state.staticPersistenceTotalTiles);
+        gridSize = createConstant(rewriter, graphOp.getLoc(), indexType,
+                                  state.staticPersistenceGridSize);
+      }
+      auto forOp = cuda_tile::ForOp::create(
+          rewriter, graphOp.getLoc(), tileIndex, totalTiles, gridSize,
+          /*initArgs=*/{}, /*bodyBuilder=*/nullptr,
+          /*unsignedCmp=*/state.staticPersistenceUsesRuntimeShape);
+      tileIndex = forOp.getInductionVar();
+      rootInsertionBlock = forOp.getBody();
+      setInsertionPointBeforeTerminatorOrToEnd(rewriter, rootInsertionBlock);
+    }
+
+    // Broadcasted dimensions use a zero coordinate. Match the tile index type,
+    // which is widened for runtime-shaped static persistence.
+    state.zeroIndex =
+        createConstant(rewriter, graphOp.getLoc(),
+                       cast<ShapedType>(tileIndex.getType()), int64_t{0});
+
     SmallVector<int64_t> tileShape =
         state.blockStructures[nullptr].iterationSpaces.front().tileShape;
-    MLIR_ASSIGN_OR_RETURN(SmallVector<Value> indexValues,
-                          calculateIndex(rewriter, tileBlockIds.getResult(0),
-                                         outputDesc, tileShape));
+    MLIR_ASSIGN_OR_RETURN(
+        SmallVector<Value> indexValues,
+        calculateIndex(rewriter, tileIndex, outputDesc, tileShape));
 
     // Build the block structures and the iteration spaces.
     IterationSpace initial{
-        entryBlock, std::move(tileShape), std::move(indexValues), {}};
-    MLIR_ASSIGN_OR_RETURN(state.blockStructures,
-                          buildSkeleton(rewriter, std::move(initial),
-                                        *getTypeConverter(),
-                                        state.reductionTileSize));
+        rootInsertionBlock, std::move(tileShape), std::move(indexValues), {}};
+    MLIR_ASSIGN_OR_RETURN(
+        state.blockStructures,
+        buildSkeleton(rewriter, std::move(initial), *getTypeConverter(),
+                      state.options.reductionTileSize,
+                      /*sourceBlock=*/entryBlock));
 
     // Process all the generated block structures.
     for (auto &[op, blockStructure] : state.blockStructures) {
@@ -412,7 +525,8 @@ public:
         });
 
         // Create loads for the tensor sources in the iteration space.
-        rewriter.setInsertionPointToEnd(iterationSpace.insertionBlock);
+        setInsertionPointBeforeTerminatorOrToEnd(rewriter,
+                                                 iterationSpace.insertionBlock);
         for (auto &[source, loadedTile] : iterationSpace.loadedTiles) {
           LLVM_DEBUG({
             llvm::dbgs() << "Loading tensor #" << source.getTensorId()
@@ -634,7 +748,8 @@ public:
     state.layouts = ConversionStateImpl::OperandLayouts{state.normalizedLayout};
     state.operandIndex = 0;
 
-    rewriter.setInsertionPointToEnd(state.iterationSpace->insertionBlock);
+    setInsertionPointBeforeTerminatorOrToEnd(
+        rewriter, state.iterationSpace->insertionBlock);
 
     // Reshape the output to the iteration space shape.
     const TensorDescriptor &desc = state.outputDescriptors[0];
@@ -655,34 +770,14 @@ public:
       rewriter.eraseOp(state.zeroIndex.getDefiningOp());
     }
 
-    // Replace `ResultsOp` with `cuda_tile::ReturnOp`.
+    // A persistent store is emitted inside the loop, but the return must remain
+    // in the entry block after that loop. Preserve the existing insertion-point
+    // behavior for non-persistent lowering.
+    if (state.staticPersistenceActive) {
+      rewriter.setInsertionPoint(resultsOp);
+    }
     rewriter.replaceOpWithNewOp<cuda_tile::ReturnOp>(resultsOp);
     return success();
-  }
-
-private:
-  /// Build tensor source from the tensor descriptor.
-  static TensorSourceAttr buildTensorSource(const TensorDescriptor &desc) {
-    tcg::Shape cgShape;
-    for (auto &size : desc.sizes) {
-      if (size.staticValue != ShapedType::kDynamic) {
-        cgShape.append(size.staticValue);
-      } else {
-        cgShape.appendDynamic();
-      }
-    }
-    tcg::Stride cgStride;
-    for (auto &stride : desc.strides) {
-      if (stride.staticValue != ShapedType::kDynamic) {
-        cgStride.append(stride.staticValue);
-      } else {
-        cgStride.appendDynamic();
-      }
-    }
-    tcg::Layout layout(cgShape, cgStride);
-    return TensorSourceAttr::get(desc.pointer.getContext(), /*tensorId=*/-1,
-                                 /*offset=*/0, layout.toString(),
-                                 getDynamicValueMapping(layout));
   }
 };
 
@@ -722,7 +817,8 @@ public:
 
         if (!blockStructure->yieldValues.empty()) {
           // Normal case: separate block for each source.
-          rewriter.setInsertionPointToEnd(
+          setInsertionPointBeforeTerminatorOrToEnd(
+              rewriter,
               blockStructure->iterationSpaces[spaceIdx].insertionBlock);
           cuda_tile::YieldOp::create(rewriter, concatOp.getLoc(), tile);
           result = blockStructure->yieldValues[0];
@@ -780,6 +876,55 @@ LogicalResult ConversionStateImpl::start(GraphOp graphOp) {
     llvm::interleaveComma(tileShape, llvm::dbgs());
     llvm::dbgs() << ")\n";
   });
+
+  staticPersistenceActive = false;
+  staticPersistenceUsesRuntimeShape = false;
+  staticPersistenceGridSize = 0;
+  staticPersistenceTotalTiles = 0;
+  if (options.persistence == PersistenceMode::Static) {
+    ArrayRef<int64_t> iterShape = normalizedLayout.getShape();
+    bool hasDynamicIterDim = llvm::any_of(
+        iterShape, [](int64_t dim) { return ShapedType::isDynamic(dim); });
+    if (hasDynamicIterDim) {
+      staticPersistenceActive = true;
+      staticPersistenceUsesRuntimeShape = true;
+    } else {
+      int64_t totalTiles = 1;
+      bool overflow = false;
+      constexpr int64_t maxI32 = std::numeric_limits<int32_t>::max();
+      for (auto [dim, tile] : llvm::zip_equal(iterShape, tileShape)) {
+        int64_t tilesInDim = llvm::divideCeil(dim, tile);
+        if (tilesInDim > 0 && totalTiles > maxI32 / tilesInDim) {
+          overflow = true;
+          break;
+        }
+        totalTiles *= tilesInDim;
+      }
+
+      int64_t persistentGridSize =
+          static_cast<int64_t>(options.smCount) * options.occupancy;
+      if (!overflow && totalTiles > 0 && persistentGridSize > 0 &&
+          persistentGridSize <= maxI32) {
+        staticPersistenceTotalTiles = totalTiles;
+        staticPersistenceGridSize = std::min(persistentGridSize, totalTiles);
+        staticPersistenceActive =
+            staticPersistenceGridSize < staticPersistenceTotalTiles;
+      }
+    }
+
+    LLVM_DEBUG({
+      llvm::dbgs() << "Layout-prop static persistence "
+                   << (staticPersistenceActive ? "enabled" : "disabled")
+                   << ":\n";
+      if (staticPersistenceUsesRuntimeShape) {
+        llvm::dbgs() << "  totalTiles: runtime\n";
+        llvm::dbgs() << "  gridSize: runtime\n";
+      } else {
+        llvm::dbgs() << "  totalTiles: " << staticPersistenceTotalTiles << "\n";
+        llvm::dbgs() << "  gridSize: " << staticPersistenceGridSize << "\n";
+      }
+    });
+  }
 
   inputDescriptors = std::move(*getTensorDescriptors(graphOp.getArgumentTypes(),
                                                      graphOp.getAllArgAttrs()));
@@ -865,7 +1010,8 @@ LogicalResult ConversionStateImpl::update(ConversionPatternRewriter &rewriter,
   auto iterSpaceId =
       op->getAttrOfType<IntegerAttr>(TensorIRDialect::getIterSpaceIdAttrName());
   iterationSpace = iterationSpaces.find(iterSpaceId.getInt())->second;
-  rewriter.setInsertionPointToEnd(iterationSpace->insertionBlock);
+  setInsertionPointBeforeTerminatorOrToEnd(rewriter,
+                                           iterationSpace->insertionBlock);
 
   // Reset the operand index.
   operandIndex = 0;
@@ -1030,12 +1176,12 @@ LogicalResult validateIotaOpLowerable(IotaOp op, ArrayRef<int64_t> tileShape) {
 
 std::unique_ptr<ConversionState> createLayoutPropagationConversionState(
     MLIRContext *context, const TypeConverter &typeConverter,
-    Attribute optimizationHints, bool uniformSignature,
-    int64_t reductionTileSize, bool enableExperimentalCudaTileOps) {
+    Attribute optimizationHints, TensorToCudaTilePipelineOptions options,
+    bool enableExperimentalCudaTileOps) {
   return std::make_unique<ConversionStateImpl>(
       context, typeConverter,
       cast_if_present<cuda_tile::OptimizationHintsAttr>(optimizationHints),
-      uniformSignature, reductionTileSize, enableExperimentalCudaTileOps);
+      std::move(options), enableExperimentalCudaTileOps);
 }
 
 LogicalResult
@@ -1072,9 +1218,12 @@ verifyOpStateAttrs(Operation *op,
       return op->emitError("Expected reduction layout. Make sure the "
                            "\"graph-splitting\" pass has been run.");
     }
-    if (!tcg::is_static(reduction.getCuteLayout())) {
+    auto reductionView = reduction.getCuteLayout();
+    auto reductionDims = tcg::get(reductionView, tcg::rank(reductionView) - 1);
+    if (!tcg::is_static(reductionView.stride()) ||
+        !tcg::is_static(reductionDims.shape())) {
       return op->emitError(
-          "reduction view layout must have static shape and stride");
+          "reduction view must have static strides and reduction dimensions");
     }
   } else if (isa<MatmulOp>(op)) {
     auto matmul = dyn_cast<MatmulSourceAttr>(layout);

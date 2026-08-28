@@ -1099,7 +1099,8 @@ bool BroadcastOp::isIterationSpaceTransition(
 
   for (size_t i = 0; i < inputShape.size(); ++i) {
     // Check if this dimension is being expanded from 1 to N.
-    if (inputShape[i] == 1 && outputShape[i] > 1) {
+    if (inputShape[i] == 1 &&
+        (outputShape[i] > 1 || ShapedType::isDynamic(outputShape[i]))) {
       // Transition occurs if the dimension was previously defined (Def).
       if (inputDimStates[i] == DimState::Def) {
         return true;

@@ -50,3 +50,10 @@ endif()
 
 llvm_update_compile_flags(tensor_ir-opt)
 mlir_check_all_link_libraries(tensor_ir-opt)
+
+# tensor_ir-opt links the same large TensorIR/TileIR static stack as the
+# compiler and runner tools. Honor the opt-in workaround for Debug DWARF
+# relocation overflow on supported Linux hosts.
+if(COMMAND tensor_ir_add_large_debug_link_options)
+  tensor_ir_add_large_debug_link_options(tensor_ir-opt)
+endif()

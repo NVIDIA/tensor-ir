@@ -12,16 +12,16 @@
 
 namespace mlir::nv_tensor_ir {
 class GraphOp;
+struct TensorToCudaTilePipelineOptions;
 } // namespace mlir::nv_tensor_ir
 
 namespace tensor_ir {
 
 /// Build runtime kernel argument ABI metadata by inspecting a TensorIR graph's
-/// types and stride attributes with the selected tile and signature policy.
-rt::KernelArgLayout
-extractKernelArgLayout(::mlir::nv_tensor_ir::GraphOp graphOp,
-                       llvm::ArrayRef<int32_t> tileSizes,
-                       bool uniformSignature);
+/// types, stride attributes, and conversion options.
+rt::KernelArgLayout extractKernelArgLayout(
+    ::mlir::nv_tensor_ir::GraphOp graphOp,
+    const ::mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions &options);
 
 } // namespace tensor_ir
 

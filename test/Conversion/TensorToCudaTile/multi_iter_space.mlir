@@ -209,3 +209,34 @@ module {
     results %result : tensor<16x32x64xf32>
   }
 }
+
+// -----
+
+// A converted graph input used before and after a reduction transition must
+// remain available in both iteration spaces.
+
+// CHECK-LABEL: entry @rmsnorm_input_convert
+// CHECK: ftof %{{.*}} : tile<{{.*}}xf16> -> tile<{{.*}}xf32>
+// CHECK: reduce
+// CHECK: broadcast
+// CHECK: ftof %{{.*}} : tile<{{.*}}xf32> -> tile<{{.*}}xf16>
+// CHECK: return
+module {
+  nv_tensor_ir.graph @rmsnorm_input_convert(
+      %input: tensor<8x16xf16>,
+      %scale: tensor<1x16xf16>
+  ) -> tensor<8x16xf16> {
+    %input_f32 = convert %input : tensor<8x16xf16> -> tensor<8x16xf32>
+    %scale_f32 = convert %scale : tensor<1x16xf16> -> tensor<1x16xf32>
+    %squared = mul %input_f32, %input_f32 : tensor<8x16xf32>
+    %sum = reduce(%squared) <dimensions = [1], reduction_mode = <add>>
+        : tensor<8x16xf32> -> tensor<8x1xf32>
+    %inv = rsqrt %sum : tensor<8x1xf32>
+    %inv_b = broadcast %inv : tensor<8x1xf32> -> tensor<8x16xf32>
+    %scale_b = broadcast %scale_f32 : tensor<1x16xf32> -> tensor<8x16xf32>
+    %normalized = mul %input_f32, %inv_b : tensor<8x16xf32>
+    %result_f32 = mul %normalized, %scale_b : tensor<8x16xf32>
+    %result = convert %result_f32 : tensor<8x16xf32> -> tensor<8x16xf16>
+    results %result : tensor<8x16xf16>
+  }
+}

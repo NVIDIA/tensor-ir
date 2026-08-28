@@ -7,6 +7,8 @@
 #include "tensor_ir/Compiler/CudaTile/Pipelines.h"
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTile.h"
 #include "tensor_ir/Dialect/TensorIR.h"
+#include "tensor_ir/Support/TCutegen.h"
+#include "tensor_ir/Utils/Utils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -19,6 +21,9 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <limits>
+
+namespace tcg = mlir::nv_tensor_ir::tcutegen;
 
 static bool isSupportedTensorIrOp(mlir::Operation *op) {
   using namespace mlir::nv_tensor_ir;
@@ -92,6 +97,178 @@ static bool usesRuntimeGrid(const ::tensor_ir::rt::KernelArgLayout &layout) {
     }
   }
   return false;
+}
+
+static bool isStaticPersistenceActive(
+    llvm::ArrayRef<int64_t> iterationShape, llvm::ArrayRef<int32_t> tileSizes,
+    const mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions &options) {
+  using namespace mlir::nv_tensor_ir;
+
+  if (options.persistence != PersistenceMode::Static || options.smCount <= 0 ||
+      options.occupancy <= 0 || iterationShape.size() != tileSizes.size()) {
+    return false;
+  }
+  if (llvm::any_of(iterationShape, [](int64_t dim) {
+        return mlir::ShapedType::isDynamic(dim);
+      })) {
+    return true;
+  }
+
+  int64_t totalTiles = 1;
+  constexpr int64_t maxI32 = std::numeric_limits<int32_t>::max();
+  for (auto [dim, tile] : llvm::zip_equal(iterationShape, tileSizes)) {
+    if (dim < 0 || tile <= 0) {
+      return false;
+    }
+    if (dim == 0) {
+      totalTiles = 0;
+      break;
+    }
+    int64_t tilesInDim = llvm::divideCeil(dim, static_cast<int64_t>(tile));
+    if (tilesInDim > maxI32 / totalTiles) {
+      return false;
+    }
+    totalTiles *= tilesInDim;
+  }
+
+  int64_t persistentGridSize =
+      static_cast<int64_t>(options.smCount) * options.occupancy;
+  return persistentGridSize <= maxI32 && totalTiles > persistentGridSize;
+}
+
+static mlir::LogicalResult configureLayoutPropGridMetadata(
+    mlir::nv_tensor_ir::GraphOp graphOp,
+    ::tensor_ir::rt::KernelArgLayout &argLayout,
+    const mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions &options) {
+  using namespace mlir::nv_tensor_ir;
+  using ::tensor_ir::rt::TensorArgDesc;
+
+  auto tileSizeAttr = graphOp->getAttrOfType<mlir::DenseI32ArrayAttr>(
+      TensorIRDialect::getTileSizeAttrName());
+  if (!tileSizeAttr) {
+    return graphOp.emitError(
+        "layout-propagation lowering did not select a tile size");
+  }
+  llvm::ArrayRef<int32_t> tileSizes = tileSizeAttr.asArrayRef();
+  argLayout.tileSizes.assign(tileSizes.begin(), tileSizes.end());
+
+  mlir::Operation *terminator = graphOp.getBody()->getTerminator();
+  auto iterationSpace = mlir::dyn_cast_if_present<LayoutSourceAttrInterface>(
+      terminator->getAttr(TensorIRDialect::getIterationSpaceAttrName()));
+  if (!iterationSpace) {
+    return graphOp.emitError(
+        "grid computation requires an iteration-space layout");
+  }
+  llvm::SmallVector<int64_t> iterationShape = iterationSpace.getShape();
+  if (iterationShape.size() != tileSizes.size()) {
+    return graphOp.emitError(
+        "iteration-space rank does not match the selected tile rank");
+  }
+
+  if (isStaticPersistenceActive(iterationShape, tileSizes, options)) {
+    argLayout.persistence = PersistenceMode::Static;
+    argLayout.smCount = options.smCount;
+    argLayout.occupancy = options.occupancy;
+  }
+
+  if (!usesRuntimeGrid(argLayout)) {
+    return mlir::success();
+  }
+
+  auto resultDescriptors = getTensorDescriptors(graphOp.getResultTypes(),
+                                                graphOp.getAllResultAttrs());
+  if (mlir::failed(resultDescriptors)) {
+    return graphOp.emitError(
+        "failed to read output descriptors for runtime grid computation");
+  }
+
+  int32_t tensorDescIdx = argLayout.outputTensorStartIdx();
+  TensorType outputType;
+  const TensorDescriptor *outputDesc = nullptr;
+  for (auto [idx, type] : llvm::enumerate(graphOp.getResultTypes())) {
+    auto tensorType = mlir::dyn_cast<TensorType>(type);
+    if (!tensorType) {
+      if (type.isIntOrFloat()) {
+        ++tensorDescIdx;
+      }
+      continue;
+    }
+    if (tensorType.getRank() == 0) {
+      continue;
+    }
+    outputType = tensorType;
+    outputDesc = &(*resultDescriptors)[idx];
+    break;
+  }
+  if (!outputType || !outputDesc ||
+      tensorDescIdx >= static_cast<int32_t>(argLayout.tensorDescs.size())) {
+    return graphOp.emitError(
+        "runtime grid computation requires a ranked output tensor");
+  }
+
+  tcg::Layout outputLayout(getShapeRef(outputType));
+  if (!outputDesc->strides.empty()) {
+    tcg::Stride outputStrides;
+    for (const auto &stride : outputDesc->strides) {
+      if (stride.staticValue == mlir::ShapedType::kDynamic) {
+        outputStrides.appendDynamic();
+      } else {
+        outputStrides.append(stride.staticValue);
+      }
+    }
+    outputLayout = tcg::Layout(getShapeRef(outputType), outputStrides);
+  }
+
+  auto outputSource = TensorSourceAttr::get(
+      graphOp.getContext(), /*tensorId=*/-1, /*offset=*/0,
+      outputLayout.toString(), getDynamicValueMapping(outputLayout));
+  auto normalizedOutput = mlir::dyn_cast_if_present<TensorSourceAttr>(
+      outputSource.reshape(iterationShape));
+  if (!normalizedOutput) {
+    return graphOp.emitError(
+        "failed to map the output shape to the runtime iteration space");
+  }
+
+  const auto &shapeDesc = argLayout.tensorDescs[tensorDescIdx];
+  llvm::SmallVector<int32_t> dynamicShapeDims;
+  for (auto [dim, size] : llvm::enumerate(shapeDesc.staticShape)) {
+    if (size == TensorArgDesc::kDynamic) {
+      dynamicShapeDims.push_back(static_cast<int32_t>(dim));
+    }
+  }
+
+  argLayout.gridShape = iterationShape;
+  argLayout.gridShapeDimMapping.assign(argLayout.gridShape.size(), -1);
+  auto dynamicMapping = normalizedOutput.getDynamicValueMapping();
+  size_t dynamicShapeOrdinal = 0;
+  for (auto [dim, size] : llvm::enumerate(argLayout.gridShape)) {
+    if (size != TensorArgDesc::kDynamic) {
+      if (size < 0) {
+        return graphOp.emitError(
+            "runtime iteration-space dimensions must be non-negative");
+      }
+      continue;
+    }
+
+    int32_t sourceDynamicOrdinal =
+        dynamicMapping.empty() ? static_cast<int32_t>(dynamicShapeOrdinal)
+        : dynamicShapeOrdinal < dynamicMapping.size()
+            ? dynamicMapping[dynamicShapeOrdinal]
+            : -1;
+    if (sourceDynamicOrdinal < 0 ||
+        static_cast<size_t>(sourceDynamicOrdinal) >= dynamicShapeDims.size()) {
+      return graphOp.emitError()
+             << "failed to map dynamic iteration-space dimension " << dim
+             << " to the output tensor shape: mapping index "
+             << sourceDynamicOrdinal << ", output dynamic shape count "
+             << dynamicShapeDims.size();
+    }
+    argLayout.gridShapeDimMapping[dim] = dynamicShapeDims[sourceDynamicOrdinal];
+    ++dynamicShapeOrdinal;
+  }
+
+  argLayout.gridShapeTensorIdx = tensorDescIdx;
+  return mlir::success();
 }
 
 static mlir::FailureOr<std::string>
@@ -340,11 +517,32 @@ lowerTensorIRToCudaTile(ModuleOp module,
 
   CudaTileFrontendResult result;
   result.runtimeKernelName = getRuntimeKernelName(module);
-  result.argLayout = ::tensor_ir::extractKernelArgLayout(
-      *graph, options.pipelineOptions.tileSize,
-      options.pipelineOptions.uniformSignature);
+  result.argLayout =
+      ::tensor_ir::extractKernelArgLayout(*graph, options.pipelineOptions);
   result.module = OwningOpRef<ModuleOp>(module.clone());
-  if (failed(runTensorIRLowering(*result.module, options))) {
+
+  CudaTileFrontendOptions loweringOptions = options;
+  LogicalResult gridMetadataStatus = success();
+  if (options.pipelineOptions.codegenStrategy ==
+      CudaTileCodegenStrategy::LayoutPropagation) {
+    loweringOptions.onTensorIRReady = [&](ModuleOp analyzedModule) {
+      auto graphOps = analyzedModule.getOps<GraphOp>();
+      if (!llvm::hasSingleElement(graphOps)) {
+        analyzedModule.emitError(
+            "grid metadata requires exactly one TensorIR graph");
+        gridMetadataStatus = failure();
+      } else {
+        gridMetadataStatus = configureLayoutPropGridMetadata(
+            *graphOps.begin(), result.argLayout, options.pipelineOptions);
+      }
+      if (options.onTensorIRReady) {
+        options.onTensorIRReady(analyzedModule);
+      }
+    };
+  }
+
+  if (failed(runTensorIRLowering(*result.module, loweringOptions)) ||
+      failed(gridMetadataStatus)) {
     return failure();
   }
 
@@ -377,14 +575,33 @@ computeStaticGridSize(const CudaTileFrontendResult &result) {
   size_t numDims =
       std::min(result.argLayout.tileSizes.size(), gridShape.size());
   int64_t totalTiles = 1;
+  constexpr int64_t maxI32 = std::numeric_limits<int32_t>::max();
   for (size_t i = 0; i < numDims; ++i) {
     int64_t dimSize = gridShape[i];
     int32_t tileSize = result.argLayout.tileSizes[i];
-    if (tileSize > 0 && dimSize > 0) {
-      totalTiles *= llvm::divideCeil(dimSize, tileSize);
+    if (tileSize <= 0 || dimSize < 0) {
+      return gridSize;
     }
+    if (dimSize == 0) {
+      totalTiles = 0;
+      break;
+    }
+    int64_t tilesInDim =
+        llvm::divideCeil(dimSize, static_cast<int64_t>(tileSize));
+    if (tilesInDim > maxI32 / totalTiles) {
+      totalTiles = maxI32;
+      break;
+    }
+    totalTiles *= tilesInDim;
   }
-  gridSize[0] = static_cast<int32_t>(totalTiles);
+  if (result.argLayout.persistence == PersistenceMode::Static &&
+      result.argLayout.smCount > 0 && result.argLayout.occupancy > 0) {
+    int64_t persistentGridSize =
+        static_cast<int64_t>(result.argLayout.smCount) *
+        result.argLayout.occupancy;
+    totalTiles = std::min(totalTiles, persistentGridSize);
+  }
+  gridSize[0] = static_cast<int32_t>(std::min(totalTiles, maxI32));
   return gridSize;
 }
 

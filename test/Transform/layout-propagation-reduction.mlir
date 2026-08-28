@@ -52,6 +52,17 @@ nv_tensor_ir.graph @reduction_broadcast(
 
 // -----
 
+// CHECK-LABEL: @reduction_dynamic_outer_broadcast
+// CHECK: broadcast {{.*}} {layout = #nv_tensor_ir.reduction_source<"(?,32,(32)):(32,0,(1))", #nv_tensor_ir.tensor_source<0, 0, "(?,32):(32,1)", [0]>>}
+nv_tensor_ir.graph @reduction_dynamic_outer_broadcast(
+        %in0: tensor<?x32xf32> {nv_tensor_ir.stride = "(32,1)"}) -> (tensor<?x32xf32> {nv_tensor_ir.stride = "(32,1)"}) {
+    %reduce = reduce(%in0)<dimensions = [1], reduction_mode = <add>> : tensor<?x32xf32> -> tensor<?x1xf32>
+    %broadcast = broadcast %reduce : tensor<?x1xf32> -> tensor<?x32xf32>
+    results %broadcast : tensor<?x32xf32>
+}
+
+// -----
+
 //===----------------------------------------------------------------------===//
 // TransposeOp
 //===----------------------------------------------------------------------===//

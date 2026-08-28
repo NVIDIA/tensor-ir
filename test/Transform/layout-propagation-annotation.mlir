@@ -96,6 +96,36 @@ nv_tensor_ir.graph @broadcast_middle_dim(%in: tensor<4x1x8xf32> {nv_tensor_ir.st
 
 // -----
 
+// A dynamic broadcast extent is logical and does not consume a runtime value
+// from the static source tensor.
+// CHECK-LABEL: @broadcast_static_to_dynamic
+// CHECK: broadcast %{{.*}} {layout = #nv_tensor_ir.tensor_source<0, 0, "(?,32):(0,1)">}
+nv_tensor_ir.graph @broadcast_static_to_dynamic(
+    %scale: tensor<1x32xf32> {nv_tensor_ir.stride = "(32,1)"}
+) -> tensor<?x32xf32> {
+    %out = broadcast %scale : tensor<1x32xf32> -> tensor<?x32xf32>
+    results %out : tensor<?x32xf32>
+}
+
+// -----
+
+// Transpose must remap the source-backed dynamic dimension while leaving the
+// logical broadcast extent unmapped.
+// CHECK-LABEL: @dynamic_broadcast_then_transpose
+// CHECK: broadcast %{{.*}} {layout = #nv_tensor_ir.tensor_source<0, 0, "(?,?,32):(32,0,1)", [0]>}
+// CHECK: transpose %{{.*}} permutation = [1, 0, 2] {layout = #nv_tensor_ir.tensor_source<0, 0, "(?,?,32):(0,32,1)", [0]>}
+nv_tensor_ir.graph @dynamic_broadcast_then_transpose(
+    %input: tensor<?x1x32xf32> {nv_tensor_ir.stride = "(32,32,1)"}
+) -> tensor<?x?x32xf32> {
+    %broadcast = broadcast %input
+        : tensor<?x1x32xf32> -> tensor<?x?x32xf32>
+    %out = transpose %broadcast permutation = [1, 0, 2]
+        : tensor<?x?x32xf32> -> tensor<?x?x32xf32>
+    results %out : tensor<?x?x32xf32>
+}
+
+// -----
+
 //===----------------------------------------------------------------------===//
 // TransposeOp
 //===----------------------------------------------------------------------===//
@@ -226,6 +256,15 @@ nv_tensor_ir.graph @splat_1d(%val: f32) -> (tensor<16xf32>) {
 nv_tensor_ir.graph @splat_2d(%val: f32) -> (tensor<4x16xf32> {nv_tensor_ir.stride = "(1,4)"}) {
     %out = splat %val : tensor<4x16xf32>
     results %out : tensor<4x16xf32>
+}
+
+// -----
+
+// CHECK-LABEL: @splat_dynamic
+// CHECK: splat %{{.*}} {layout = #nv_tensor_ir.tensor_source<-1, 0, "(?,1):(0,0)">}
+nv_tensor_ir.graph @splat_dynamic(%val: f32) -> (tensor<?x1xf32>) {
+    %out = splat %val : tensor<?x1xf32>
+    results %out : tensor<?x1xf32>
 }
 
 // -----

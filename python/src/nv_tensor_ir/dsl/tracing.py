@@ -342,7 +342,6 @@ def _matmul_result_info(
         ),
         shape=shape,
         stride=_contiguous_stride(shape),
-        dynamic_shape=lhs_info.dynamic_shape,
     )
 
 

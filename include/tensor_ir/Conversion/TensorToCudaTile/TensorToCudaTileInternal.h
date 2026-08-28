@@ -124,10 +124,18 @@ verifyOpStateAttrs(Operation *op,
 /// `reductionTileSize` is the tile size for the contracting dimensions (used
 /// for reductions and matmuls). The actual shape of the reduction tile is
 /// set by a simple heuristic (evenly distribute between the dimensions).
+///
+/// `sourceBlock`, when set, is the TensorIR block to inspect while `initial`
+/// provides the block where root CUDA Tile IR should be emitted.
 FailureOr<DenseMap<Operation *, BlockStructure>>
 buildSkeleton(RewriterBase &rewriter, IterationSpace initial,
               const TypeConverter &typeConverter,
-              int64_t reductionTileSize = 128);
+              int64_t reductionTileSize = 128, Block *sourceBlock = nullptr);
+
+/// Set the insertion point at the logical end of a block, before the terminator
+/// when one is present.
+void setInsertionPointBeforeTerminatorOrToEnd(RewriterBase &rewriter,
+                                              Block *block);
 
 /// ----- Implemented in `EmitHelpers.cpp` -------------------------------------
 
@@ -165,6 +173,10 @@ cuda_tile::Signedness getSignedness(Type type);
 /// @param tensorSource The layout with the actual sizes and strides.
 TensorDescriptor applyLayout(OpBuilder &rewriter, const TensorDescriptor &desc,
                              TensorSourceAttr tensorSource);
+
+/// Create a partition view for a tensor descriptor and tile shape.
+Value createPartitionView(OpBuilder &rewriter, const TensorDescriptor &desc,
+                          ArrayRef<int64_t> tileShape);
 
 /// Emit tile load operation.
 /// @param desc The tensor descriptor (pointer, alignment, sizes, strides).

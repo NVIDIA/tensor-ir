@@ -7,6 +7,7 @@
 #define TENSOR_IR_COMPILER_CUDATILECOMPILER_H
 
 #include "tensor_ir/Compiler/Compiler.h"
+#include "tensor_ir/Compiler/CudaTile/CudaTileFrontend.h"
 #include "tensor_ir/Conversion/TensorToCudaTile/Options.h"
 #include "tensor_ir/Runtime/IRuntimeKernel.h"
 #include "tensor_ir/Support/Status.h"
@@ -88,6 +89,10 @@ struct IRDebugOptions {
 // CudaTileCompiler - Compiles TensorIR MLIR to CudaTile runtime kernels
 //===----------------------------------------------------------------------===//
 
+// Forward declaration so compileInternal() can reference CudaTileCompileOptions
+// before the class is fully defined below.
+class CudaTileCompileOptions;
+
 class CudaTileCompiler : public ICompiler {
 public:
   CudaTileCompiler() = default;
@@ -99,6 +104,15 @@ public:
   // changing the signature or semantics.
   bool canCompile(mlir::ModuleOp module,
                   const CompileOptions &options) const override;
+
+
+private:
+  static mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions
+  makePipelineOptions(const CudaTileCompileOptions &opts);
+
+  static mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions
+  makeFrontendOptions(const CudaTileCompileOptions &opts,
+                      const IRDebugOptions &debug);
 };
 
 //===----------------------------------------------------------------------===//
@@ -142,6 +156,7 @@ public:
   /// arch-conditional compute target; unavailable assemblers fall back to
   /// TileIR bytecode.
   CudaTileArtifactKind artifactKind = CudaTileArtifactKind::TileIR;
+
 
   CudaTileCompileOptions(SmTarget computeCapability_)
       : CompileOptions(computeCapability_, CompilerBackend::CudaTile) {}

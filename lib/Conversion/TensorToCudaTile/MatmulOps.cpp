@@ -159,8 +159,8 @@ public:
     {
       // Set the insertion point to the inner iteration space.
       RewriterBase::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToEnd(
-          blockStructure->iterationSpaces[0].insertionBlock);
+      setInsertionPointBeforeTerminatorOrToEnd(
+          rewriter, blockStructure->iterationSpaces[0].insertionBlock);
 
       // Reshape LHS input, if needed.
       if (mmaLhsShape != lhsTileShape) {

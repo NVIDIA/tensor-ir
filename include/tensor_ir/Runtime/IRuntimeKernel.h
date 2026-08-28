@@ -10,6 +10,7 @@
 #include "tensor_ir/Support/Status.h"
 
 #include <memory>
+#include <string>
 
 namespace tensor_ir::rt {
 

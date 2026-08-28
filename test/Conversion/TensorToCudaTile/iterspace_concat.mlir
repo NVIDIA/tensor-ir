@@ -160,9 +160,13 @@ nv_tensor_ir.graph @test_concat_nested(
 
 // -----
 
+// The middle dimension has extent one, so its stride never contributes to an
+// address. It carries the pitch that clears the inner dimensions rather than a
+// unit stride, which would otherwise collide with the genuinely contiguous
+// dimension of these column-major operands.
 // CHECK-LABEL: @test_concat_transpose_col_major
-// CHECK: make_tensor_view {{.*}}, shape = [8, 1, 8], strides = [8, 1, 1]
-// CHECK: make_tensor_view {{.*}}, shape = [8, 1, 8], strides = [1, 1, 8]
+// CHECK: make_tensor_view {{.*}}, shape = [8, 1, 8], strides = [8, 8, 1]
+// CHECK: make_tensor_view {{.*}}, shape = [8, 1, 8], strides = [1, 64, 8]
 // CHECK: make_tensor_view {{.*}}, shape = [8, 2, 8], strides = [1, 64, 8]
 // CHECK: store_view_tko weak
 nv_tensor_ir.graph @test_concat_transpose_col_major(

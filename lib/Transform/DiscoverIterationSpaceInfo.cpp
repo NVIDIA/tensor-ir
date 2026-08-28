@@ -280,6 +280,11 @@ void IterationSpaceDiscoverer::discoverIterSpacesAndTransitions() {
   graphOp->walk([&](IterationSpaceInfoInterface iterSpaceOp) {
     int32_t opIterSpaceId = iterSpaceOp.getIterSpaceId();
     for (Value operand : iterSpaceOp->getOperands()) {
+      // Convert is shape-preserving, so consumers of its result still require
+      // the source graph input in the consumer's iteration space.
+      while (auto convertOp = operand.getDefiningOp<ConvertOp>()) {
+        operand = convertOp.getInput();
+      }
       if (auto blockArg = dyn_cast<BlockArgument>(operand)) {
         inputIterSpaceIds[blockArg.getArgNumber()].insert(opIterSpaceId);
       }

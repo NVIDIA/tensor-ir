@@ -74,6 +74,7 @@ public:
       : name_(std::move(name)), funcName_(std::move(funcName)),
         cubin_(std::move(cubin)), bytecodeVersion_(bytecodeVersion) {}
 
+
   explicit CudaTileRuntimeKernel(std::string name) : name_(std::move(name)) {}
 
   Status initializeRuntimeState() const override;
@@ -89,7 +90,6 @@ public:
 
   bool hasDeviceCode() const { return !cubin_.empty(); }
 
-  // XLA integration contract: exposes the selected device artifact.
   llvm::ArrayRef<char> deviceCode() const { return cubin_; }
 
   bool hasTileIRBytecode() const {
@@ -101,6 +101,7 @@ public:
   const std::string &name() const override { return name_; }
 
   const std::string &funcName() const { return funcName_; }
+
 
   /// Set the argument packer strategy (static or dynamic shapes).
   /// Must be called after construction and before first launch.
@@ -128,6 +129,7 @@ private:
 
   mutable CUlibrary lib_ = nullptr;
   mutable CUkernel kernel_ = nullptr;
+
 
   /// Strategy for packing tensor operands into the flat kernel arg list.
   std::unique_ptr<RuntimeArgPacker> argPacker_;

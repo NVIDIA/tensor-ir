@@ -37,12 +37,15 @@ def TensorSourceAttr : TensorIRAttr<"TensorSource", "tensor_source",
 
     `layout` should be a valid string representation of a tcutegen::Layout.
 
-    `dynamicValueMapping` specifies the mapping from dynamic dimensions in the layout
-    to their corresponding runtime values. For a layout with N dynamic dimensions
-    (marked by `?` in either shape or strides), this must be a permutation of
-    [0, 1, ..., N-1], indicating which runtime argument provides each dynamic
-    value. The permutation allows flexible ordering when multiple tensors share
-    dynamic dimensions in different orders. Empty for tensors with static shapes.
+    `dynamicValueMapping` specifies the mapping from runtime-backed dynamic
+    dimensions in the layout to their corresponding runtime values. A dynamic
+    shape dimension with static zero stride is a logical broadcast extent and
+    does not consume a runtime value from this tensor. For a layout with N other
+    dynamic dimensions (marked by `?` in either shape or strides), this must be
+    a permutation of [0, 1, ..., N-1], indicating which runtime argument
+    provides each dynamic value. The permutation allows flexible ordering when
+    multiple tensors share dynamic dimensions in different orders. Empty for
+    tensors with no runtime-backed dynamic dimensions.
 
     Example: tensor_source<1, 0, "(?,?):(?,1)", [0, 1, 2]>
     - References block argument #1 (graph input index)

@@ -137,6 +137,7 @@ assembleWithExecutable(llvm::ArrayRef<char> bytecode, SmTarget target,
   return llvm::SmallVector<char, 0>(buffer.begin(), buffer.end());
 }
 
+
 bool isUnavailable(const Status &status) {
   return status.code() == StatusCode::kNotFound ||
          status.code() == StatusCode::kNotSupported;
