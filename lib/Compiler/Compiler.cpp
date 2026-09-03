@@ -7,13 +7,45 @@
 #include "tensor_ir/Registration/Registration.h"
 
 #include "mlir/IR/AsmState.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Parser/Parser.h"
 
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <memory>
 
 namespace mlir::nv_tensor_ir {
+
+namespace {
+
+void normalizeGraphName(mlir::Operation *operation) {
+  if (operation->getName().getStringRef() != "nv_tensor_ir.graph") {
+    return;
+  }
+  operation->setAttr("sym_name",
+                     mlir::StringAttr::get(operation->getContext(), "graph"));
+}
+
+} // namespace
+
+std::string calculateCacheKey(mlir::ModuleOp module,
+                              const CompileOptions &options) {
+  mlir::OwningOpRef<mlir::ModuleOp> normalizedModule = module.clone();
+  normalizedModule->walk(normalizeGraphName);
+
+  mlir::OpPrintingFlags flags;
+  // Generic form assigns numeric names to block arguments and SSA results,
+  // making input and output names irrelevant to the cache key.
+  flags.printGenericOpForm();
+
+  std::string key = "module-";
+  llvm::raw_string_ostream stream(key);
+  normalizedModule->print(stream, flags);
+  stream << '_' << options.toUniqueString();
+  stream.flush();
+  return key;
+}
 
 llvm::StringRef stringifyCompilerBackend(CompilerBackend backend) {
   switch (backend) {

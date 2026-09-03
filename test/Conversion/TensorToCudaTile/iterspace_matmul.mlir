@@ -213,7 +213,7 @@ nv_tensor_ir.graph @test_matmul_broadcast(
 // CHECK: %[[RHS2:.*]] = reshape %[[RHS]] : [[TILE_RHS]] -> tile<2x128x16xf32>
 // CHECK: %[[MMA:.*]] = mmaf %[[LHS2]], %[[RHS2]], %[[ACCUM]]
 // CHECK: %[[RESHAPE:.*]] = reshape %[[MMA]] : tile<2x64x16xf32> -> [[TILE_RS:tile<1x1x2x8x8x4x4xf32>]]
-// CHECK: %[[TRANS:.*]] = permute %[[RESHAPE]] [2, 4, 0, 3, 6, 1, 5] : [[TILE_RS]] -> [[TILE_TR:tile<2x8x1x8x4x1x4xf32>]]
+// CHECK: %[[TRANS:.*]] = permute %[[RESHAPE]] [2, 3, 0, 4, 5, 1, 6] : [[TILE_RS]] -> [[TILE_TR:tile<2x8x1x8x4x1x4xf32>]]
 // CHECK: %[[RESULT:.*]] = broadcast %[[TRANS]] : [[TILE_TR]] -> tile<2x8x1x8x4x2x4xf32>
 // CHECK: store_view_tko weak %[[RESULT]]
 

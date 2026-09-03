@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "tensor_ir/Reference/reference_node.h"
+#include "tensor_ir/Reference/ReferenceNode.h"
 
 #include "mlir/Support/LLVM.h"
 
 #include "llvm/ADT/ArrayRef.h"
 
-#include "constant_utils.h"
+#include "ConstantUtils.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>

@@ -80,3 +80,19 @@ nv_tensor_ir.graph @negative_reduce_customize(
       : tensor<128xf32> -> tensor<1xf32>
   results %out : tensor<1xf32>
 }
+
+// -----
+
+// Metadata-driven single-output lowering requires both entries to use the
+// normalized carrier shape, not merely to have one entry each.
+// expected-error @+1 {{single-output result metadata is not expressed in normalized carrier shape [8]}}
+nv_tensor_ir.graph @invalid_single_output_metadata_shape(
+    %arg0: tensor<8xf32>) -> (tensor<8xf32>)
+    attributes {tile_size = array<i32: 8>} {
+  %out = abs %arg0 : tensor<8xf32>
+  results %out attributes {
+    iteration_space = #nv_tensor_ir.tensor_source<0, 0, "(8):(1)">,
+    result_layouts = [#nv_tensor_ir.tensor_source<0, 0, "(4):(1)">],
+    result_views = [#nv_tensor_ir.tensor_source<1, 0, "(4):(1)">]
+  } : tensor<8xf32>
+}

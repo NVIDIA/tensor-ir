@@ -3,8 +3,8 @@
 
 #include "tensor_ir/Compiler/Compiler.h"
 #include "tensor_ir/Compiler/CudaTile/CudaTileCompiler.h"
-#include "tensor_ir/Reference/reference_graph.h"
-#include "tensor_ir/Reference/tensor_memory.h"
+#include "tensor_ir/Reference/ReferenceGraph.h"
+#include "tensor_ir/Reference/TensorMemory.h"
 #include "tensor_ir/Registration/Registration.h"
 #include "tensor_ir/Runtime/CudaTile/CudaTileRuntimeKernel.h"
 #include "tensor_ir/Support/CudaApi.h"

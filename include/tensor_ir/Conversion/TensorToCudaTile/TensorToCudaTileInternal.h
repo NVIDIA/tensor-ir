@@ -80,19 +80,19 @@ void registerMatmulPatterns(RewritePatternSet &patterns, ConversionState &state,
 
 /// Run the graph-level legality checks that the layout-propagation
 /// TensorIR-to-CudaTile conversion performs before invoking the dialect
-/// conversion driver. Verifies that the graph has a single output, an
-/// `iteration_space` attribute on the terminator, a valid `tile_size`
-/// attribute matching the iteration-space rank, and that the input/output
-/// tensor descriptors can be derived from the graph signature.
+/// conversion driver. Verifies that the graph has at least one output, an
+/// `iteration_space` attribute on the terminator, complete per-result metadata
+/// for multi-output graphs, a valid `tile_size` attribute matching the
+/// iteration-space rank and result projection constraints, and derivable
+/// input/output tensor descriptors.
 ///
 /// Preconditions: Phase 1 (graph analysis) and Phase 2 (tile selection) must
 /// have already run on the graph, so the relevant attributes are present.
 ///
 /// Returns `success()` when these graph-level checks pass. Returns `failure()`
-/// when the graph has multiple outputs, is missing the `iteration_space` or
-/// `tile_size` attribute, or the `tile_size` rank does not match the
-/// iteration-space rank; in every failure case a diagnostic is emitted on
-/// `graphOp`.
+/// when required metadata is missing or inconsistent, or when the selected
+/// tile violates the carrier/result mapping; in every failure case a
+/// diagnostic is emitted on `graphOp`.
 LogicalResult verifyGraphLevelLayoutPropLowerable(GraphOp graphOp);
 
 /// Verify the attribute-level legality that the per-op state update relies on:

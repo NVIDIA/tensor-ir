@@ -121,6 +121,9 @@ struct PackedWorkspace {
   size_t size = 0;
 };
 
+void checkCAPIResult(MlirLogicalResult result, llvm::StringRef api,
+                     const std::string &error);
+
 MlirModule validateModule(MlirModule module) {
   MlirOperation operation = mlirModuleGetOperation(module);
   MlirModule moduleFromOperation = mlirModuleFromOperation(operation);
@@ -128,6 +131,18 @@ MlirModule validateModule(MlirModule module) {
     throw nb::type_error("expected an MLIR builtin.module");
   }
   return moduleFromOperation;
+}
+
+std::string calculateCacheKey(MlirModule module,
+                              const CompileOptions &options) {
+  MlirTensorIRCudaTileCompileOptions cOptions = wrapCompileOptions(options);
+  std::string key;
+  std::string error;
+  checkCAPIResult(mlirTensorIRCalculateCacheKey(validateModule(module),
+                                                cOptions, appendStringRef, &key,
+                                                appendStringRef, &error),
+                  "mlirTensorIRCalculateCacheKey", error);
+  return key;
 }
 
 bool supportsDLPack(nb::handle value) {
@@ -414,8 +429,6 @@ public:
   PyProgram &operator=(PyProgram &&) = delete;
   ~PyProgram() { mlirTensorIRProgramDelete(program_); }
 
-  void destroy() { mlirTensorIRProgramDestroy(program_); }
-
   bool isDestroyed() const { return mlirTensorIRProgramIsDestroyed(program_); }
 
   bool isInitialized() const {
@@ -474,14 +487,6 @@ public:
                                                    &error),
                     "mlirTensorIRProgramGetBytecode", error);
     return nb::bytes(bytecode.data(), bytecode.size());
-  }
-
-  std::string repr() const {
-    if (isDestroyed()) {
-      return "Program(state='destroyed')";
-    }
-    return isInitialized() ? "Program(state='initialized')"
-                           : "Program(state='uninitialized')";
   }
 
 private:
@@ -568,7 +573,6 @@ NB_MODULE(_tensor_ir, m) {
       ;
 
   nb::class_<PyProgram>(m, "_Program")
-      .def("destroy", &PyProgram::destroy)
       .def("initialize", &PyProgram::initialize)
       .def("check_support", &PyProgram::checkSupport, nb::arg("args"))
       .def("query_workspace_size", &PyProgram::queryWorkspaceSize,
@@ -577,13 +581,16 @@ NB_MODULE(_tensor_ir, m) {
            nb::arg("workspace") = nb::none(), nb::arg("stream") = nb::none())
       .def("get_bytecode", &PyProgram::getBytecode)
       .def_prop_ro("is_destroyed", &PyProgram::isDestroyed)
-      .def_prop_ro("is_initialized", &PyProgram::isInitialized)
-      .def("__repr__", &PyProgram::repr);
+      .def_prop_ro("is_initialized", &PyProgram::isInitialized);
 
   m.def("_tensor_metadata_from_dlpack", &tensorMetadataFromDLPack,
         nb::arg("tensor"),
         "Return (shape, stride, dtype) metadata for a DLPack-compatible "
         "tensor.");
+
+  m.def("calculate_cache_key", &calculateCacheKey, nb::arg("module"),
+        nb::arg("options"),
+        "Return the unhashed MLIR module-to-kernel cache key.");
 
   m.def(
       "compile",

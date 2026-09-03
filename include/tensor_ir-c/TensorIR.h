@@ -252,6 +252,15 @@ typedef struct MlirTensorIRPackedArgs {
 // Compiled program API.
 //===----------------------------------------------------------------------===//
 
+/// Builds the unhashed cache key for compiling `module` with `options`.
+///
+/// The key is forwarded to `keyCallback`. On failure, the key callback is not
+/// invoked and the error is optionally forwarded to `errorCallback`.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRCalculateCacheKey(
+    MlirModule module, MlirTensorIRCudaTileCompileOptions options,
+    MlirStringCallback keyCallback, void *keyUserData,
+    MlirStringCallback errorCallback, void *errorUserData);
+
 /// An opaque handle to an owning compiled TensorIR program.
 ///
 /// Handles returned by `mlirTensorIRProgramCompile` must eventually be passed

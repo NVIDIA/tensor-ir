@@ -68,6 +68,18 @@ def TensorIR_Dialect : Dialect {
       return "iteration_space";
     }
 
+    /// Per-result terminal layouts expressed in the normalized root carrier.
+    /// The array is ordered like the operands of ResultsOp.
+    static StringRef getResultLayoutsAttrName() {
+      return "result_layouts";
+    }
+
+    /// Per-result physical output views expressed in the normalized root
+    /// carrier. The array is ordered like the operands of ResultsOp.
+    static StringRef getResultViewsAttrName() {
+      return "result_views";
+    }
+
     static StringRef getLayoutAttrName() {
       return "layout";
     }

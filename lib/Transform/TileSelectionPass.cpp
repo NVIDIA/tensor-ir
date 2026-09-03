@@ -55,6 +55,7 @@
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Dialect/TensorIRAttrs.h"
 #include "tensor_ir/Transform/Passes.h"
+#include "tensor_ir/Utils/Utils.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 
@@ -163,6 +164,28 @@ struct TileSelectionPass
             << selectedTile.size() << " vs iteration space rank "
             << iterSpaceShape.size() << ")";
         return signalPassFailure();
+      }
+
+      auto fixedTileSizes =
+          deriveResultFixedTileSizes(graphOp.getBody()->getTerminator());
+      if (failed(fixedTileSizes)) {
+        return signalPassFailure();
+      }
+      if (!fixedTileSizes->empty() &&
+          fixedTileSizes->size() != iterSpaceShape.size()) {
+        graphOp.emitError()
+            << "result_views rank " << fixedTileSizes->size()
+            << " does not match iteration space rank " << iterSpaceShape.size();
+        return signalPassFailure();
+      }
+      for (auto [dim, fixedSize] : llvm::enumerate(*fixedTileSizes)) {
+        if (fixedSize != 0 && selectedTile[dim] != fixedSize) {
+          graphOp.emitError()
+              << "Selected tile " << vectorToString(selectedTile)
+              << " partitions result-projected iteration-space dimension "
+              << dim << "; expected full tile size " << fixedSize;
+          return signalPassFailure();
+        }
       }
 
       // Skip per-dim validation when the iteration space has dynamic dims

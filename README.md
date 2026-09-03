@@ -319,6 +319,30 @@ compiled = tir.compile(
 compiled.run(a, b, bias, residual, output=output)
 ```
 
+To reuse compiled programs across equivalent DSL compilations, create a
+`ProgramCache` and pass it to `tir.compile`. The cache is explicit: omitting
+`program_cache` disables cache lookup and insertion.
+
+```python
+program_cache = tir.ProgramCache()
+compiled = tir.compile(
+    fused_gemm_epilogue,
+    a,
+    b,
+    bias,
+    residual,
+    output=output,
+    tile_sizes=(64, 64),
+    program_cache=program_cache,
+)
+# Alternatively, use tir.calculate_cache_key(compiled.module, ...) to get the
+# cache key used for this compilation when managing the cache manually.
+
+# ... reuse program_cache in later tir.compile calls ...
+
+program_cache.flush()
+```
+
 The Python DSL provides a simple built-in profiling utility. Run the compiled
 kernel using the `run_profile` method, and it will print the kernel
 execution-time statistics after the run completes.

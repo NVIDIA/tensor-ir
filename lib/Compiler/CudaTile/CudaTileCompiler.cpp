@@ -329,8 +329,11 @@ std::string CudaTileCompileOptions::toStringDerived() const {
 }
 
 std::string CudaTileCompileOptions::toUniqueStringDerived() const {
-  std::string s = llvm::join_items("_", std::to_string(ctaCount),
-                                   std::to_string(warpCount));
+  std::string s =
+      llvm::join_items("_", std::to_string(ctaCount), std::to_string(warpCount),
+                       std::to_string(uniformSignature),
+                       std::to_string(static_cast<int32_t>(codegenStrategy)),
+                       std::to_string(maxTileCandidates));
   if (!tileSize.empty()) {
     s += "_tile";
     for (size_t i = 0; i < tileSize.size(); ++i) {

@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#pragma once
+#ifndef TENSOR_IR_REFERENCE_REFERENCEGRAPH_H
+#define TENSOR_IR_REFERENCE_REFERENCEGRAPH_H
 
-#include "tensor_ir/Reference/reference_node.h"
-#include "tensor_ir/Reference/simplified_tensor.h"
+#include "tensor_ir/Reference/ReferenceNode.h"
+#include "tensor_ir/Reference/SimplifiedTensor.h"
 #include "tensor_ir/Support/Status.h"
 
 #include "mlir/IR/BuiltinOps.h"
@@ -413,3 +414,5 @@ private:
 };
 
 } // namespace mlir::nv_tensor_ir::reference
+
+#endif // TENSOR_IR_REFERENCE_REFERENCEGRAPH_H

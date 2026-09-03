@@ -4,6 +4,7 @@
 """CUDA Tile backend support for the TensorIR tracing DSL."""
 
 from dataclasses import dataclass, field, replace
+from hashlib import sha256
 
 from nv_tensor_ir._mlir.dialects import nv_tensor_ir
 
@@ -12,6 +13,7 @@ from .dsl import (
     CodegenStrategy,
     CompileOptions,
     CompiledKernel,
+    ProgramCache,
     _register_backend_impl,
 )
 from .module_builder import TensorInfoOverrides
@@ -119,6 +121,33 @@ def _dynamic_ir_metadata_overrides(graph: TraceGraph) -> dict[int, TensorInfo]:
     return overrides
 
 
+def _calculate_cache_key(
+    module: object,
+    options: CompileOptions | None = None,
+    *,
+    tile_sizes: tuple[int, ...] = (),
+) -> str:
+    """Return the SHA-256 cache key for a CUDA Tile MLIR module and options."""
+    options = _resolve_compile_options(options, tile_sizes)
+    module_key = "cuda_tile_backend-" + nv_tensor_ir.calculate_cache_key(
+        module, options
+    )
+    return sha256(module_key.encode(encoding="utf-8")).hexdigest()
+
+
+def _resolve_compile_options(
+    options: CompileOptions | None,
+    tile_sizes: tuple[int, ...],
+) -> CompileOptions:
+    if options is not None and tile_sizes:
+        raise TypeError("Pass either options= or tile_sizes, not both")
+    if options is None:
+        options = CompileOptions()
+    if tile_sizes:
+        options.tile_sizes = list(tile_sizes)
+    return options
+
+
 def compile_cuda_tile(
     module: object,
     context: object,
@@ -126,27 +155,34 @@ def compile_cuda_tile(
     options: CompileOptions | None = None,
     tile_sizes: tuple[int, ...] = (),
     dynamic_shape: bool = False,
+    program_cache: ProgramCache | None = None,
 ) -> CudaTileCompiledKernel:
     """Compile a traced kernel with the CUDA Tile backend."""
-    if options is not None and tile_sizes:
-        raise TypeError("Pass either options= or tile_sizes, not both")
+    options = _resolve_compile_options(options, tile_sizes)
     if dynamic_shape and any(node.kind == NodeKind.MATMUL for node in graph.nodes):
-        codegen_strategy = (
-            options.codegen_strategy
-            if options is not None
-            else CodegenStrategy.LayoutPropagation
-        )
+        codegen_strategy = options.codegen_strategy
         if codegen_strategy != CodegenStrategy.AffineMap:
             raise ValueError(
                 "Dynamic matmul requires CodegenStrategy.AffineMap; "
                 "layout propagation does not support dynamic matmul"
             )
-    if options is not None:
+
+    if program_cache is None:
         program = nv_tensor_ir.compile(module, options=options)
     else:
-        program = nv_tensor_ir.compile(module, tile_sizes=tile_sizes)
+        cache_key = _calculate_cache_key(module, options=options)
+        program = program_cache._get(cache_key)
+        if program is None:
+            program = nv_tensor_ir.compile(module, options=options)
+            program_cache._put(cache_key, program)
+
     return CudaTileCompiledKernel(
-        program, module, graph, len(graph.input_ids), len(graph.output_ref_ids), context
+        program,
+        module,
+        graph,
+        len(graph.input_ids),
+        len(graph.output_ref_ids),
+        context,
     )
 
 
@@ -154,6 +190,7 @@ _register_backend_impl(
     "cuda_tile",
     BackendImpl(
         prepare_tensor_infos=prepare_tensor_infos,
+        calculate_cache_key=_calculate_cache_key,
         compile=compile_cuda_tile,
     ),
 )

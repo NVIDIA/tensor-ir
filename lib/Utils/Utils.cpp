@@ -217,6 +217,87 @@ Attribute getLayoutSourceAttr(Value value) {
   return value.getDefiningOp()->getAttr(TensorIRDialect::getLayoutAttrName());
 }
 
+FailureOr<SmallVector<LayoutSourceAttrInterface>>
+getResultLayouts(Operation *resultsOp) {
+  SmallVector<LayoutSourceAttrInterface> result;
+  auto layouts = resultsOp->getAttrOfType<ArrayAttr>(
+      TensorIRDialect::getResultLayoutsAttrName());
+  if (!layouts) {
+    return result;
+  }
+
+  result.reserve(layouts.size());
+  for (auto [index, attr] : llvm::enumerate(layouts)) {
+    auto layout = dyn_cast<LayoutSourceAttrInterface>(attr);
+    if (!layout) {
+      resultsOp->emitError()
+          << "result_layouts[" << index
+          << "] must implement LayoutSourceAttrInterface, but got " << attr;
+      return failure();
+    }
+    result.push_back(layout);
+  }
+  return result;
+}
+
+FailureOr<SmallVector<TensorSourceAttr>> getResultViews(Operation *resultsOp) {
+  SmallVector<TensorSourceAttr> result;
+  auto views = resultsOp->getAttrOfType<ArrayAttr>(
+      TensorIRDialect::getResultViewsAttrName());
+  if (!views) {
+    return result;
+  }
+
+  result.reserve(views.size());
+  for (auto [index, attr] : llvm::enumerate(views)) {
+    auto view = dyn_cast<TensorSourceAttr>(attr);
+    if (!view) {
+      resultsOp->emitError()
+          << "result_views[" << index
+          << "] must be a TensorSourceAttr, but got " << attr;
+      return failure();
+    }
+    result.push_back(view);
+  }
+  return result;
+}
+
+FailureOr<SmallVector<int64_t>>
+deriveResultFixedTileSizes(Operation *resultsOp) {
+  MLIR_ASSIGN_OR_RETURN(auto views, getResultViews(resultsOp));
+  if (views.empty()) {
+    return SmallVector<int64_t>{};
+  }
+
+  SmallVector<int64_t> carrierShape = views.front().getShape();
+  SmallVector<int64_t> result(carrierShape.size(), 0);
+  for (auto [resultIndex, view] : llvm::enumerate(views)) {
+    if (view.getShape() != carrierShape) {
+      resultsOp->emitError()
+          << "result_views[" << resultIndex << "] has shape "
+          << vectorToString(view.getShape()) << ", expected carrier shape "
+          << vectorToString(carrierShape);
+      return failure();
+    }
+
+    auto layout = view.getCuteLayout();
+    for (size_t dim = 0; dim < carrierShape.size(); ++dim) {
+      auto stride = tcutegen::get(layout.stride(), dim);
+      if (tcutegen::is_static(stride) && stride.as_int() == 0 &&
+          carrierShape[dim] != 1) {
+        if (ShapedType::isDynamic(carrierShape[dim])) {
+          resultsOp->emitError()
+              << "dynamic projected result dimension " << dim
+              << " is not yet supported for multi-output layout propagation";
+          return failure();
+        }
+        result[dim] = carrierShape[dim];
+      }
+    }
+  }
+  return result;
+}
+
 /// Get block argument index offsets for a dynamic layout.
 SmallVector<int32_t> getDynamicValueMapping(const tcg::Layout &layout) {
   size_t dynamicCount = 0;

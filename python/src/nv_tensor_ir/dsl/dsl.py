@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import re
 from collections.abc import Callable
@@ -19,6 +20,28 @@ CompileOptions = nv_tensor_ir.CompileOptions
 CodegenStrategy = nv_tensor_ir.CodegenStrategy
 BytecodeVersion = nv_tensor_ir.BytecodeVersion
 CudaTileArtifactKind = nv_tensor_ir.CudaTileArtifactKind
+
+
+class ProgramCache:
+    """Explicit cache for compiled TensorIR programs.
+
+    Pass an instance to :func:`compile` or :func:`compile_traced` to reuse
+    programs compiled by the selected backend.
+    """
+
+    def __init__(self) -> None:
+        self._programs: dict[str, nv_tensor_ir.Program] = {}
+
+    def flush(self) -> None:
+        """Remove all cached programs without invalidating returned programs."""
+        self._programs.clear()
+
+    def _get(self, key: str) -> nv_tensor_ir.Program | None:
+        program = self._programs.get(key)
+        return copy.copy(program) if program is not None else None
+
+    def _put(self, key: str, program: nv_tensor_ir.Program) -> None:
+        self._programs[key] = copy.copy(program)
 
 
 class CompiledKernel:
@@ -61,6 +84,7 @@ class BackendImpl:
     """Backend hooks invoked around the shared MLIR module builder."""
 
     prepare_tensor_infos: Callable[..., TensorInfoOverrides]
+    calculate_cache_key: Callable[..., str]
     compile: Callable[..., CompiledKernel]
 
 
@@ -74,6 +98,19 @@ def _register_backend_impl(backend: str, impl: BackendImpl) -> None:
     if backend in _BACKEND_IMPLS:
         raise ValueError(f"TensorIR DSL backend '{backend}' is already registered")
     _BACKEND_IMPLS[backend] = impl
+
+
+def _get_backend_impl(backend: str) -> BackendImpl:
+    """Return the implementation registered for ``backend``."""
+    if not isinstance(backend, str):
+        raise TypeError("backend must be a string")
+    try:
+        return _BACKEND_IMPLS[backend]
+    except KeyError as exc:
+        available = ", ".join(sorted(_BACKEND_IMPLS))
+        raise ValueError(
+            f"Unsupported TensorIR DSL backend '{backend}'; available: {available}"
+        ) from exc
 
 
 def kernel(
@@ -146,6 +183,21 @@ def trace(
     return _trace(kernel_func, *inputs, output=output)
 
 
+def calculate_cache_key(
+    module: object,
+    options: CompileOptions | None = None,
+    *,
+    tile_sizes: tuple[int, ...] = (),
+    backend: str = "cuda_tile",
+) -> str:
+    """Return the cache key for an MLIR module and selected backend options."""
+    return _get_backend_impl(backend).calculate_cache_key(
+        module,
+        options=options,
+        tile_sizes=tile_sizes,
+    )
+
+
 def compile_traced(
     graph: TraceGraph,
     *,
@@ -154,19 +206,14 @@ def compile_traced(
     name: str = "kernel_traced",
     dynamic_shape: bool = False,
     backend: str = "cuda_tile",
+    program_cache: ProgramCache | None = None,
 ) -> CompiledKernel:
     """Compile a concrete TensorIR trace with the selected backend."""
     if not isinstance(graph, TraceGraph):
         raise TypeError("tir.compile_traced expects a graph returned by tir.trace")
-    if not isinstance(backend, str):
-        raise TypeError("backend must be a string")
-    try:
-        backend_impl = _BACKEND_IMPLS[backend]
-    except KeyError as exc:
-        available = ", ".join(sorted(_BACKEND_IMPLS))
-        raise ValueError(
-            f"Unsupported TensorIR DSL backend '{backend}'; available: {available}"
-        ) from exc
+    if program_cache is not None and not isinstance(program_cache, ProgramCache):
+        raise TypeError("program_cache must be a ProgramCache or None")
+    backend_impl = _get_backend_impl(backend)
     tensor_info_overrides = backend_impl.prepare_tensor_infos(
         graph,
         dynamic_shape=dynamic_shape,
@@ -183,6 +230,7 @@ def compile_traced(
         options=options,
         tile_sizes=tile_sizes,
         dynamic_shape=dynamic_shape,
+        program_cache=program_cache,
     )
 
 
@@ -195,10 +243,13 @@ def compile(
     name: str | None = None,
     dynamic_shape: bool = False,
     backend: str = "cuda_tile",
+    program_cache: ProgramCache | None = None,
 ) -> CompiledKernel:
     """Compile a TensorIR DSL kernel with the selected registered backend."""
     if not isinstance(kernel_func, KernelFunction):
         raise TypeError("tir.compile expects a function decorated with @tir.kernel")
+    if program_cache is not None and not isinstance(program_cache, ProgramCache):
+        raise TypeError("program_cache must be a ProgramCache or None")
     raw_func = _unwrap(kernel_func.func)
     graph = trace(kernel_func, *inputs, output=output)
     graph_name = name or _mangle_name(raw_func.__name__)
@@ -209,6 +260,7 @@ def compile(
         name=graph_name,
         dynamic_shape=dynamic_shape,
         backend=backend,
+        program_cache=program_cache,
     )
 
 

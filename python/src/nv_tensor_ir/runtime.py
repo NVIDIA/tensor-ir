@@ -70,14 +70,18 @@ class Program:
 
     @property
     def is_destroyed(self) -> bool:
-        return self._native_program.is_destroyed
+        return self._native_program is None or self._native_program.is_destroyed
 
     @property
     def is_initialized(self) -> bool:
-        return self._native_program.is_initialized
+        return self._native_program is not None and self._native_program.is_initialized
 
     def __repr__(self) -> str:
-        return repr(self._native_program)
+        if self.is_destroyed:
+            return "Program(state='destroyed')"
+        if self.is_initialized:
+            return "Program(state='initialized')"
+        return "Program(state='uninitialized')"
 
     def __enter__(self):
         return self
@@ -97,7 +101,7 @@ class Program:
         Calling ``destroy`` more than once is allowed. Other methods raise after
         the program has been destroyed.
         """
-        self._native_program.destroy()
+        self._native_program = None
 
     def initialize(self) -> None:
         """Initialize host-side runtime state for this program."""

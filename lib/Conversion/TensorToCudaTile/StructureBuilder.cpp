@@ -759,8 +759,9 @@ buildSkeleton(RewriterBase &rewriter, IterationSpace initial,
       TensorIRDialect::getIterationSpaceAttrName());
   extractTensorSources(layout, initial.loadedTiles);
 
-  // Add the root iteration space to the result. The results op has a single
-  // operand, which feeds the root iteration space (space 0).
+  // Add the root iteration space to the result. Every graph result operand
+  // feeds the same root iteration space (space 0); operation-local reductions,
+  // matmuls, and concatenations own their child spaces separately.
   BlockStructure root{{std::move(initial)},
                       /*yieldValues=*/{},
                       /*iterationSpaceIndexForOperand=*/{}};

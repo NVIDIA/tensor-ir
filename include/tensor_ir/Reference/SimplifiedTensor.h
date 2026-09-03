@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#pragma once
+#ifndef TENSOR_IR_REFERENCE_SIMPLIFIEDTENSOR_H
+#define TENSOR_IR_REFERENCE_SIMPLIFIEDTENSOR_H
 
 #include "tensor_ir/Support/Status.h"
 
@@ -211,3 +212,5 @@ std::shared_ptr<SimplifiedTensor> createTensor(const std::string &name,
                                                DataType dtype);
 
 } // namespace mlir::nv_tensor_ir::reference
+
+#endif // TENSOR_IR_REFERENCE_SIMPLIFIEDTENSOR_H

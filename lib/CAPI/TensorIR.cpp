@@ -363,6 +363,30 @@ uint32_t mlirTensorIRBytecodeVersionHash(MlirTensorIRBytecodeVersion version) {
 
 // Program C API
 
+MlirLogicalResult mlirTensorIRCalculateCacheKey(
+    MlirModule module, MlirTensorIRCudaTileCompileOptions options,
+    MlirStringCallback keyCallback, void *keyUserData,
+    MlirStringCallback errorCallback, void *errorUserData) {
+  if (mlirModuleIsNull(module)) {
+    return reportStatus(Status::InvalidArgument("module must not be null"),
+                        errorCallback, errorUserData);
+  }
+  if (!keyCallback) {
+    return reportStatus(Status::InvalidArgument("keyCallback must not be null"),
+                        errorCallback, errorUserData);
+  }
+  StatusOr<CudaTileCompileOptions> cudaTileOptions =
+      makeCudaTileCompileOptions(options);
+  if (!cudaTileOptions.ok()) {
+    return reportStatus(cudaTileOptions.status(), errorCallback, errorUserData);
+  }
+
+  std::string key =
+      mlir::nv_tensor_ir::calculateCacheKey(unwrap(module), *cudaTileOptions);
+  keyCallback(mlirStringRefCreate(key.data(), key.size()), keyUserData);
+  return mlirLogicalResultSuccess();
+}
+
 MlirTensorIRProgram mlirTensorIRProgramCompile(
     MlirModule module, MlirTensorIRCudaTileCompileOptions options,
     MlirStringCallback errorCallback, void *errorUserData) {

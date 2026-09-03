@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "tensor_ir/Reference/simplified_tensor.h"
+#include "tensor_ir/Reference/SimplifiedTensor.h"
 
-#include "tensor_ir/Reference/tensor_memory.h"
+#include "tensor_ir/Reference/TensorMemory.h"
 
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "constant_utils.h"
+#include "ConstantUtils.h"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>

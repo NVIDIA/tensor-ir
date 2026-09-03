@@ -135,7 +135,7 @@ def test_program_delegates_state_and_lifecycle() -> None:
     program.destroy()
     assert repr(program) == "Program(state='destroyed')"
     assert program.is_destroyed
-    assert native_program.destroy_calls == 1
+    assert program._native_program is None
 
 
 def test_program_check_support_and_bytecode_delegate_to_native() -> None:

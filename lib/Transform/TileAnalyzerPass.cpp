@@ -165,8 +165,6 @@ static void collectSourceInfo(LayoutSourceAttrInterface source,
 /// The shape comes from the common iteration space; strides are extracted
 /// per-source so the tile heuristic can evaluate coalescing for each input.
 ///
-/// TODO: Multiple output support when available in the layout attribute.
-///
 /// Returns failure if no "iteration_space" attributes are found (Phase 1 was
 /// not run, or LayoutPropagationNormalizationPass was not run).
 FailureOr<IterationSpaceInfo> extractIterationSpace(GraphOp graphOp) {
@@ -187,7 +185,6 @@ FailureOr<IterationSpaceInfo> extractIterationSpace(GraphOp graphOp) {
 
   auto sourceAttr = dyn_cast<LayoutSourceAttrInterface>(iterSpaceAttr);
   if (!sourceAttr) {
-    /// TODO: Multiple output support when available in the layout attribute.
     return graphOp.emitError(
         "\"iteration_space\" attribute must be a layout source attribute");
   }
@@ -196,6 +193,31 @@ FailureOr<IterationSpaceInfo> extractIterationSpace(GraphOp graphOp) {
 
   SmallVector<TensorSourceAttr> leafSources;
   collectSourceInfo(sourceAttr, leafSources, info.fixedTileDims);
+  MLIR_ASSIGN_OR_RETURN(auto resultFixedTileSizes,
+                        deriveResultFixedTileSizes(terminator));
+  if (!resultFixedTileSizes.empty() &&
+      resultFixedTileSizes.size() != sourceAttr.getShape().size()) {
+    return graphOp.emitError()
+           << "result_views rank " << resultFixedTileSizes.size()
+           << " does not match iteration space rank "
+           << sourceAttr.getShape().size();
+  }
+  for (auto [dim, size] : llvm::enumerate(resultFixedTileSizes)) {
+    if (size != 0) {
+      auto existing = info.fixedTileDims.find(dim);
+      if (existing != info.fixedTileDims.end() && existing->second != size) {
+        return graphOp.emitError()
+               << "iteration-space dimension " << dim
+               << " has incompatible tile requirements: size "
+               << existing->second
+               << " for an operation-local iteration space and full size "
+               << size
+               << " for a projected graph result; split the results "
+                  "into multiple TensorIR graphs";
+      }
+      info.fixedTileDims[dim] = size;
+    }
+  }
   // Filter out constant/splat sources (tensorId < 0) — they don't correspond
   // to graph arguments.
   llvm::erase_if(leafSources,
@@ -226,48 +248,69 @@ FailureOr<IterationSpaceInfo> extractIterationSpace(GraphOp graphOp) {
     return failure();
   }
 
-  // The "iteration_space" attribute contains only input layouts.  Derive
-  // output strides from the graph's result stride attributes (which may be
-  // explicitly non-contiguous, e.g. nv_tensor_ir.stride="(8,2)") and reshape
-  // them into the iteration_space coordinate system — same approach as
-  // codegen in TensorToCudaTile.cpp.
-  auto resTypes = graphOp.getResultTypes();
-  auto resultDescriptors = getTensorDescriptors(graphOp.getResultTypes(),
-                                                graphOp.getAllResultAttrs());
-  if (failed(resultDescriptors)) {
-    terminator->emitError(
-        "Failed to get tensor descriptors for output tensors");
-    return failure();
+  // The "iteration_space" attribute contains only input layouts. Multi-output
+  // normalization records every physical output in root-carrier coordinates,
+  // so add all of them to coalescing analysis. Keep the legacy result-0 path
+  // for the single-output representation, which intentionally has no
+  // result_views attribute.
+  MLIR_ASSIGN_OR_RETURN(auto resultViews, getResultViews(terminator));
+  if (!resultViews.empty()) {
+    for (TensorSourceAttr view : resultViews) {
+      MLIR_ASSIGN_OR_RETURN(auto elemSize,
+                            getElementSizeBytesForSource(graphOp, view));
+      MLIR_ASSIGN_OR_RETURN(auto shapeAndStrides,
+                            extractShapeAndStridesFromLayout(view, graphOp));
+      auto [shape, strides] = std::move(shapeAndStrides);
+      if (shape != info.shape) {
+        return graphOp.emitError()
+               << "result view shape " << vectorToString(shape)
+               << " does not match iteration space "
+               << vectorToString(info.shape);
+      }
+      info.allStrides.push_back(std::move(strides));
+      info.allElementSizeBytes.push_back(elemSize);
+    }
   }
 
-  if (!resTypes.empty() && !resultDescriptors->empty()) {
-    if (auto tensorType = dyn_cast<TensorType>(resTypes[0])) {
-      unsigned bits = tensorType.getElementType().getIntOrFloatBitWidth();
-      DimSize outputElemBytes =
-          static_cast<DimSize>(std::max(1u, bits / CHAR_BIT));
+  if (resultViews.empty()) {
+    auto resTypes = graphOp.getResultTypes();
+    auto resultDescriptors = getTensorDescriptors(graphOp.getResultTypes(),
+                                                  graphOp.getAllResultAttrs());
+    if (failed(resultDescriptors)) {
+      terminator->emitError(
+          "Failed to get tensor descriptors for output tensors");
+      return failure();
+    }
 
-      tcg::Layout outputLayout(getShapeRef(tensorType));
-      auto &explicitStrides = (*resultDescriptors)[0].strides;
-      if (!explicitStrides.empty()) {
-        tcg::Stride outputStrides;
-        for (auto stride : explicitStrides) {
-          outputStrides.append(stride.staticValue);
+    if (!resTypes.empty() && !resultDescriptors->empty()) {
+      if (auto tensorType = dyn_cast<TensorType>(resTypes[0])) {
+        unsigned bits = tensorType.getElementType().getIntOrFloatBitWidth();
+        DimSize outputElemBytes =
+            static_cast<DimSize>(std::max(1u, bits / CHAR_BIT));
+
+        tcg::Layout outputLayout(getShapeRef(tensorType));
+        auto &explicitStrides = (*resultDescriptors)[0].strides;
+        if (!explicitStrides.empty()) {
+          tcg::Stride outputStrides;
+          for (auto stride : explicitStrides) {
+            outputStrides.append(stride.staticValue);
+          }
+          outputLayout = tcg::Layout(getShapeRef(tensorType), outputStrides);
         }
-        outputLayout = tcg::Layout(getShapeRef(tensorType), outputStrides);
-      }
-      auto outputSource =
-          TensorSourceAttr::get(graphOp.getContext(), /*tensorId=*/-1,
-                                /*offset=*/0, outputLayout.toString(),
-                                getDynamicValueMapping(outputLayout));
-      auto reshaped =
-          dyn_cast_or_null<TensorSourceAttr>(outputSource.reshape(info.shape));
-      if (reshaped) {
-        MLIR_ASSIGN_OR_RETURN(
-            auto shapeAndStrides,
-            extractShapeAndStridesFromLayout(reshaped, graphOp));
-        auto [shape, strides] = std::move(shapeAndStrides);
-        info.allStrides.push_back(std::move(strides));
-        info.allElementSizeBytes.push_back(outputElemBytes);
+        auto outputSource =
+            TensorSourceAttr::get(graphOp.getContext(), /*tensorId=*/-1,
+                                  /*offset=*/0, outputLayout.toString(),
+                                  getDynamicValueMapping(outputLayout));
+        auto reshaped = dyn_cast_or_null<TensorSourceAttr>(
+            outputSource.reshape(info.shape));
+        if (reshaped) {
+          MLIR_ASSIGN_OR_RETURN(
+              auto shapeAndStrides,
+              extractShapeAndStridesFromLayout(reshaped, graphOp));
+          auto [shape, strides] = std::move(shapeAndStrides);
+          info.allStrides.push_back(std::move(strides));
+          info.allElementSizeBytes.push_back(outputElemBytes);
+        }
       }
     }
   }

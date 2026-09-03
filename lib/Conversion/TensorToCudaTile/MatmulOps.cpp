@@ -230,7 +230,7 @@ private:
       if (type != other.type) {
         return static_cast<int>(type) < static_cast<int>(other.type);
       }
-      return stride < other.stride;
+      return stride > other.stride;
     }
   };
 

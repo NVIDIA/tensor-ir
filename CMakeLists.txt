@@ -4,7 +4,7 @@ if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
 endif()
 
-project(TensorIRCompiler VERSION 0.1.1 LANGUAGES C CXX)
+project(TensorIRCompiler VERSION 0.1.2 LANGUAGES C CXX)
 
 # ==============================================================================
 # Project Options

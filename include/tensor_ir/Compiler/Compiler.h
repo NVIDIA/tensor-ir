@@ -14,8 +14,17 @@
 #include "llvm/ADT/StringRef.h"
 
 #include <memory>
+#include <string>
 
 namespace mlir::nv_tensor_ir {
+
+/// Builds the unhashed cache key for compiling an MLIR module into a kernel.
+///
+/// Graph symbols and SSA names are normalized on a clone before printing. The
+/// original module remains unchanged, and names that do not affect generated
+/// code do not prevent otherwise equivalent modules from sharing a kernel.
+std::string calculateCacheKey(mlir::ModuleOp module,
+                              const CompileOptions &options);
 
 //===----------------------------------------------------------------------===//
 // ICompiler - Interface for compiling MLIR to IRuntimeKernel

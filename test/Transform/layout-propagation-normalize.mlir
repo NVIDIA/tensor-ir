@@ -566,7 +566,7 @@ nv_tensor_ir.graph @normalize_matmul_output_defines_with_batch(
 // -----
 
 // CHECK-LABEL: @normalize_matmul_output_defines_no_batch
-// CHECK: results {{.*}} {iteration_space = #nv_tensor_ir.matmul_source<"(4,4,8,8,32):(128,32,4096,512,1)", 1, 64, 16, 32, #nv_tensor_ir.tensor_source<0, 0, "(64,32):(1,64)">, #nv_tensor_ir.tensor_source<1, 0, "(32,16):(1,32)">>}
+// CHECK: results {{.*}} {iteration_space = #nv_tensor_ir.matmul_source<"(4,4,8,8,32):(128,32,4096,512,1)", 1, 64, 16, 32, #nv_tensor_ir.tensor_source<0, 0, "(8,8,32):(8,1,64)">, #nv_tensor_ir.tensor_source<1, 0, "(32,4,4):(1,128,32)">>}
 nv_tensor_ir.graph @normalize_matmul_output_defines_no_batch(
         %in0: tensor<64x32xf32> {nv_tensor_ir.stride = "(1,64)"},
         %in1: tensor<32x16xf32> {nv_tensor_ir.stride = "(1,32)"}) -> (tensor<4x32x8xf32> {nv_tensor_ir.stride = "(1,4,128)"}) {

@@ -14,6 +14,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 
+#include <numeric>
+
 #define DEBUG_TYPE "tensor-graph-splitting"
 
 //===----------------------------------------------------------------------===//
@@ -297,19 +299,68 @@ struct GraphSplittingPass
       graphOp.emitError("missing iteration space");
       return signalPassFailure();
     }
-    if (resultsOp->getNumOperands() != 1) {
-      graphOp.emitError("expected single result");
+    auto resultLayoutsOr = getResultLayouts(resultsOp);
+    if (failed(resultLayoutsOr)) {
+      signalPassFailure();
+      return;
+    }
+    SmallVector<LayoutSourceAttrInterface> resultLayouts =
+        std::move(*resultLayoutsOr);
+    if (resultLayouts.empty()) {
+      if (resultsOp->getNumOperands() != 1) {
+        graphOp.emitError(
+            "multi-output graph is missing normalized result_layouts");
+        return signalPassFailure();
+      }
+      resultLayouts.push_back(rootLayout);
+    }
+    if (resultLayouts.size() != resultsOp->getNumOperands()) {
+      graphOp.emitError() << "result_layouts has " << resultLayouts.size()
+                          << " entries, expected "
+                          << resultsOp->getNumOperands();
       return signalPassFailure();
     }
 
-    // Start recursive materialization from the graph result.
-    Value oldRoot = resultsOp->getOperand(0);
-    FailureOr<Value> newRoot =
-        materialize(oldRoot, /*iterSpaceId=*/0, rootLayout);
-    if (failed(newRoot)) {
-      return signalPassFailure();
+    // Materialization order follows stable graph order, not ABI result order.
+    // This keeps iteration-space IDs and shared clone selection invariant when
+    // users permute the ResultsOp operands.
+    DenseMap<Operation *, size_t> operationOrder;
+    size_t nextOrder = 0;
+    for (Operation &op : graphOp.getBody()->getOperations()) {
+      operationOrder[&op] = nextOrder++;
     }
-    resultsOp.setOperand(0, *newRoot);
+    SmallVector<size_t> resultOrder(resultsOp->getNumOperands());
+    std::iota(resultOrder.begin(), resultOrder.end(), 0);
+    llvm::sort(resultOrder, [&](size_t lhsIndex, size_t rhsIndex) {
+      Value lhs = resultsOp->getOperand(lhsIndex);
+      Value rhs = resultsOp->getOperand(rhsIndex);
+      Operation *lhsOp = lhs.getDefiningOp();
+      Operation *rhsOp = rhs.getDefiningOp();
+      if (!lhsOp || !rhsOp) {
+        if (!lhsOp && !rhsOp) {
+          return cast<BlockArgument>(lhs).getArgNumber() <
+                 cast<BlockArgument>(rhs).getArgNumber();
+        }
+        return lhsOp == nullptr;
+      }
+      if (lhsOp != rhsOp) {
+        return operationOrder.lookup(lhsOp) < operationOrder.lookup(rhsOp);
+      }
+      return cast<OpResult>(lhs).getResultNumber() <
+             cast<OpResult>(rhs).getResultNumber();
+    });
+
+    SmallVector<Value> newRoots(resultsOp->getNumOperands());
+    for (size_t resultIndex : resultOrder) {
+      FailureOr<Value> newRoot =
+          materialize(resultsOp->getOperand(resultIndex), /*iterSpaceId=*/0,
+                      resultLayouts[resultIndex]);
+      if (failed(newRoot)) {
+        return signalPassFailure();
+      }
+      newRoots[resultIndex] = *newRoot;
+    }
+    resultsOp->setOperands(newRoots);
 
     // Run simple DCE (dead code elimination).
     bool changed = true;

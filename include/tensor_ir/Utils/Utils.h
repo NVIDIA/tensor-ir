@@ -100,6 +100,28 @@ bool hasDynamicInputOrOutputTensor(nv_tensor_ir::GraphOp graphOp);
 /// Get layout attribute for an operation or block argument.
 Attribute getLayoutSourceAttr(Value value);
 
+/// Return the ABI-ordered per-result layouts attached by multi-output layout
+/// normalization. An absent attribute returns an empty vector for the legacy
+/// single-result representation. Malformed attributes emit a diagnostic on
+/// `resultsOp` and return failure.
+FailureOr<SmallVector<LayoutSourceAttrInterface>>
+getResultLayouts(Operation *resultsOp);
+
+/// Return the ABI-ordered physical output views attached by multi-output
+/// layout normalization. Each view is a TensorSourceAttr in root-carrier
+/// coordinates. An absent attribute returns an empty vector for the legacy
+/// single-result representation. Malformed attributes emit a diagnostic on
+/// `resultsOp` and return failure.
+FailureOr<SmallVector<TensorSourceAttr>> getResultViews(Operation *resultsOp);
+
+/// Derive root-carrier dimensions that every CTA tile must cover completely.
+/// A dimension is fixed when at least one physical result view has zero stride
+/// in that dimension; partitioning it would give the same output element more
+/// than one writer CTA. The result has root rank and uses zero for unconstrained
+/// dimensions. An absent result_views attribute returns an empty vector.
+FailureOr<SmallVector<int64_t>>
+deriveResultFixedTileSizes(Operation *resultsOp);
+
 /// Get block argument index offsets for a dynamic layout.
 /// By convention, a tensor block argument is followed by the dynamic
 /// dimension size arguments and then dynamic stride arguments.

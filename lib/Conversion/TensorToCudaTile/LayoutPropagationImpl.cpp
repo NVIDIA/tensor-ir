@@ -121,7 +121,7 @@ private:
   int64_t staticPersistenceGridSize = 0;
   int64_t staticPersistenceTotalTiles = 0;
 
-  /// Normalized layout for the graph output.
+  /// Normalized root-carrier layout shared by every graph result.
   LayoutSourceAttrInterface normalizedLayout;
 
   /// Tensor descriptors for the graph inputs and outputs.
@@ -745,25 +745,77 @@ public:
     // updated here instead of calling the `update` method.
     state.blockStructure = &state.blockStructures[resultsOp.getOperation()];
     state.iterationSpace = &state.blockStructure->iterationSpaces[0];
-    state.layouts = ConversionStateImpl::OperandLayouts{state.normalizedLayout};
-    state.operandIndex = 0;
 
     setInsertionPointBeforeTerminatorOrToEnd(
         rewriter, state.iterationSpace->insertionBlock);
 
-    // Reshape the output to the iteration space shape.
-    const TensorDescriptor &desc = state.outputDescriptors[0];
-    TensorSourceAttr outputSource = buildTensorSource(desc);
-    outputSource = dyn_cast_if_present<TensorSourceAttr>(
-        outputSource.reshape(state.normalizedLayout.getShape()));
-    if (!outputSource) {
-      return resultsOp.emitError("Failed to calculate the output layout");
-    }
+    MLIR_ASSIGN_OR_RETURN(auto resultLayouts,
+                          getResultLayouts(resultsOp.getOperation()));
+    MLIR_ASSIGN_OR_RETURN(auto resultViews,
+                          getResultViews(resultsOp.getOperation()));
+    if (!resultLayouts.empty()) {
+      if (resultLayouts.size() != adaptor.getOperands().size() ||
+          resultViews.size() != adaptor.getOperands().size() ||
+          state.outputDescriptors.size() != adaptor.getOperands().size()) {
+        return resultsOp.emitError(
+            "multi-output result metadata does not match result operand count");
+      }
 
-    // Emit store for the output tensor.
-    auto layoutDesc = applyLayout(rewriter, desc, outputSource);
-    Value tile = state.getTile(adaptor.getOperands()[0]);
-    emitStore(rewriter, layoutDesc, tile, state.iterationSpace->indexValues);
+      state.layouts = ConversionStateImpl::OperandLayouts(resultLayouts);
+      state.operandIndex = 0;
+      for (size_t resultIndex = 0; resultIndex < resultLayouts.size();
+           ++resultIndex) {
+        const TensorDescriptor &desc = state.outputDescriptors[resultIndex];
+        TensorSourceAttr outputView = resultViews[resultIndex];
+        auto layoutDesc = applyLayout(rewriter, desc, outputView);
+        Value tile = state.getTile(adaptor.getOperands()[resultIndex]);
+
+        // Reduction lowering represents compact values in the surrounding
+        // carrier by broadcasting them. Store one representative lane for
+        // every zero-stride result dimension so each physical element has a
+        // unique writer and the store tile matches the compact result view.
+        auto tileType = cast<cuda_tile::TileType>(tile.getType());
+        SmallVector<int64_t> storeShape(tileType.getShape());
+        auto viewLayout = outputView.getCuteLayout();
+        bool needsExtract = false;
+        for (size_t dim = 0; dim < storeShape.size(); ++dim) {
+          auto stride = tcg::get(viewLayout.stride(), dim);
+          if (tcg::is_static(stride) && stride.as_int() == 0 &&
+              storeShape[dim] != 1) {
+            storeShape[dim] = 1;
+            needsExtract = true;
+          }
+        }
+        if (needsExtract) {
+          SmallVector<Value> extractIndices(storeShape.size(), state.zeroIndex);
+          auto storeType =
+              cuda_tile::TileType::get(storeShape, tileType.getElementType());
+          tile = cuda_tile::ExtractOp::create(rewriter, resultsOp.getLoc(),
+                                              storeType, tile, extractIndices);
+        }
+
+        emitStore(rewriter, layoutDesc, tile,
+                  state.iterationSpace->indexValues);
+      }
+    } else {
+      state.layouts =
+          ConversionStateImpl::OperandLayouts{state.normalizedLayout};
+      state.operandIndex = 0;
+
+      // Reshape the output to the iteration space shape.
+      const TensorDescriptor &desc = state.outputDescriptors[0];
+      TensorSourceAttr outputSource = buildTensorSource(desc);
+      outputSource = dyn_cast_if_present<TensorSourceAttr>(
+          outputSource.reshape(state.normalizedLayout.getShape()));
+      if (!outputSource) {
+        return resultsOp.emitError("Failed to calculate the output layout");
+      }
+
+      // Emit store for the output tensor.
+      auto layoutDesc = applyLayout(rewriter, desc, outputSource);
+      Value tile = state.getTile(adaptor.getOperands()[0]);
+      emitStore(rewriter, layoutDesc, tile, state.iterationSpace->indexValues);
+    }
 
     // Remove the zero index if it has no users.
     if (state.zeroIndex.use_empty()) {
@@ -1337,10 +1389,14 @@ LogicalResult verifyLayoutPropLowerable(GraphOp graphOp) {
 }
 
 LogicalResult verifyGraphLevelLayoutPropLowerable(GraphOp graphOp) {
-  // Check that the graph has exactly one result.
+  // Every graph needs at least one result. Multi-output graphs additionally
+  // carry ABI-ordered terminal layouts and physical result views produced by
+  // joint normalization.
   Operation *resultsOp = graphOp.getBody()->getTerminator();
-  if (resultsOp->getNumOperands() != 1) {
-    return graphOp.emitError("Only single output graphs are supported");
+  size_t numResults = resultsOp->getNumOperands();
+  if (numResults == 0) {
+    return graphOp.emitError(
+        "layout-propagation lowering requires at least one output");
   }
 
   // Get the normalized layout from the graph attribute.
@@ -1350,6 +1406,41 @@ LogicalResult verifyGraphLevelLayoutPropLowerable(GraphOp graphOp) {
     return graphOp.emitError(
         "Iteration space attribute must be set. Make sure the "
         "\"layout-propagation-normalization\" pass has been run.");
+  }
+
+  MLIR_ASSIGN_OR_RETURN(auto resultLayouts, getResultLayouts(resultsOp));
+  MLIR_ASSIGN_OR_RETURN(auto resultViews, getResultViews(resultsOp));
+  if (numResults > 1) {
+    if (resultLayouts.size() != numResults ||
+        resultViews.size() != numResults) {
+      return graphOp.emitError()
+             << "multi-output layout metadata must have " << numResults
+             << " entries, but result_layouts has " << resultLayouts.size()
+             << " and result_views has " << resultViews.size();
+    }
+    for (auto [index, pair] :
+         llvm::enumerate(llvm::zip_equal(resultLayouts, resultViews))) {
+      auto [layout, view] = pair;
+      if (layout.getShape() != normalizedLayout.getShape() ||
+          view.getShape() != normalizedLayout.getShape()) {
+        return graphOp.emitError()
+               << "multi-output result " << index
+               << " is not expressed in normalized carrier shape "
+               << vectorToString(normalizedLayout.getShape());
+      }
+    }
+  } else if (!resultLayouts.empty() || !resultViews.empty()) {
+    if (resultLayouts.size() != 1 || resultViews.size() != 1) {
+      return graphOp.emitError(
+          "single-output result metadata must be absent or have one entry");
+    }
+    if (resultLayouts.front().getShape() != normalizedLayout.getShape() ||
+        resultViews.front().getShape() != normalizedLayout.getShape()) {
+      return graphOp.emitError()
+             << "single-output result metadata is not expressed in "
+                "normalized carrier shape "
+             << vectorToString(normalizedLayout.getShape());
+    }
   }
 
   // Get the tile size from the graph attribute.
@@ -1370,6 +1461,16 @@ LogicalResult verifyGraphLevelLayoutPropLowerable(GraphOp graphOp) {
   if (tileShape.size() != normalizedLayout.getShape().size()) {
     return graphOp.emitError("Incorrect tile size, expected rank ")
            << normalizedLayout.getShape().size();
+  }
+
+  MLIR_ASSIGN_OR_RETURN(auto fixedTileSizes,
+                        deriveResultFixedTileSizes(resultsOp));
+  for (auto [dim, fixedSize] : llvm::enumerate(fixedTileSizes)) {
+    if (fixedSize != 0 && tileShape[dim] != fixedSize) {
+      return graphOp.emitError()
+             << "tile size " << tileShape[dim] << " in dimension " << dim
+             << " partitions a projected graph result; expected " << fixedSize;
+    }
   }
 
   // Check that the input/output tensor descriptors can be derived from the

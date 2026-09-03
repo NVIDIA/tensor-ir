@@ -27,6 +27,144 @@ def add_kernel(a, b):
     return a + b
 
 
+def _compile_cached_add(
+    program_cache: tir.ProgramCache,
+    spec: tir.TensorSpec,
+    *,
+    name: str = "cache_test",
+    options: tir.CompileOptions | None = None,
+    tile_sizes: tuple[int, ...] = (),
+    dynamic_shape: bool = False,
+) -> tir.CompiledKernel:
+    return tir.compile(
+        add_kernel,
+        spec,
+        spec,
+        output=spec,
+        name=name,
+        options=options,
+        tile_sizes=tile_sizes,
+        dynamic_shape=dynamic_shape,
+        program_cache=program_cache,
+    )
+
+
+def test_compile_kernel_cache_normalizes_graph_name() -> None:
+    program_cache = tir.ProgramCache()
+    spec = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
+
+    first = _compile_cached_add(program_cache, spec, name="cache_test")
+    renamed = _compile_cached_add(
+        program_cache,
+        spec,
+        name="cache_test_renamed",
+    )
+    first_key = tir.calculate_cache_key(first.module)
+    renamed_key = tir.calculate_cache_key(renamed.module)
+
+    assert first_key == renamed_key
+    assert first.program._native_program is renamed.program._native_program
+    assert "nv_tensor_ir.graph @cache_test_renamed" in _module_text(renamed)
+
+
+def test_compile_kernel_cache_survives_returned_program_destroy() -> None:
+    program_cache = tir.ProgramCache()
+    spec = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
+
+    first = _compile_cached_add(program_cache, spec)
+    native_program = first.program._native_program
+    first.program.destroy()
+    cached_after_destroy = _compile_cached_add(program_cache, spec)
+
+    assert not cached_after_destroy.program.is_destroyed
+    assert cached_after_destroy.program._native_program is native_program
+
+
+def test_compile_kernel_cache_flush() -> None:
+    program_cache = tir.ProgramCache()
+    spec = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
+
+    first = _compile_cached_add(program_cache, spec)
+
+    program_cache.flush()
+    second = _compile_cached_add(program_cache, spec)
+
+    assert second.program._native_program is not first.program._native_program
+
+
+def test_compile_kernel_cache_distinguishes_compile_options() -> None:
+    program_cache = tir.ProgramCache()
+    spec = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
+
+    default_options = _compile_cached_add(program_cache, spec)
+
+    different_options = tir.CompileOptions()
+    different_options.warp_count = 8
+    custom_options = _compile_cached_add(
+        program_cache,
+        spec,
+        options=different_options,
+    )
+    default_key = tir.calculate_cache_key(default_options.module)
+    custom_key = tir.calculate_cache_key(
+        custom_options.module,
+        options=different_options,
+    )
+
+    assert custom_key != default_key
+    assert (
+        custom_options.program._native_program
+        is not default_options.program._native_program
+    )
+
+
+def test_compile_kernel_cache_distinguishes_modules() -> None:
+    program_cache = tir.ProgramCache()
+    spec_8x8 = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
+    spec_16x8 = tir.TensorSpec((16, 8), dtype=tir.DataType.F32)
+
+    kernel_8x8 = _compile_cached_add(program_cache, spec_8x8)
+    kernel_16x8 = _compile_cached_add(program_cache, spec_16x8)
+    key_8x8 = tir.calculate_cache_key(kernel_8x8.module)
+    key_16x8 = tir.calculate_cache_key(kernel_16x8.module)
+
+    assert key_16x8 != key_8x8
+    assert kernel_16x8.program._native_program is not kernel_8x8.program._native_program
+
+
+def test_compile_kernel_cache_normalizes_dynamic_shapes() -> None:
+    program_cache = tir.ProgramCache()
+    spec_8x8 = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
+    spec_16x8 = tir.TensorSpec((16, 8), dtype=tir.DataType.F32)
+
+    static_kernel = _compile_cached_add(program_cache, spec_8x8)
+    dynamic_8x8 = _compile_cached_add(
+        program_cache,
+        spec_8x8,
+        tile_sizes=(4, 4),
+        dynamic_shape=True,
+    )
+    dynamic_16x8 = _compile_cached_add(
+        program_cache,
+        spec_16x8,
+        tile_sizes=(4, 4),
+        dynamic_shape=True,
+    )
+    static_key = tir.calculate_cache_key(static_kernel.module)
+    dynamic_8x8_key = tir.calculate_cache_key(
+        dynamic_8x8.module,
+        tile_sizes=(4, 4),
+    )
+    dynamic_16x8_key = tir.calculate_cache_key(
+        dynamic_16x8.module,
+        tile_sizes=(4, 4),
+    )
+
+    assert static_key != dynamic_8x8_key
+    assert dynamic_8x8_key == dynamic_16x8_key
+    assert dynamic_8x8.program._native_program is dynamic_16x8.program._native_program
+
+
 @tir.kernel
 def dynamic_pointwise_kernel(a, b):
     shifted = a + b
@@ -383,6 +521,11 @@ def test_compile_rejects_undecorated_function() -> None:
         tir.compile(undecorated_kernel, output=object())
 
 
+def test_compile_rejects_invalid_program_cache() -> None:
+    with pytest.raises(TypeError, match="program_cache must be a ProgramCache"):
+        tir.compile(add_kernel, output=object(), program_cache={})
+
+
 def test_trace_rejects_invalid_kernel_contracts() -> None:
     @tir.kernel
     def declares_output_param(output):
@@ -727,6 +870,8 @@ def test_public_api_surface() -> None:
             "DataType",
             "TensorSpec",
             "CudaTileArtifactKind",
+            "ProgramCache",
+            "calculate_cache_key",
             "compile",
             "compile_traced",
             "kernel",

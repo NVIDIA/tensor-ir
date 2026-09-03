@@ -1,8 +1,8 @@
 add_library(NVTensorIRReference STATIC
-  simplified_tensor.cpp
-  tensor_memory.cpp
-  reference_graph.cpp
-  reference_node.cpp
+  SimplifiedTensor.cpp
+  TensorMemory.cpp
+  ReferenceGraph.cpp
+  ReferenceNode.cpp
 )
 
 tensor_ir_register_library(NVTensorIRReference)
