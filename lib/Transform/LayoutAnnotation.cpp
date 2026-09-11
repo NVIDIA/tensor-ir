@@ -102,7 +102,7 @@ liftLayoutToCarrier(LayoutSourceAttrInterface layout,
     return reshape;
   }
 
-  ArrayRef<int64_t> sourceShape = layout.getShape();
+  SmallVector<int64_t> sourceShape = layout.getShape();
   if (sourceShape.size() >= carrierShape.size()) {
     return failure();
   }

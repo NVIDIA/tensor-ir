@@ -94,6 +94,22 @@ public:
       llvm::dbgs() << ")\n";
     });
 
+    // Apply the padding mask, if present.
+    const IterationSpace &iterationSpace = blockStructure->iterationSpaces[0];
+    auto applyPaddingMaskIfPresent = [&]() {
+      if (!iterationSpace.paddingMask.empty()) {
+        LLVM_DEBUG(llvm::dbgs() << "Masking the tile value\n");
+        Value paddingMask = iterationSpace.paddingMask[0];
+        Value neutralValue = iterationSpace.paddingMask[1];
+
+        Value broadcastedMask = cuda_tile::BroadcastOp::create(
+            rewriter, loc, inputTileType.clone(rewriter.getI1Type()),
+            paddingMask);
+        inputTile = cuda_tile::SelectOp::create(rewriter, loc, broadcastedMask,
+                                                inputTile, neutralValue);
+      }
+    };
+
     // Create the reduction emission helper.
     ReductionEmissionHelper reductionEmission{
         reduceOp.getReductionMode(),
@@ -105,8 +121,8 @@ public:
       RewriterBase::InsertionGuard guard(rewriter);
 
       // Emit prologue and accumulation.
-      const IterationSpace &iterationSpace = blockStructure->iterationSpaces[0];
       rewriter.setInsertionPointToEnd(iterationSpace.insertionBlock);
+      applyPaddingMaskIfPresent();
       inputTile = reductionEmission.buildPrologue(rewriter, inputTile);
       Value innerResult = reductionEmission.buildReduction(
           rewriter, iterationSpace.insertionBlock->getArgument(1), inputTile);
@@ -116,6 +132,7 @@ public:
       blockResult = blockStructure->yieldValues[0];
     } else {
       // Emit only the prologue when no blocks are present.
+      applyPaddingMaskIfPresent();
       blockResult = reductionEmission.buildPrologue(rewriter, inputTile);
     }
 
@@ -228,30 +245,6 @@ public:
       inputTiles.push_back(state.getTile(operand));
     }
 
-    // Copy the reduction operations into the loop body, if present.
-    bool hasLoop = !blockStructure->yieldValues.empty();
-    if (hasLoop) {
-      Block *sourceBlock = &reduceOp.getBodyRegion().front();
-      Block *targetBlock = blockStructure->iterationSpaces[0].insertionBlock;
-
-      // Map block arguments to loop body arguments.
-      // TensorIR order: acc_1, ..., acc_N, arg_1, ..., arg_N.
-      // CUDA Tile order: arg_1, acc_1, ..., arg_N, acc_N.
-      IRMapping mapping;
-      for (size_t i = 0, n = inputTiles.size(); i < n; i++) {
-        mapping.map(sourceBlock->getArgument(n + i), inputTiles[i]);
-        mapping.map(sourceBlock->getArgument(i),
-                    targetBlock->getArgument(i + 1));
-      }
-
-      // Clone the reduction block into the loop body.
-      RewriterBase::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToEnd(targetBlock);
-      for (Operation &op : *sourceBlock) {
-        rewriter.clone(op, mapping);
-      }
-    }
-
     // Calculate the shapes for the tiles involved in the reduction.
     // `inputTileShape` is the shape of the underlying source;
     // `resultTileShape` is the shape before the broadcast (if any);
@@ -274,6 +267,57 @@ public:
       llvm::interleaveComma(outputTileShape, llvm::dbgs());
       llvm::dbgs() << ")\n";
     });
+
+    // Apply the padding mask, if present.
+    const IterationSpace &iterationSpace = blockStructure->iterationSpaces[0];
+    bool hasLoop = !blockStructure->yieldValues.empty();
+
+    if (!iterationSpace.paddingMask.empty()) {
+      LLVM_DEBUG(llvm::dbgs() << "Masking the tile value\n");
+      Value paddingMask = iterationSpace.paddingMask[0];
+
+      RewriterBase::InsertionGuard guard(rewriter);
+      if (hasLoop) {
+        rewriter.setInsertionPointToEnd(iterationSpace.insertionBlock);
+      }
+
+      auto inputTileType = cast<ShapedType>(inputTiles[0].getType());
+      Value broadcastedMask = cuda_tile::BroadcastOp::create(
+          rewriter, loc, inputTileType.clone(rewriter.getI1Type()),
+          paddingMask);
+
+      for (size_t idx : llvm::seq(inputTiles.size())) {
+        auto denseAttr = cast<DenseTypedElementsAttr>(DenseElementsAttr::get(
+            inputTileType, reduceOp.getIdentityAttr()[idx]));
+        Value neutralValue = cuda_tile::ConstantOp::create(
+            rewriter, loc, inputTileType, denseAttr);
+        inputTiles[idx] = cuda_tile::SelectOp::create(
+            rewriter, loc, broadcastedMask, inputTiles[idx], neutralValue);
+      }
+    }
+
+    // Copy the reduction operations into the loop body, if present.
+    if (hasLoop) {
+      Block *sourceBlock = &reduceOp.getBodyRegion().front();
+      Block *targetBlock = iterationSpace.insertionBlock;
+
+      // Map block arguments to loop body arguments.
+      // TensorIR order: acc_1, ..., acc_N, arg_1, ..., arg_N.
+      // CUDA Tile order: arg_1, acc_1, ..., arg_N, acc_N.
+      IRMapping mapping;
+      for (size_t i = 0, n = inputTiles.size(); i < n; i++) {
+        mapping.map(sourceBlock->getArgument(n + i), inputTiles[i]);
+        mapping.map(sourceBlock->getArgument(i),
+                    targetBlock->getArgument(i + 1));
+      }
+
+      // Clone the reduction block into the loop body.
+      RewriterBase::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToEnd(targetBlock);
+      for (Operation &op : *sourceBlock) {
+        rewriter.clone(op, mapping);
+      }
+    }
 
     // Convert integer types to signless integers.
     SmallVector<Attribute> identities;

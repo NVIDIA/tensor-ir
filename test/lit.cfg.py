@@ -58,6 +58,40 @@ config.substitutions.append(("%PATH%", config.environment["PATH"]))
 config.substitutions.append(("%shlibext", config.llvm_shlib_ext))
 
 
+mlir_include_candidates = config.mlir_include_dirs or [
+    os.path.join(config.llvm_obj_root, "include")
+]
+mlir_include_dirs = []
+for p in mlir_include_candidates:
+    if not os.path.exists(p):
+        print(f"Warning: MLIR include directory {p} does not exist")
+        continue
+    mlir_include_dirs.append(p)
+config.substitutions.append(
+    ("%mlir_include_dirs", " ".join(f"-I {p}" for p in mlir_include_dirs))
+)
+
+required_tablegen_files = [
+    os.path.join("mlir", "IR", "Constraints.td"),
+    os.path.join("mlir", "IR", "EnumAttr.td"),
+]
+missing_tablegen_files = [
+    relative_path
+    for relative_path in required_tablegen_files
+    if not any(
+        os.path.isfile(os.path.join(include_dir, relative_path))
+        for include_dir in mlir_include_dirs
+    )
+]
+if missing_tablegen_files:
+    print(
+        "Warning: MLIR include directories lack required TableGen files: "
+        + ", ".join(missing_tablegen_files)
+    )
+else:
+    config.available_features.add("mlir-src-headers")
+
+
 # Searches for a runtime library with the given name and returns the found path.
 # Correctly handles the platforms shared library directory and naming conventions.
 def find_runtime(name):
@@ -92,8 +126,10 @@ tool_dirs = [
 tools = [
     "tensor_ir-compiler",
     "tensor_ir-opt",
+    "tensor_ir-tblgen",
     "FileCheck",
     "not",
+    "split-file",
     ToolSubst("%PYTHON", config.python_executable, unresolved="ignore"),
 ]
 

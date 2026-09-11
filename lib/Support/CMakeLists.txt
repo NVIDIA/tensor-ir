@@ -24,8 +24,15 @@ if(TENSOR_IR_CUDART_LINKAGE STREQUAL "STATIC")
     message(FATAL_ERROR
       "TENSOR_IR_CUDART_LINKAGE=STATIC requires CUDA::cudart_static")
   endif()
-  target_compile_definitions(NVTensorIRCudaApi
-    PRIVATE TENSOR_IR_STATIC_LINK_CUDART=1)
+  # add_mlir_library compiles sources through its generated object target, so
+  # compile options applied only to the archive do not affect CudaApi.cpp.
+  if(TARGET obj.NVTensorIRCudaApi)
+    target_compile_definitions(obj.NVTensorIRCudaApi
+      PRIVATE TENSOR_IR_STATIC_LINK_CUDART=1)
+  else()
+    target_compile_definitions(NVTensorIRCudaApi
+      PRIVATE TENSOR_IR_STATIC_LINK_CUDART=1)
+  endif()
   target_link_libraries(NVTensorIRCudaApi
     PRIVATE CUDA::cudart_static)
 elseif(NOT TENSOR_IR_CUDART_LINKAGE STREQUAL "DYNAMIC")

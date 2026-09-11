@@ -1,9 +1,14 @@
 // RUN: tensor_ir-opt -layout-propagation-pipeline -split-input-file %s | FileCheck %s
 
 // CHECK-LABEL: @test_concat_1way
+// CHECK-SAME: (%[[IN:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
+// CHECK: %[[IN_VIEW:.*]] = make_tensor_view %[[IN]], shape = [1, 512], strides = [512, 1]
+// CHECK: %[[IN_PVIEW:.*]] = make_partition_view %[[IN_VIEW]]
+// CHECK: %[[TILE:.*]], %{{.*}} = load_view_tko weak %[[IN_PVIEW]][%{{.*}}, %{{.*}}]
 // CHECK-NOT: cmpi
-// CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
-// CHECK: store_view_tko weak %[[ARG0]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [1, 512], strides = [512, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[TILE]], %[[OUT_PVIEW]][%{{.*}}, %{{.*}}]
 nv_tensor_ir.graph @test_concat_1way(
     %arg0: tensor<32x16xf32>
     ) -> (tensor<32x16xf32>)
@@ -16,18 +21,25 @@ nv_tensor_ir.graph @test_concat_1way(
 // -----
 
 // CHECK-LABEL: @test_concat_across_columns
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[TWO:.*]] = constant <i32: 2>
 // CHECK: %[[CMP:.*]] = cmpi less_than %[[BLOCK:.*]], %[[TWO]], unsigned
 // CHECK: %[[RESULT:.*]] = if %[[CMP]] -> (tile<1x512xf32>) {
-// CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[BLOCK]], %[[ZERO]]]
-// CHECK:   yield %[[ARG0]]
+// CHECK:   %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [2, 512], strides = [512, 1]
+// CHECK:   %[[PVIEW0:.*]] = make_partition_view %[[VIEW0]]
+// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[BLOCK]], %[[ZERO]]]
+// CHECK:   yield %[[TILE0]]
 // CHECK: } else {
 // CHECK:   %[[IDX:.*]] = subi %[[BLOCK]], %[[TWO]]
-// CHECK:   %[[ARG1:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[IDX]], %[[ZERO]]]
-// CHECK:   yield %[[ARG1]]
+// CHECK:   %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [3, 512], strides = [512, 1]
+// CHECK:   %[[PVIEW1:.*]] = make_partition_view %[[VIEW1]]
+// CHECK:   %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[IDX]], %[[ZERO]]]
+// CHECK:   yield %[[TILE1]]
 // CHECK: }
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [5, 512], strides = [512, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[BLOCK]], %[[ZERO]]]
 nv_tensor_ir.graph @test_concat_across_columns(
     %arg0: tensor<32x32xf32>,
     %arg1: tensor<48x32xf32>
@@ -42,6 +54,7 @@ nv_tensor_ir.graph @test_concat_across_columns(
 // -----
 
 // CHECK-LABEL: @test_concat_across_rows
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[C16:.*]] = constant <i32: 16>
 // CHECK-DAG: %[[BIDX:.+]], %{{.*}}, %{{.*}} = get_tile_block_id
@@ -50,14 +63,20 @@ nv_tensor_ir.graph @test_concat_across_columns(
 // CHECK-DAG: %[[X_DIV_16:.+]] = divi %[[BIDX]], %[[C16]] unsigned
 // CHECK-DAG: %[[CMP:.*]] = cmpi less_than %[[X_DIV_16]], %[[C2]], unsigned
 // CHECK: %[[RESULT:.*]] = if %[[CMP]] -> (tile<2x1x16xf32>) {
-// CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[X_REM_16]], %[[X_DIV_16]], %[[ZERO]]]
-// CHECK:   yield %[[ARG0]]
+// CHECK:   %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [32, 2, 16], strides = [32, 16, 1]
+// CHECK:   %[[PVIEW0:.*]] = make_partition_view %[[VIEW0]]
+// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[X_REM_16]], %[[X_DIV_16]], %[[ZERO]]]
+// CHECK:   yield %[[TILE0]]
 // CHECK: } else {
 // CHECK:   %[[IDX:.*]] = subi %[[X_DIV_16]], %[[C2]]
-// CHECK:   %[[ARG1:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[X_REM_16]], %[[IDX]], %[[ZERO]]]
-// CHECK:   yield %[[ARG1]]
+// CHECK:   %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [32, 3, 16], strides = [48, 16, 1]
+// CHECK:   %[[PVIEW1:.*]] = make_partition_view %[[VIEW1]]
+// CHECK:   %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[X_REM_16]], %[[IDX]], %[[ZERO]]]
+// CHECK:   yield %[[TILE1]]
 // CHECK: }
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 5, 16], strides = [80, 16, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[X_REM_16]], %[[X_DIV_16]], %[[ZERO]]]
 nv_tensor_ir.graph @test_concat_across_rows(
     %arg0: tensor<32x32xf32>,
     %arg1: tensor<32x48xf32>
@@ -72,27 +91,36 @@ nv_tensor_ir.graph @test_concat_across_rows(
 // -----
 
 // CHECK-LABEL: @test_concat_3way
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[IN2:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[TWO:.*]] = constant <i32: 2>
 // CHECK-DAG: %[[THREE:.*]] = constant <i32: 3>
 // CHECK: %[[CMP1:.*]] = cmpi less_than %[[BLOCK:.*]], %[[TWO]], unsigned
 // CHECK: %[[RESULT:.*]] = if %[[CMP1]] -> (tile<32x1x16xf32>) {
-// CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[ZERO]], %[[BLOCK]], %[[ZERO]]]
-// CHECK:   yield %[[ARG0]]
+// CHECK:   %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [32, 2, 16], strides = [1, 512, 32]
+// CHECK:   %[[PVIEW0:.*]] = make_partition_view %[[VIEW0]]
+// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[ZERO]], %[[BLOCK]], %[[ZERO]]]
+// CHECK:   yield %[[TILE0]]
 // CHECK: } else {
 // CHECK:   %[[IDX1:.*]] = subi %[[BLOCK]], %[[TWO]]
 // CHECK:   %[[CMP2:.*]] = cmpi less_than %[[IDX1]], %[[THREE]], unsigned
 // CHECK:   %[[INNER:.*]] = if %[[CMP2]] -> (tile<32x1x16xf32>) {
-// CHECK:     %[[ARG1:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[ZERO]], %[[IDX1]], %[[ZERO]]]
-// CHECK:     yield %[[ARG1]]
+// CHECK:     %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [32, 3, 16], strides = [1, 512, 32]
+// CHECK:     %[[PVIEW1:.*]] = make_partition_view %[[VIEW1]]
+// CHECK:     %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[ZERO]], %[[IDX1]], %[[ZERO]]]
+// CHECK:     yield %[[TILE1]]
 // CHECK:   } else {
 // CHECK:     %[[IDX2:.*]] = subi %[[IDX1]], %[[THREE]]
-// CHECK:     %[[ARG2:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[ZERO]], %[[IDX2]], %[[ZERO]]]
-// CHECK:     yield %[[ARG2]]
+// CHECK:     %[[VIEW2:.*]] = make_tensor_view %[[IN2]], shape = [32, 4, 16], strides = [1, 512, 32]
+// CHECK:     %[[PVIEW2:.*]] = make_partition_view %[[VIEW2]]
+// CHECK:     %[[TILE2:.*]], %{{.*}} = load_view_tko weak %[[PVIEW2]][%[[ZERO]], %[[IDX2]], %[[ZERO]]]
+// CHECK:     yield %[[TILE2]]
 // CHECK:   }
 // CHECK:   yield %[[INNER]]
 // CHECK: }
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 9, 16], strides = [1, 512, 32]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[BLOCK]], %[[ZERO]]]
 nv_tensor_ir.graph @test_concat_3way(
     %arg0: tensor<32x32xf32> {nv_tensor_ir.stride = "(1,32)"},
     %arg1: tensor<32x48xf32> {nv_tensor_ir.stride = "(1,32)"},
@@ -109,6 +137,7 @@ nv_tensor_ir.graph @test_concat_3way(
 // -----
 
 // CHECK-LABEL: @test_concat_nested
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[IN2:.*]]: tile<ptr<f32>>, %[[IN3:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[TWO:.*]] = constant <i32: 2>
 // CHECK-DAG: %[[FOUR:.*]] = constant <i32: 4>
@@ -117,28 +146,38 @@ nv_tensor_ir.graph @test_concat_3way(
 // CHECK: %[[RESULT:.*]] = if %[[CMP1]] -> (tile<32x1x16xf32>) {
 // CHECK:   %[[CMP2:.*]] = cmpi less_than %[[BLOCK]], %[[TWO]], unsigned
 // CHECK:   %[[LHS:.*]] = if %[[CMP2]] -> (tile<32x1x16xf32>) {
-// CHECK:     %[[ARG0:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[ZERO]], %[[BLOCK]], %[[ZERO]]]
-// CHECK:     yield %[[ARG0]]
+// CHECK:     %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [32, 2, 16], strides = [1, 512, 32]
+// CHECK:     %[[PVIEW0:.*]] = make_partition_view %[[VIEW0]]
+// CHECK:     %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[ZERO]], %[[BLOCK]], %[[ZERO]]]
+// CHECK:     yield %[[TILE0]]
 // CHECK:   } else {
 // CHECK:     %[[IDX1:.*]] = subi %[[BLOCK]], %[[TWO]]
-// CHECK:     %[[ARG0:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[ZERO]], %[[IDX1]], %[[ZERO]]]
-// CHECK:     yield %[[ARG0]]
+// CHECK:     %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [32, 3, 16], strides = [1, 512, 32]
+// CHECK:     %[[PVIEW1:.*]] = make_partition_view %[[VIEW1]]
+// CHECK:     %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[ZERO]], %[[IDX1]], %[[ZERO]]]
+// CHECK:     yield %[[TILE1]]
 // CHECK:   }
 // CHECK:   yield %[[LHS]]
 // CHECK: } else {
 // CHECK:   %[[IDX2:.*]] = subi %[[BLOCK]], %[[FIVE]]
 // CHECK:   %[[CMP3:.*]] = cmpi less_than %[[IDX2]], %[[FOUR]], unsigned
 // CHECK:   %[[RHS:.*]] = if %[[CMP3]] -> (tile<32x1x16xf32>) {
-// CHECK:     %[[ARG2:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[ZERO]], %[[IDX2]], %[[ZERO]]]
-// CHECK:     yield %[[ARG2]]
+// CHECK:     %[[VIEW2:.*]] = make_tensor_view %[[IN2]], shape = [32, 4, 16], strides = [1, 512, 32]
+// CHECK:     %[[PVIEW2:.*]] = make_partition_view %[[VIEW2]]
+// CHECK:     %[[TILE2:.*]], %{{.*}} = load_view_tko weak %[[PVIEW2]][%[[ZERO]], %[[IDX2]], %[[ZERO]]]
+// CHECK:     yield %[[TILE2]]
 // CHECK:   } else {
 // CHECK:     %[[IDX3:.*]] = subi %[[IDX2]], %[[FOUR]]
-// CHECK:     %[[ARG0:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[ZERO]], %[[IDX3]], %[[ZERO]]]
-// CHECK:     yield %[[ARG0]]
+// CHECK:     %[[VIEW3:.*]] = make_tensor_view %[[IN3]], shape = [32, 5, 16], strides = [1, 512, 32]
+// CHECK:     %[[PVIEW3:.*]] = make_partition_view %[[VIEW3]]
+// CHECK:     %[[TILE3:.*]], %{{.*}} = load_view_tko weak %[[PVIEW3]][%[[ZERO]], %[[IDX3]], %[[ZERO]]]
+// CHECK:     yield %[[TILE3]]
 // CHECK:   }
 // CHECK:   yield %[[RHS]]
 // CHECK: }
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 14, 16], strides = [1, 512, 32]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[BLOCK]], %[[ZERO]]]
 nv_tensor_ir.graph @test_concat_nested(
     %arg0: tensor<32x32xf32> {nv_tensor_ir.stride = "(1,32)"},
     %arg1: tensor<32x48xf32> {nv_tensor_ir.stride = "(1,32)"},
@@ -165,10 +204,17 @@ nv_tensor_ir.graph @test_concat_nested(
 // unit stride, which would otherwise collide with the genuinely contiguous
 // dimension of these column-major operands.
 // CHECK-LABEL: @test_concat_transpose_col_major
-// CHECK: make_tensor_view {{.*}}, shape = [8, 1, 8], strides = [8, 8, 1]
-// CHECK: make_tensor_view {{.*}}, shape = [8, 1, 8], strides = [1, 64, 8]
-// CHECK: make_tensor_view {{.*}}, shape = [8, 2, 8], strides = [1, 64, 8]
-// CHECK: store_view_tko weak
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
+// CHECK: %[[RESULT:.*]] = if {{.*}} -> (tile<8x1x1xf32>) {
+// CHECK: %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [8, 1, 8], strides = [8, 8, 1]
+// CHECK: %[[PVIEW0:.*]] = make_partition_view %[[VIEW0]]
+// CHECK: %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]]
+// CHECK: %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [8, 1, 8], strides = [1, 64, 8]
+// CHECK: %[[PVIEW1:.*]] = make_partition_view %[[VIEW1]]
+// CHECK: %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [8, 2, 8], strides = [1, 64, 8]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]]
 nv_tensor_ir.graph @test_concat_transpose_col_major(
     %arg0: tensor<8x8xf32> {nv_tensor_ir.stride = "(1,8)"},
     %arg1: tensor<8x8xf32> {nv_tensor_ir.stride = "(1,8)"}
@@ -193,6 +239,7 @@ nv_tensor_ir.graph @test_concat_transpose_col_major(
 // the two later sources recompute from slices of the same block argument.
 // ============================================================================
 // CHECK-LABEL: @fused_concatenate
+// CHECK-SAME: (%[[IN:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG:   %[[CPOS:.*]] = constant <f32: 5.900000e-01> : tile<1xf32>
 // CHECK-DAG:   %[[CNEG:.*]] = constant <f32: -5.900000e-01> : tile<1xf32>
 // CHECK-DAG:   %[[C20:.*]] = constant <i32: 20> : tile<i32>
@@ -217,7 +264,9 @@ nv_tensor_ir.graph @test_concat_transpose_col_major(
 // CHECK:         }
 // CHECK:         yield %[[INNER]]
 // CHECK:       }
-// CHECK:       store_view_tko weak %[[RESULT]], %{{.*}}[%[[BLOCK]]]
+// CHECK:       %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [22], strides = [1]
+// CHECK:       %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK:       store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[BLOCK]]]
 nv_tensor_ir.graph @fused_concatenate(
     %arg0: tensor<20xf32> {nv_tensor_ir.stride = "(1)"}
     ) -> (tensor<22xf32> {nv_tensor_ir.stride = "(1)"})
@@ -263,7 +312,9 @@ nv_tensor_ir.graph @fused_concatenate(
 // CHECK:         %[[T2:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%{{.*}}, %[[IDX]], %{{.*}}]
 // CHECK:         yield %[[T2]]
 // CHECK:       }
-// CHECK:       store_view_tko weak %[[RESULT]]
+// CHECK:       %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [8, 5, 2], strides = [10, 2, 1]
+// CHECK:       %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK:       store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%{{.*}}, %[[SEL]], %{{.*}}]
 nv_tensor_ir.graph @pruned_concatenate(
     %in0: tensor<8x2xf32> {nv_tensor_ir.stride = "(2,1)"},
     %in1: tensor<8x4xf32> {nv_tensor_ir.stride = "(4,1)"},
@@ -307,7 +358,9 @@ nv_tensor_ir.graph @pruned_concatenate(
 // CHECK:         %[[ADD:.*]] = addf %[[T0]], %[[HALF]]
 // CHECK:         yield %[[ADD]]
 // CHECK:       }
-// CHECK:       store_view_tko weak %[[RESULT]]
+// CHECK:       %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [8, 5, 2], strides = [10, 2, 1]
+// CHECK:       %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK:       store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%{{.*}}, %[[SEL]], %{{.*}}]
 nv_tensor_ir.graph @self_ref_pruned_concatenate(
     %arg0: tensor<8x2xf32> {nv_tensor_ir.stride = "(2,1)"},
     %arg1: tensor<8x8xf32> {nv_tensor_ir.stride = "(8,1)"}

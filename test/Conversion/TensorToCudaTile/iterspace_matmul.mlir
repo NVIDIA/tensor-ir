@@ -4,11 +4,18 @@
 // TEST 1: Simple 2D matmul (no batch)
 // ============================================================================
 // CHECK-LABEL: @test_matmul_2d_simple
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
-// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x128xf32>
-// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<128x16xf32>
+// CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [32, 128], strides = [128, 1]
+// CHECK: %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
+// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%{{.*}}, %{{.*}}] : {{.*}} -> tile<32x128xf32>
+// CHECK: %[[RHS_VIEW:.*]] = make_tensor_view %[[IN1]], shape = [128, 16], strides = [16, 1]
+// CHECK: %[[RHS_PVIEW:.*]] = make_partition_view %[[RHS_VIEW]]
+// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak %[[RHS_PVIEW]][%{{.*}}, %{{.*}}] : {{.*}} -> tile<128x16xf32>
 // CHECK: %[[RESULT:.*]] = mmaf %[[LHS]], %[[RHS]], %[[ACCUM]]
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 16], strides = [16, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%{{.*}}, %{{.*}}]
 
 nv_tensor_ir.graph @test_matmul_2d_simple(
     %arg0: tensor<32x128xf32>,
@@ -26,14 +33,21 @@ nv_tensor_ir.graph @test_matmul_2d_simple(
 // TEST 2: Simple 3D matmul (one batch per block)
 // ============================================================================
 // CHECK-LABEL: @test_matmul_3d_simple_1
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
-// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE_LHS:tile<1x32x128xf32>]]
-// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE_RHS:tile<1x128x16xf32>]]
+// CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [8, 32, 128], strides = [4096, 128, 1]
+// CHECK: %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
+// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%{{.*}}, %{{.*}}, %{{.*}}] : {{.*}} -> [[TILE_LHS:tile<1x32x128xf32>]]
+// CHECK: %[[RHS_VIEW:.*]] = make_tensor_view %[[IN1]], shape = [8, 128, 16], strides = [2048, 16, 1]
+// CHECK: %[[RHS_PVIEW:.*]] = make_partition_view %[[RHS_VIEW]]
+// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak %[[RHS_PVIEW]][%{{.*}}, %{{.*}}, %{{.*}}] : {{.*}} -> [[TILE_RHS:tile<1x128x16xf32>]]
 // CHECK: %[[LHS2:.*]] = reshape %[[LHS]] : [[TILE_LHS]] -> tile<32x128xf32>
 // CHECK: %[[RHS2:.*]] = reshape %[[RHS]] : [[TILE_RHS]] -> tile<128x16xf32>
 // CHECK: %[[MMA:.*]] = mmaf %[[LHS2]], %[[RHS2]], %[[ACCUM]]
 // CHECK: %[[RESULT:.*]] = reshape %[[MMA]] : tile<32x16xf32> -> tile<1x32x16xf32>
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [8, 32, 16], strides = [512, 16, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%{{.*}}, %{{.*}}, %{{.*}}]
 
 nv_tensor_ir.graph @test_matmul_3d_simple_1(
     %arg0: tensor<8x32x128xf32>,
@@ -51,11 +65,18 @@ nv_tensor_ir.graph @test_matmul_3d_simple_1(
 // TEST 3: Simple 3D matmul (multiple batches per block)
 // ============================================================================
 // CHECK-LABEL: @test_matmul_3d_simple_2
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<2x32x16xf32>
-// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<2x32x128xf32>
-// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<2x128x16xf32>
+// CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [8, 32, 128], strides = [4096, 128, 1]
+// CHECK: %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
+// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%{{.*}}, %{{.*}}, %{{.*}}] : {{.*}} -> tile<2x32x128xf32>
+// CHECK: %[[RHS_VIEW:.*]] = make_tensor_view %[[IN1]], shape = [8, 128, 16], strides = [2048, 16, 1]
+// CHECK: %[[RHS_PVIEW:.*]] = make_partition_view %[[RHS_VIEW]]
+// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak %[[RHS_PVIEW]][%{{.*}}, %{{.*}}, %{{.*}}] : {{.*}} -> tile<2x128x16xf32>
 // CHECK: %[[RESULT:.*]] = mmaf %[[LHS]], %[[RHS]], %[[ACCUM]]
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [8, 32, 16], strides = [512, 16, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%{{.*}}, %{{.*}}, %{{.*}}]
 
 nv_tensor_ir.graph @test_matmul_3d_simple_2(
     %arg0: tensor<8x32x128xf32>,
@@ -73,6 +94,7 @@ nv_tensor_ir.graph @test_matmul_3d_simple_2(
 // TEST 4: Small matmul (no loop) with transpose
 // ============================================================================
 // CHECK-LABEL: @test_matmul_small_transpose
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST3:.*]] = constant <i32: 3> : tile<i32>
 // CHECK-DAG: %[[CST4:.*]] = constant <i32: 4> : tile<i32>
@@ -82,11 +104,17 @@ nv_tensor_ir.graph @test_matmul_3d_simple_2(
 // CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[CST4]]
 // CHECK: %[[IDX_N:.*]] = remi %[[TEMP]], %[[CST3]]
 // CHECK: %[[IDX_M:.*]] = divi %[[TEMP]], %[[CST3]]
-// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak {{.*}}[%[[IDX_B]], %[[IDX_M]], %[[ZERO]]] : {{.*}} -> tile<2x32x128xf32>
-// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak {{.*}}[%[[IDX_B]], %[[ZERO]], %[[IDX_N]]] : {{.*}} -> tile<2x128x16xf32>
+// CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [8, 64, 128], strides = [8192, 128, 1]
+// CHECK: %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
+// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%[[IDX_B]], %[[IDX_M]], %[[ZERO]]] : {{.*}} -> tile<2x32x128xf32>
+// CHECK: %[[RHS_VIEW:.*]] = make_tensor_view %[[IN1]], shape = [8, 128, 48], strides = [6144, 48, 1]
+// CHECK: %[[RHS_PVIEW:.*]] = make_partition_view %[[RHS_VIEW]]
+// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak %[[RHS_PVIEW]][%[[IDX_B]], %[[ZERO]], %[[IDX_N]]] : {{.*}} -> tile<2x128x16xf32>
 // CHECK: %[[MMA:.*]] = mmaf %[[LHS]], %[[RHS]], %[[ACCUM]]
 // CHECK: %[[RESULT:.*]] = permute %[[MMA]] [0, 2, 1] : tile<2x32x16xf32> -> tile<2x16x32xf32>
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [8, 48, 64], strides = [3072, 64, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[IDX_B]], %[[IDX_N]], %[[IDX_M]]]
 
 nv_tensor_ir.graph @test_matmul_small_transpose(
     %arg0: tensor<8x64x128xf32>,
@@ -105,6 +133,7 @@ nv_tensor_ir.graph @test_matmul_small_transpose(
 // TEST 5: Large matmul (one loop)
 // ============================================================================
 // CHECK-LABEL: @test_matmul_large_one_loop
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST1:.*]] = constant <i32: 1> : tile<i32>
 // CHECK-DAG: %[[CST2:.*]] = constant <i32: 2> : tile<i32>
@@ -118,11 +147,17 @@ nv_tensor_ir.graph @test_matmul_small_transpose(
 // CHECK: %[[IDX_N:.*]] = divi %[[TEMP]], %[[CST2]]
 // CHECK: %[[RESULT:.*]] = for %[[IDX_K:.*]] in (%[[ZERO]] to %[[CST8]], step %[[CST1]])
 // CHECK-SAME: iter_values(%[[ACCUM:.*]] = %[[INIT]])
-// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak {{.*}}[%[[IDX_B]], %[[IDX_M]], %[[IDX_K]]] : {{.*}} -> tile<2x32x128xf32>
-// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak {{.*}}[%[[IDX_B]], %[[IDX_K]], %[[IDX_N]]] : {{.*}} -> tile<2x128x16xf32>
+// CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [8, 64, 1024], strides = [65536, 1024, 1]
+// CHECK: %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
+// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%[[IDX_B]], %[[IDX_M]], %[[IDX_K]]] : {{.*}} -> tile<2x32x128xf32>
+// CHECK: %[[RHS_VIEW:.*]] = make_tensor_view %[[IN1]], shape = [8, 1024, 48], strides = [49152, 48, 1]
+// CHECK: %[[RHS_PVIEW:.*]] = make_partition_view %[[RHS_VIEW]]
+// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak %[[RHS_PVIEW]][%[[IDX_B]], %[[IDX_K]], %[[IDX_N]]] : {{.*}} -> tile<2x128x16xf32>
 // CHECK: %[[MMA:.*]] = mmaf %[[LHS]], %[[RHS]], %[[ACCUM]]
 // CHECK: continue %[[MMA]] : tile<2x32x16xf32>
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [8, 64, 48], strides = [3072, 48, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[IDX_B]], %[[IDX_M]], %[[IDX_N]]]
 
 nv_tensor_ir.graph @test_matmul_large_one_loop(
     %arg0: tensor<8x64x1024xf32>,
@@ -140,6 +175,7 @@ nv_tensor_ir.graph @test_matmul_large_one_loop(
 // TEST 6: Large matmul (two loops)
 // ============================================================================
 // CHECK-LABEL: @test_matmul_large_two_loops
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST1:.*]] = constant <i32: 1> : tile<i32>
 // CHECK-DAG: %[[CST2:.*]] = constant <i32: 2> : tile<i32>
@@ -152,14 +188,20 @@ nv_tensor_ir.graph @test_matmul_large_one_loop(
 // CHECK-SAME: iter_values(%[[IARG1:.*]] = %[[INIT]])
 // CHECK: %[[INNER:.*]] = for %[[IVAR2:.*]] in (%[[ZERO]] to %[[CST4]], step %[[CST1]])
 // CHECK-SAME: iter_values(%[[IARG2:.*]] = %[[IARG1]])
-// CHECK:   %[[LHS:.*]], %{{.*}} = load_view_tko weak {{.*}}[%[[IDX_M]], %[[IVAR1]], %[[IVAR2]]] : {{.*}} -> tile<32x16x8xf32>
-// CHECK:   %[[RHS:.*]], %{{.*}} = load_view_tko weak {{.*}}[%[[IVAR1]], %[[IVAR2]], %[[IDX_N]]] : {{.*}} -> tile<16x8x16xf32>
+// CHECK:   %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [64, 32, 32], strides = [1024, 1, 32]
+// CHECK:   %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
+// CHECK:   %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%[[IDX_M]], %[[IVAR1]], %[[IVAR2]]] : {{.*}} -> tile<32x16x8xf32>
+// CHECK:   %[[RHS_VIEW:.*]] = make_tensor_view %[[IN1]], shape = [32, 32, 48], strides = [1536, 48, 1]
+// CHECK:   %[[RHS_PVIEW:.*]] = make_partition_view %[[RHS_VIEW]]
+// CHECK:   %[[RHS:.*]], %{{.*}} = load_view_tko weak %[[RHS_PVIEW]][%[[IVAR1]], %[[IVAR2]], %[[IDX_N]]] : {{.*}} -> tile<16x8x16xf32>
 // CHECK:   %[[LHS2:.*]] = reshape %[[LHS]] : tile<32x16x8xf32> -> tile<32x128xf32>
 // CHECK:   %[[RHS2:.*]] = reshape %[[RHS]] : tile<16x8x16xf32> -> tile<128x16xf32>
 // CHECK:   %[[MMA:.*]] = mmaf %[[LHS2]], %[[RHS2]], %[[IARG2]]
 // CHECK:   continue %[[MMA]] : tile<32x16xf32>
 // CHECK: continue %[[INNER]] : tile<32x16xf32>
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [64, 48], strides = [48, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[IDX_M]], %[[IDX_N]]]
 
 nv_tensor_ir.graph @test_matmul_large_two_loops(
     %arg0: tensor<64x32x32xf32> {nv_tensor_ir.stride = "(1024,32,1)"},
@@ -180,13 +222,20 @@ nv_tensor_ir.graph @test_matmul_large_two_loops(
 // TEST 7: Matmul with broadcast
 // ============================================================================
 // CHECK-LABEL: @test_matmul_broadcast
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
-// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x128xf32>
-// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<128x16xf32>
+// CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [32, 128], strides = [128, 1]
+// CHECK: %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
+// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%{{.*}}, %{{.*}}] : {{.*}} -> tile<32x128xf32>
+// CHECK: %[[RHS_VIEW:.*]] = make_tensor_view %[[IN1]], shape = [128, 16], strides = [16, 1]
+// CHECK: %[[RHS_PVIEW:.*]] = make_partition_view %[[RHS_VIEW]]
+// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak %[[RHS_PVIEW]][%{{.*}}, %{{.*}}] : {{.*}} -> tile<128x16xf32>
 // CHECK: %[[MMA:.*]] = mmaf %[[LHS]], %[[RHS]], %[[ACCUM]]
 // CHECK: %[[RESHAPE:.*]] = reshape %[[MMA]] : tile<32x16xf32> -> tile<1x32x16xf32>
 // CHECK: %[[RESULT:.*]] = broadcast %[[RESHAPE]] : tile<1x32x16xf32> -> tile<2x32x16xf32>
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [8, 32, 16], strides = [512, 16, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%{{.*}}, %{{.*}}, %{{.*}}]
 
 nv_tensor_ir.graph @test_matmul_broadcast(
     %arg0: tensor<32x128xf32>,
@@ -206,16 +255,23 @@ nv_tensor_ir.graph @test_matmul_broadcast(
 // TEST 8: Matmul with broadcasts that split dimensions
 // ============================================================================
 // CHECK-LABEL: @test_matmul_dimension_split
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<2x64x16xf32>
-// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE_LHS:tile<2x8x8x128xf32>]]
-// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE_RHS:tile<2x128x4x4xf32>]]
+// CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [8, 8, 8, 128], strides = [8192, 1024, 128, 1]
+// CHECK: %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
+// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] : {{.*}} -> [[TILE_LHS:tile<2x8x8x128xf32>]]
+// CHECK: %[[RHS_VIEW:.*]] = make_tensor_view %[[IN1]], shape = [8, 128, 4, 4], strides = [2048, 16, 4, 1]
+// CHECK: %[[RHS_PVIEW:.*]] = make_partition_view %[[RHS_VIEW]]
+// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak %[[RHS_PVIEW]][%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] : {{.*}} -> [[TILE_RHS:tile<2x128x4x4xf32>]]
 // CHECK: %[[LHS2:.*]] = reshape %[[LHS]] : [[TILE_LHS]] -> tile<2x64x128xf32>
 // CHECK: %[[RHS2:.*]] = reshape %[[RHS]] : [[TILE_RHS]] -> tile<2x128x16xf32>
 // CHECK: %[[MMA:.*]] = mmaf %[[LHS2]], %[[RHS2]], %[[ACCUM]]
 // CHECK: %[[RESHAPE:.*]] = reshape %[[MMA]] : tile<2x64x16xf32> -> [[TILE_RS:tile<1x1x2x8x8x4x4xf32>]]
 // CHECK: %[[TRANS:.*]] = permute %[[RESHAPE]] [2, 3, 0, 4, 5, 1, 6] : [[TILE_RS]] -> [[TILE_TR:tile<2x8x1x8x4x1x4xf32>]]
 // CHECK: %[[RESULT:.*]] = broadcast %[[TRANS]] : [[TILE_TR]] -> tile<2x8x1x8x4x2x4xf32>
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [8, 8, 8, 8, 4, 8, 4], strides = [65536, 8192, 1024, 128, 32, 4, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}]
 
 nv_tensor_ir.graph @test_matmul_dimension_split(
     %arg0: tensor<8x64x128xf32>,
@@ -242,13 +298,18 @@ nv_tensor_ir.graph @test_matmul_dimension_split(
 // that operand order.
 // ============================================================================
 // CHECK-LABEL: @matmul_blockarg_lhs
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK:       %[[ACC:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
-// CHECK:       make_tensor_view %{{.*}}, shape = [128, 64]
-// CHECK:       %[[LHS:.*]], %{{.*}} = load_view_tko weak {{.*}} -> tile<32x64xf32>, token
-// CHECK:       make_tensor_view %{{.*}}, shape = [64, 128]
-// CHECK:       %[[RHS:.*]], %{{.*}} = load_view_tko weak {{.*}} -> tile<64x16xf32>, token
+// CHECK:       %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [128, 64], strides = [64, 1]
+// CHECK:       %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
+// CHECK:       %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%{{.*}}, %{{.*}}] : {{.*}} -> tile<32x64xf32>, token
+// CHECK:       %[[RHS_VIEW:.*]] = make_tensor_view %[[IN1]], shape = [64, 128], strides = [128, 1]
+// CHECK:       %[[RHS_PVIEW:.*]] = make_partition_view %[[RHS_VIEW]]
+// CHECK:       %[[RHS:.*]], %{{.*}} = load_view_tko weak %[[RHS_PVIEW]][%{{.*}}, %{{.*}}] : {{.*}} -> tile<64x16xf32>, token
 // CHECK:       %[[MMA:.*]] = mmaf %[[LHS]], %[[RHS]], %[[ACC]]
-// CHECK:       store_view_tko weak %[[MMA]]
+// CHECK:       %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [128, 128], strides = [128, 1]
+// CHECK:       %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK:       store_view_tko weak %[[MMA]], %[[OUT_PVIEW]][%{{.*}}, %{{.*}}]
 nv_tensor_ir.graph @matmul_blockarg_lhs(
     %arg0: tensor<128x64xf32> {nv_tensor_ir.stride = "(64,1)"},
     %arg1: tensor<64x128xf32> {nv_tensor_ir.stride = "(128,1)"}
@@ -265,28 +326,35 @@ nv_tensor_ir.graph @matmul_blockarg_lhs(
 // TEST 10: Matmul with two contracting dimensions (one loop).
 // ============================================================================
 // CHECK-LABEL: @test_matmul_two_dimensions_one_loop
+// CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST1:.*]] = constant <i32: 1> : tile<i32>
-// CHECK-DAG: %[[CST3:.*]] = constant <i32: 3> : tile<i32>
+// CHECK-DAG: %[[CST6:.*]] = constant <i32: 6> : tile<i32>
 // CHECK-DAG: %[[INIT:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
-// CHECK: %[[RESULT:.*]] = for %[[IDX_K:.*]] in (%[[ZERO]] to %[[CST3]], step %[[CST1]])
+// CHECK: %[[RESULT:.*]] = for %[[IDX_K:.*]] in (%[[ZERO]] to %[[CST6]], step %[[CST1]])
 // CHECK-SAME: iter_values(%[[ACCUM:.*]] = %[[INIT]])
-// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak {{.*}}[%[[ZERO]], %[[ZERO]], %[[IDX_K]]] : {{.*}} -> tile<32x16x1xf32>
-// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak {{.*}}[%[[ZERO]], %[[IDX_K]], %[[ZERO]]] : {{.*}} -> tile<16x1x16xf32>
-// CHECK: %[[LHS2:.*]] = reshape %[[LHS]] : tile<32x16x1xf32> -> tile<32x16xf32>
-// CHECK: %[[RHS2:.*]] = reshape %[[RHS]] : tile<16x1x16xf32> -> tile<16x16xf32>
+// CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [32, 16, 48], strides = [1, 32, 1024]
+// CHECK: %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
+// CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%[[ZERO]], %[[ZERO]], %[[IDX_K]]] : {{.*}} -> tile<32x16x8xf32>
+// CHECK: %[[RHS_VIEW:.*]] = make_tensor_view %[[IN1]], shape = [16, 48, 16], strides = [16, 1024, 1]
+// CHECK: %[[RHS_PVIEW:.*]] = make_partition_view %[[RHS_VIEW]]
+// CHECK: %[[RHS:.*]], %{{.*}} = load_view_tko weak %[[RHS_PVIEW]][%[[ZERO]], %[[IDX_K]], %[[ZERO]]] : {{.*}} -> tile<16x8x16xf32>
+// CHECK: %[[LHS2:.*]] = reshape %[[LHS]] : tile<32x16x8xf32> -> tile<32x128xf32>
+// CHECK: %[[RHS2:.*]] = reshape %[[RHS]] : tile<16x8x16xf32> -> tile<128x16xf32>
 // CHECK: %[[MMA:.*]] = mmaf %[[LHS2]], %[[RHS2]], %[[ACCUM]]
 // CHECK: continue %[[MMA]] : tile<32x16xf32>
-// CHECK: store_view_tko weak %[[RESULT]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 16], strides = [16, 1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[ZERO]]]
 
 nv_tensor_ir.graph @test_matmul_two_dimensions_one_loop(
-    %arg0: tensor<32x16x3xf32> {nv_tensor_ir.stride = "(1,32,1024)"},
-    %arg1: tensor<16x3x16xf32> {nv_tensor_ir.stride = "(16,1024,1)"}
+    %arg0: tensor<32x16x48xf32> {nv_tensor_ir.stride = "(1,32,1024)"},
+    %arg1: tensor<16x48x16xf32> {nv_tensor_ir.stride = "(16,1024,1)"}
     ) -> (tensor<32x16xf32>)
     attributes {tile_size = array<i32: 32, 16>} {
-  %lhs = reshape %arg0 : tensor<32x16x3xf32> -> tensor<32x48xf32>
-  %rhs = reshape %arg1 : tensor<16x3x16xf32> -> tensor<48x16xf32>
+  %lhs = reshape %arg0 : tensor<32x16x48xf32> -> tensor<32x768xf32>
+  %rhs = reshape %arg1 : tensor<16x48x16xf32> -> tensor<768x16xf32>
   %out = matmul(%lhs, %rhs)
-    : (tensor<32x48xf32>, tensor<48x16xf32>) -> tensor<32x16xf32>
+    : (tensor<32x768xf32>, tensor<768x16xf32>) -> tensor<32x16xf32>
   results %out : tensor<32x16xf32>
 }

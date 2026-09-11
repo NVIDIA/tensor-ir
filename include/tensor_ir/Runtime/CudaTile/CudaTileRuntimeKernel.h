@@ -77,6 +77,13 @@ public:
 
   explicit CudaTileRuntimeKernel(std::string name) : name_(std::move(name)) {}
 
+  Kind getKind() const override { return Kind::CudaTile; }
+
+  // To implement LLVM-style polymorphism
+  static bool classof(const IRuntimeKernel *kernel) {
+    return kernel->getKind() == Kind::CudaTile;
+  }
+
   Status initializeRuntimeState() const override;
 
   Status unloadRuntimeState() const override;

@@ -22,6 +22,7 @@ from .dsl import (
 )
 from . import cuda_tile_backend as _cuda_tile_backend
 from .dtypes import DataType
+from .profile import KernelProfile, ProfileResult
 from .tensor_spec import TensorSpec
 from . import ops as _ops
 
@@ -34,6 +35,8 @@ __all__ = [
     "CompileOptions",
     "CompiledKernel",
     "DataType",
+    "KernelProfile",
+    "ProfileResult",
     "TensorSpec",
     "CudaTileArtifactKind",
     "ProgramCache",

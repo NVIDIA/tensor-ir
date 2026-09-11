@@ -78,8 +78,45 @@ class _TimingStats:
     outliers: int | None
 
 
-def profile_launches(launch: Callable[[], None], config: ProfilingConfig) -> None:
-    """Profile launches directly with CUPTI and print kernel timings."""
+@dataclass(frozen=True)
+class KernelProfile:
+    """Raw CUPTI durations and summary statistics for one CUDA kernel."""
+
+    name: str
+    durations_us: tuple[float, ...]
+    minimum_us: float
+    average_us: float
+    median_us: float
+    maximum_us: float
+    outliers: int | None
+
+    def __str__(self) -> str:
+        message = (
+            f"{self.name}: calls={len(self.durations_us)}, "
+            f"min={self.minimum_us:.3f} us, "
+            f"max={self.maximum_us:.3f} us, "
+            f"median={self.median_us:.3f} us, "
+            f"avg={self.average_us:.3f} us"
+        )
+        if self.outliers is not None:
+            message += f", outliers={self.outliers}"
+        return message
+
+
+@dataclass(frozen=True)
+class ProfileResult:
+    """Profiling results grouped by CUPTI kernel name."""
+
+    kernels: tuple[KernelProfile, ...]
+
+
+def profile_launches(
+    launch: Callable[[], None],
+    config: ProfilingConfig,
+    *,
+    print_results: bool = True,
+) -> ProfileResult:
+    """Profile launches directly with CUPTI and optionally print kernel timings."""
 
     with _profile_lock:
         init_cupti()
@@ -112,17 +149,29 @@ def profile_launches(launch: Callable[[], None], config: ProfilingConfig) -> Non
                 name, duration = _cupti_buffer_queue.get()
                 kernel_times.setdefault(name, []).append(duration / 1e3)  # ns to us
 
-    for name, times in kernel_times.items():
-        stats = _timing_stats(times)
-        message = (
-            f"[TENSOR_IR_PROFILE] {name}: "
-            f"calls={len(times)}, min={stats.minimum:.3f} us, "
-            f"max={stats.maximum:.3f} us, "
-            f"median={stats.median:.3f} us, avg={stats.average:.3f} us"
+    result = ProfileResult(
+        kernels=tuple(
+            _kernel_profile(name, durations_us)
+            for name, durations_us in kernel_times.items()
         )
-        if stats.outliers is not None:
-            message += f", outliers={stats.outliers}"
-        print(message)
+    )
+    if print_results:
+        for kernel in result.kernels:
+            print(f"[TENSOR_IR_PROFILE] {kernel}")
+    return result
+
+
+def _kernel_profile(name: str, durations_us: list[float]) -> KernelProfile:
+    stats = _timing_stats(durations_us)
+    return KernelProfile(
+        name=name,
+        durations_us=tuple(durations_us),
+        minimum_us=stats.minimum,
+        average_us=stats.average,
+        median_us=stats.median,
+        maximum_us=stats.maximum,
+        outliers=stats.outliers,
+    )
 
 
 def _timing_stats(times: list[float]) -> _TimingStats:

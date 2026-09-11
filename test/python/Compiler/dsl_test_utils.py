@@ -13,6 +13,16 @@ from dsl_reference import evaluate_trace_reference
 from nv_tensor_ir.dsl.dsl import KernelFunction
 
 
+def _pytest_unique_name() -> str:
+    current_test = os.environ.get("PYTEST_CURRENT_TEST")
+    if current_test is None:
+        raise RuntimeError(
+            "PYTEST_CURRENT_TEST is required when test profiling is enabled"
+        )
+    node_id = current_test.removesuffix(" (call)")
+    return node_id
+
+
 def _require_runtime_launch() -> None:
     if os.environ.get("TENSOR_IR_SKIP_RUNTIME_LAUNCH") == "1":
         pytest.skip("runtime launch requires a PTX JIT compiler")
@@ -28,6 +38,7 @@ def _compile_run_assert(
     rtol: float = 1e-3,
     atol: float = 1e-3,
     mlir_probes: tuple[str, ...] = (),
+    profile: bool = False,
 ):
     if options is not None:
         compile_kwargs = {"options": options}
@@ -46,7 +57,14 @@ def _compile_run_assert(
     for probe in mlir_probes:
         assert probe in mlir
 
-    _run_assert_trace(compiled, *inputs, output=output, rtol=rtol, atol=atol)
+    _run_assert_trace(
+        compiled,
+        *inputs,
+        output=output,
+        rtol=rtol,
+        atol=atol,
+        profile=profile,
+    )
     return compiled
 
 
@@ -56,9 +74,13 @@ def _run_assert_trace(
     output: torch.Tensor,
     rtol: float = 1e-3,
     atol: float = 1e-3,
+    profile: bool = False,
 ) -> None:
     _require_runtime_launch()
-    compiled.run(*inputs, output=output)
+    if profile:
+        _run_kernel(compiled, *inputs, output=output, profile=True)
+    else:
+        compiled.run(*inputs, output=output)
     torch.cuda.synchronize()
     torch.testing.assert_close(
         output,
@@ -66,6 +88,23 @@ def _run_assert_trace(
         rtol=rtol,
         atol=atol,
     )
+
+
+def _run_kernel(
+    compiled: tir.CompiledKernel,
+    *inputs: object,
+    output: object | tuple[object, ...],
+    profile: bool = False,
+) -> tir.ProfileResult | None:
+    """Run a test kernel, optionally collecting CUPTI profiling results."""
+    if profile:
+        result = compiled.run_profile(*inputs, output=output, print_results=False)
+        unique_name = _pytest_unique_name()
+        for kernel in result.kernels:
+            print(f"[TENSOR_IR_PROFILE] {unique_name}: {kernel}")
+        return result
+    compiled.run(*inputs, output=output)
+    return None
 
 
 def _assert_compile_error(

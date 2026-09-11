@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .module_builder import TensorInfoOverrides, build_mlir_module
-from .profile import ProfilingConfig, profile_launches
+from .profile import ProfileResult, ProfilingConfig, profile_launches
 from .tensor_spec import tensor_spec_from_value
 from .tracing import TensorInfo, TraceGraph, _trace_graph_context
 
@@ -60,14 +60,15 @@ class CompiledKernel:
         output: object | tuple[object, ...],
         warmup: int = 1,
         iterations: int = 10,
-    ) -> None:
-        """Run this kernel under CUPTI and print kernel timings."""
+        print_results: bool = True,
+    ) -> ProfileResult:
+        """Run this kernel under CUPTI and return the collected kernel timings."""
         config = ProfilingConfig(warmup=warmup, iterations=iterations)
 
         def launch() -> None:
             self.run(*inputs, output=output)
 
-        profile_launches(launch, config)
+        return profile_launches(launch, config, print_results=print_results)
 
 
 @dataclass(frozen=True)

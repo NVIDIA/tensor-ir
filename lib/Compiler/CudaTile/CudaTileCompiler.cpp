@@ -16,6 +16,7 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "cuda_tile/Bytecode/Writer/BytecodeWriter.h"
@@ -137,6 +138,7 @@ CudaTileCompiler::makeFrontendOptions(
   options.debug.dumpCudaTileIRPath = debug.dumpCudaTileIRPath;
   options.debug.printIRAfterAll = debug.printIRAfterAll;
   options.debug.printIRTreeDir = debug.printIRTreeDir;
+  options.debug.reproducerDir = debug.reproducerDir;
   options.debug.enableTiming = debug.enableTiming;
   applyBoolEnvVar("TENSOR_IR_PRINT_IR", options.debug.printCudaTileIR);
   return options;
@@ -156,6 +158,43 @@ bool CudaTileCompiler::canCompile(mlir::ModuleOp module,
                                                           frontendOptions);
 }
 
+std::string createUniqueReproducerDir(const std::string &dir) {
+  auto stripTrailingSlash = [](SmallString<128> &p) {
+    while (p.size() > 1 && llvm::sys::path::is_separator(p.back())) {
+      p.pop_back();
+    }
+  };
+
+  if (!dir.empty()) {
+    SmallString<128> reproducerPath(dir);
+    if (auto ec = llvm::sys::fs::make_absolute(reproducerPath)) {
+      llvm::errs() << "failed to read the absolute path for mlir reproducer: "
+                   << ec.message() << "\n";
+      return std::string();
+    }
+
+    stripTrailingSlash(reproducerPath);
+    if (auto ec = llvm::sys::fs::create_directories(
+            llvm::sys::path::parent_path(reproducerPath))) {
+      llvm::errs()
+          << "failed to create the parent directory for mlir reproducer: "
+          << ec.message() << "\n";
+      return std::string();
+    }
+
+    SmallString<128> uniqueReproducerDir;
+    if (auto ec = llvm::sys::fs::createUniqueDirectory(reproducerPath,
+                                                       uniqueReproducerDir)) {
+      llvm::errs()
+          << "failed to create a unique directory for mlir reproducer: "
+          << ec.message() << "\n";
+      return std::string();
+    }
+    return std::string(uniqueReproducerDir);
+  }
+  return std::string();
+}
+
 StatusOr<::tensor_ir::rt::IRuntimeKernelPtr>
 CudaTileCompiler::compile(mlir::ModuleOp module,
                           const CompileOptions &options) {
@@ -165,8 +204,10 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
     return Status::InvalidArgument("Invalid CudaTile compilation options");
   }
 
-
+  // create a reproducer directory once per compilation
   IRDebugOptions debug = cudaTileOptions->irDebug;
+  debug.reproducerDir = createUniqueReproducerDir(debug.reproducerDir);
+
   applyPathEnvVar("TENSOR_IR_DUMP_IR", debug.dumpCudaTileIRPath);
   applyPathEnvVar("TENSOR_IR_DUMP_TILEIR_BC", debug.dumpTileIRBCPath);
   applyPathEnvVar("TENSOR_IR_LOAD_TILEIR_BC", debug.loadTileIRBCPath);

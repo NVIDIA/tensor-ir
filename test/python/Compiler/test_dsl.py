@@ -17,6 +17,7 @@ from dsl_test_utils import (
     _module_text,
     _require_runtime_launch,
     _run_assert_trace,
+    _run_kernel,
 )
 from nv_tensor_ir.dsl.dsl import KernelFunction
 from nv_tensor_ir.dsl.tracing import TensorInfo, TraceGraph
@@ -219,7 +220,7 @@ def mixed_output_matmul_kernel(a, b):
     return tir.matmul(a, b, dtype=tir.DataType.F32)
 
 
-def test_add_sample_module_builder() -> None:
+def test_add_sample_module_builder(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     output = torch.empty_like(a)
@@ -239,10 +240,10 @@ def test_add_sample_module_builder() -> None:
     assert isinstance(bytecode, bytes)
     assert bytecode
 
-    _run_assert_trace(compiled, a, b, output=output)
+    _run_assert_trace(compiled, a, b, output=output, profile=profiling)
 
 
-def test_trace_then_compile() -> None:
+def test_trace_then_compile(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     output = torch.empty_like(a)
@@ -252,28 +253,25 @@ def test_trace_then_compile() -> None:
 
     assert compiled.graph is graph
     assert "nv_tensor_ir.graph @traced_add" in _module_text(compiled)
-    _run_assert_trace(compiled, a, b, output=output)
+    _run_assert_trace(compiled, a, b, output=output, profile=profiling)
 
 
-def test_add_kernel_ground_truth() -> None:
+def test_add_kernel_ground_truth(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     output = torch.empty_like(a)
 
     compiled = tir.compile(add_kernel, a, b, output=output, name="add_ground_truth")
     _require_runtime_launch()
-    compiled.run(a, b, output=output)
+    _run_kernel(compiled, a, b, output=output, profile=profiling)
     torch.cuda.synchronize()
     torch.testing.assert_close(output, a + b, rtol=1e-3, atol=1e-3)
 
 
 def test_run_profile_executes_kernel() -> None:
-    import_or_skip = os.getenv("TENSOR_IR_DSL_TEST_FORCE_PROFILING") not in (
-        "1",
-        "true",
-    )
+    import_or_skip = True
     # ${tir-internal-release begin}
-    import_or_skip = import_or_skip and os.getenv("CI") not in ("1", "true")
+    import_or_skip = os.getenv("CI") not in ("1", "true")
     # ${tir-internal-release end}
     if import_or_skip:
         pytest.importorskip("cupti")
@@ -284,10 +282,46 @@ def test_run_profile_executes_kernel() -> None:
     compiled = tir.compile(add_kernel, a, b, output=output, name="profile_add")
 
     _require_runtime_launch()
-    compiled.run_profile(a, b, output=output, warmup=1, iterations=3)
+    result = compiled.run_profile(a, b, output=output, warmup=1, iterations=3)
+    assert len(result.kernels) > 0
+    assert result.kernels[0].name
+    assert len(result.kernels[0].durations_us) > 0
 
 
-def test_dynamic_shape_pointwise_graph() -> None:
+def test_optional_profile_result(profiling: bool) -> None:
+    a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
+    b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
+    output = torch.empty_like(a)
+    compiled = tir.compile(add_kernel, a, b, output=output, name="optional_profile")
+
+    _require_runtime_launch()
+    result = _run_kernel(compiled, a, b, output=output, profile=profiling)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output, a + b, rtol=1e-3, atol=1e-3)
+
+    if profiling:
+        assert isinstance(result, tir.ProfileResult)
+        assert result.kernels
+        for kernel_result in result.kernels:
+            assert kernel_result.name
+            assert len(kernel_result.durations_us) == 10
+            assert kernel_result.minimum_us == min(kernel_result.durations_us)
+            assert kernel_result.maximum_us == max(kernel_result.durations_us)
+            assert (
+                kernel_result.minimum_us
+                <= kernel_result.median_us
+                <= kernel_result.maximum_us
+            )
+            assert (
+                kernel_result.minimum_us
+                <= kernel_result.average_us
+                <= kernel_result.maximum_us
+            )
+    else:
+        assert result is None
+
+
+def test_dynamic_shape_pointwise_graph(profiling: bool) -> None:
     sample_a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     sample_b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     sample_output = torch.empty_like(sample_a)
@@ -319,7 +353,7 @@ def test_dynamic_shape_pointwise_graph() -> None:
     output = torch.empty_like(a)
 
     _require_runtime_launch()
-    compiled.run(a, b, output=output)
+    _run_kernel(compiled, a, b, output=output, profile=profiling)
     torch.cuda.synchronize()
     torch.testing.assert_close(
         output,
@@ -347,7 +381,7 @@ def test_dynamic_shape_accepts_tensor_specs() -> None:
     assert 'nv_tensor_ir.stride = "(?,1)"' in mlir
 
 
-def test_dynamic_shape_transpose_graph() -> None:
+def test_dynamic_shape_transpose_graph(profiling: bool) -> None:
     sample_a = torch.randn((4, 8), device="cuda", dtype=torch.float32)
     sample_b = torch.randn((8, 4), device="cuda", dtype=torch.float32)
     sample_output = torch.empty_like(sample_b)
@@ -370,10 +404,10 @@ def test_dynamic_shape_transpose_graph() -> None:
     a = torch.randn((8, 16), device="cuda", dtype=torch.float32)
     b = torch.randn((16, 8), device="cuda", dtype=torch.float32)
     output = torch.empty_like(b)
-    _run_assert_trace(compiled, a, b, output=output)
+    _run_assert_trace(compiled, a, b, output=output, profile=profiling)
 
 
-def test_matmul_result_dtype() -> None:
+def test_matmul_result_dtype(profiling: bool) -> None:
     lhs = torch.randn((8, 16), device="cuda", dtype=torch.float16)
     rhs = torch.randn((16, 32), device="cuda", dtype=torch.float16)
     output = torch.empty((8, 32), device="cuda", dtype=torch.float32)
@@ -389,10 +423,18 @@ def test_matmul_result_dtype() -> None:
 
     mlir = _module_text(compiled)
     assert "(tensor<8x16xf16>, tensor<16x32xf16>) -> tensor<8x32xf32>" in mlir
-    _run_assert_trace(compiled, lhs, rhs, output=output, rtol=1e-2, atol=1e-2)
+    _run_assert_trace(
+        compiled,
+        lhs,
+        rhs,
+        output=output,
+        rtol=1e-2,
+        atol=1e-2,
+        profile=profiling,
+    )
 
 
-def test_dynamic_shape_matmul_graph() -> None:
+def test_dynamic_shape_matmul_graph(profiling: bool) -> None:
     lhs = torch.randn((8, 16), device="cuda", dtype=torch.float16)
     rhs = torch.randn((16, 32), device="cuda", dtype=torch.float16)
     output = torch.empty((8, 32), device="cuda", dtype=torch.float16)
@@ -413,7 +455,15 @@ def test_dynamic_shape_matmul_graph() -> None:
     mlir = _module_text(compiled)
     assert mlir.count("tensor<?x?xf16>") >= 3
     assert "matmul" in mlir
-    _run_assert_trace(compiled, lhs, rhs, output=output, rtol=1e-2, atol=1e-2)
+    _run_assert_trace(
+        compiled,
+        lhs,
+        rhs,
+        output=output,
+        rtol=1e-2,
+        atol=1e-2,
+        profile=profiling,
+    )
 
 
 def test_dynamic_shape_matmul_rejects_layout_propagation() -> None:
@@ -678,7 +728,7 @@ def test_compile_accepts_tensor_specs() -> None:
     )
 
 
-def test_compile_accepts_numpy_dlpack_metadata() -> None:
+def test_compile_accepts_numpy_dlpack_metadata(profiling: bool) -> None:
     np = pytest.importorskip("numpy")
 
     a_np = np.random.randn(8, 8).astype(np.float32)
@@ -703,7 +753,7 @@ def test_compile_accepts_numpy_dlpack_metadata() -> None:
     b = torch.from_numpy(b_np).cuda()
     output = torch.empty_like(a)
     _require_runtime_launch()
-    compiled.run(a, b, output=output)
+    _run_kernel(compiled, a, b, output=output, profile=profiling)
     torch.cuda.synchronize()
     torch.testing.assert_close(output, a + b, rtol=1e-5, atol=1e-5)
 
@@ -816,6 +866,7 @@ def test_convert_accepts_data_type() -> None:
 def test_public_api_surface() -> None:
     expected_ops = {
         "abs",
+        "add",
         "add_square",
         "atan2",
         "broadcast",
@@ -825,6 +876,7 @@ def test_public_api_surface() -> None:
         "constant",
         "convert",
         "cos",
+        "div",
         "elu",
         "exp",
         "floor",
@@ -840,6 +892,7 @@ def test_public_api_surface() -> None:
         "max",
         "min",
         "mod",
+        "mul",
         "neg",
         "pow",
         "reduce",
@@ -854,6 +907,7 @@ def test_public_api_surface() -> None:
         "softplus",
         "splat",
         "sqrt",
+        "sub",
         "swish",
         "tan",
         "tanh",
@@ -868,6 +922,8 @@ def test_public_api_surface() -> None:
             "CompileOptions",
             "CompiledKernel",
             "DataType",
+            "KernelProfile",
+            "ProfileResult",
             "TensorSpec",
             "CudaTileArtifactKind",
             "ProgramCache",
@@ -882,6 +938,10 @@ def test_public_api_surface() -> None:
     assert not hasattr(tir, "KernelFunction")
     assert not hasattr(tir, "ops")
     assert callable(tir.logical_not)
+    assert callable(tir.add)
+    assert callable(tir.sub)
+    assert callable(tir.mul)
+    assert callable(tir.div)
     assert callable(tir.relu)
     assert callable(tir.where)
 
@@ -892,7 +952,7 @@ def test_public_api_surface() -> None:
     assert isinstance(public_api_kernel, KernelFunction)
 
 
-def test_multiple_outputs() -> None:
+def test_multiple_outputs(profiling: bool) -> None:
     @tir.kernel
     def add_sub_kernel(a, b):
         return a + b, a - b
@@ -922,7 +982,13 @@ def test_multiple_outputs() -> None:
         compiled.run(a, b, output=add_output)
 
     _require_runtime_launch()
-    compiled.run(a, b, output=(add_output, sub_output))
+    _run_kernel(
+        compiled,
+        a,
+        b,
+        output=(add_output, sub_output),
+        profile=profiling,
+    )
     torch.cuda.synchronize()
 
     add_reference, sub_reference = evaluate_trace_reference(compiled.graph, a, b)
@@ -930,7 +996,7 @@ def test_multiple_outputs() -> None:
     torch.testing.assert_close(sub_output, sub_reference, rtol=1e-3, atol=1e-3)
 
 
-def test_matmul_and_static_control_flow_examples() -> None:
+def test_matmul_and_static_control_flow_examples(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     c = torch.randn((8, 8), device="cuda", dtype=torch.float32)
@@ -947,10 +1013,10 @@ def test_matmul_and_static_control_flow_examples() -> None:
         name="matmul_static_control_flow",
         options=options,
     )
-    _run_assert_trace(compiled, a, b, c, output=output)
+    _run_assert_trace(compiled, a, b, c, output=output, profile=profiling)
 
 
-def test_complex_poc_style_kernel() -> None:
+def test_complex_poc_style_kernel(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     c = torch.randn((8, 8), device="cuda", dtype=torch.float32)
@@ -970,4 +1036,12 @@ def test_complex_poc_style_kernel() -> None:
         options=options,
     )
 
-    _run_assert_trace(compiled, a, b, c, threshold, output=output)
+    _run_assert_trace(
+        compiled,
+        a,
+        b,
+        c,
+        threshold,
+        output=output,
+        profile=profiling,
+    )

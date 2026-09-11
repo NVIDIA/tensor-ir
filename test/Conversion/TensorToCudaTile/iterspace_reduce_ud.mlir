@@ -5,7 +5,7 @@
 // ============================================================================
 // CHECK-LABEL: @test_reduce_noloop_single
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
-// CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1
+// CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[VAL:.*]]: tile<f32>, %[[ACC:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = addf %[[ACC]], %[[VAL]] : tile<f32>
 // CHECK:   yield %[[RES]] : tile<f32>
@@ -31,7 +31,7 @@ nv_tensor_ir.graph @test_reduce_noloop_single(
 // CHECK-LABEL: @test_reduce_noloop_multiple
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf16>
-// CHECK: %[[RESULT:.*]]:2 = reduce %[[ARG0]], %[[ARG1]] dim=1
+// CHECK: %[[RESULT:.*]]:2 = reduce %[[ARG0]], %[[ARG1]] dim=1 identities=[1.000000e+00 : f32, 0.000000e+00 : f16]
 // CHECK:   (%[[VAL0:.*]]: tile<f32>, %[[ACC0:.*]]: tile<f32>, %[[VAL1:.*]]: tile<f16>, %[[ACC1:.*]]: tile<f16>)
 // CHECK:   %[[RES0:.*]] = mulf %[[ACC0]], %[[VAL0]] : tile<f32>
 // CHECK:   %[[RES1:.*]] = addf %[[ACC1]], %[[VAL1]] : tile<f16>
@@ -69,7 +69,7 @@ nv_tensor_ir.graph @test_reduce_noloop_multiple(
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[BLOCK]], %[[IVAR]]]
 // CHECK:   %[[INNER:.*]] = addf %[[IARG]], %[[ARG0]] : [[TILE]]
 // CHECK:   continue %[[INNER]] : [[TILE]]
-// CHECK: %[[RESULT:.*]] = reduce %[[LOOP]] dim=1
+// CHECK: %[[RESULT:.*]] = reduce %[[LOOP]] dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[VAL:.*]]: tile<f32>, %[[ACC:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = addf %[[ACC]], %[[VAL]] : tile<f32>
 // CHECK:   yield %[[RES]] : tile<f32>
@@ -106,7 +106,7 @@ nv_tensor_ir.graph @test_reduce_1loop_single(
 // CHECK:   %[[MUL:.*]] = mulf %[[IARG1]], %[[ARG0]] : [[TILE1]]
 // CHECK:   %[[ADD:.*]] = addf %[[IARG2]], %[[ARG1]] : [[TILE2]]
 // CHECK:   continue %[[MUL]], %[[ADD]] : [[TILE1]], [[TILE2]]
-// CHECK: %[[RESULT:.*]]:2 = reduce %[[LOOP]]#0, %[[LOOP]]#1 dim=1
+// CHECK: %[[RESULT:.*]]:2 = reduce %[[LOOP]]#0, %[[LOOP]]#1 dim=1 identities=[1.000000e+00 : f32, 0.000000e+00 : f16]
 // CHECK:   (%[[VAL0:.*]]: tile<f32>, %[[ACC0:.*]]: tile<f32>, %[[VAL1:.*]]: tile<f16>, %[[ACC1:.*]]: tile<f16>)
 // CHECK:   %[[RES0:.*]] = mulf %[[ACC0]], %[[VAL0]] : tile<f32>
 // CHECK:   %[[RES1:.*]] = addf %[[ACC1]], %[[VAL1]] : tile<f16>
@@ -149,7 +149,7 @@ nv_tensor_ir.graph @test_reduce_1loop_multiple(
 // CHECK:     continue %[[INNER]] : [[TILE]]
 // CHECK:   continue %[[LOOP2]] : [[TILE]]
 // CHECK: %[[MERGED:.*]] = reshape %[[LOOP1]] : [[TILE]] -> tile<32x128xf32>
-// CHECK: %[[RESULT:.*]] = reduce %[[MERGED]] dim=1
+// CHECK: %[[RESULT:.*]] = reduce %[[MERGED]] dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[VAL:.*]]: tile<f32>, %[[ACC:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = addf %[[ACC]], %[[VAL]] : tile<f32>
 // CHECK:   yield %[[RES]] : tile<f32>
@@ -192,7 +192,7 @@ nv_tensor_ir.graph @test_reduce_2loops_single(
 // CHECK:   continue %[[LOOP2]]#0, %[[LOOP2]]#1 : [[TILE1]], [[TILE2]]
 // CHECK: %[[MERGED1:.*]] = reshape %[[LOOP1]]#0 : [[TILE1]] -> tile<32x128xf32>
 // CHECK: %[[MERGED2:.*]] = reshape %[[LOOP1]]#1 : [[TILE2]] -> tile<32x128xf16>
-// CHECK: %[[RESULT:.*]]:2 = reduce %[[MERGED1]], %[[MERGED2]] dim=1
+// CHECK: %[[RESULT:.*]]:2 = reduce %[[MERGED1]], %[[MERGED2]] dim=1 identities=[1.000000e+00 : f32, 0.000000e+00 : f16]
 // CHECK:   (%[[VAL0:.*]]: tile<f32>, %[[ACC0:.*]]: tile<f32>, %[[VAL1:.*]]: tile<f16>, %[[ACC1:.*]]: tile<f16>)
 // CHECK:   %[[RES0:.*]] = mulf %[[ACC0]], %[[VAL0]] : tile<f32>
 // CHECK:   %[[RES1:.*]] = addf %[[ACC1]], %[[VAL1]] : tile<f16>
@@ -220,7 +220,7 @@ nv_tensor_ir.graph @test_reduce_2loops_multiple(
 // TEST 7: Reduce with broadcasted outputs
 // ============================================================================
 // CHECK-LABEL: @test_reduce_broadcast
-// CHECK: %[[REDUCE:.*]]:2 = reduce %{{.*}} dim=1
+// CHECK: %[[REDUCE:.*]]:2 = reduce %{{.*}} dim=1 identities=[1.000000e+00 : f32, 0.000000e+00 : f16]
 // CHECK: %[[RESHAPE1:.*]] = reshape %[[REDUCE]]#0 : tile<32xf32> -> tile<32x1xf32>
 // CHECK: %[[BCAST1:.*]] = broadcast %[[RESHAPE1]] : tile<32x1xf32> -> tile<32x8xf32>
 // CHECK: %[[RESHAPE2:.*]] = reshape %[[REDUCE]]#1 : tile<32xf16> -> tile<32x1xf16>
@@ -253,8 +253,7 @@ nv_tensor_ir.graph @test_reduce_broadcast(
 // TEST 8: Welford reduction
 // ============================================================================
 // CHECK-LABEL: @test_reduce_welford
-// CHECK: %[[REDUCE:.*]]:3 = reduce %{{.*}}, %{{.*}}, %{{.*}} dim=1
-// CHECK-SAME: identities=[0.000000e+00 : f32, 0.000000e+00 : f32, 0.000000e+00 : f32] :
+// CHECK: %[[REDUCE:.*]]:3 = reduce %{{.*}}, %{{.*}}, %{{.*}} dim=1 identities=[0.000000e+00 : f32, 0.000000e+00 : f32, 0.000000e+00 : f32]
 // CHECK-SAME: tile<32x64xf32>, tile<32x64xf32>, tile<32x64xf32> -> tile<32xf32>, tile<32xf32>, tile<32xf32>
 // CHECK: %[[VAL_IN:[^:]*]]: tile<f32>, %[[ACC_IN:[^:]*]]: tile<f32>,
 // CHECK-SAME: %[[VAL_M2:[^:]*]]: tile<f32>, %[[ACC_M2:[^:]*]]: tile<f32>,
@@ -309,7 +308,7 @@ nv_tensor_ir.graph @test_reduce_welford(
 // CHECK-LABEL: @reduce_ud_multi
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf16>
-// CHECK: %[[RESULT:.*]]:2 = reduce %[[ARG0]], %[[ARG1]] dim=1
+// CHECK: %[[RESULT:.*]]:2 = reduce %[[ARG0]], %[[ARG1]] dim=1 identities=[1.000000e+00 : f32, 0.000000e+00 : f16]
 // CHECK:   (%[[VAL0:.*]]: tile<f32>, %[[ACC0:.*]]: tile<f32>, %[[VAL1:.*]]: tile<f16>, %[[ACC1:.*]]: tile<f16>)
 // CHECK:   %[[RES0:.*]] = mulf %[[ACC0]], %[[VAL0]] : tile<f32>
 // CHECK:   %[[RES1:.*]] = addf %[[ACC1]], %[[VAL1]] : tile<f16>

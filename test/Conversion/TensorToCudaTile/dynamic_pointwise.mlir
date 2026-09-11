@@ -9,8 +9,11 @@
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]]], strides = [1]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[BLOCK]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [%[[MR]]], strides = [1]
+// CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[BLOCK]]]
+// CHECK: %[[COS:.*]] = cos %[[IN_TILE]] : tile<32xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]]], strides = [1]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[BLOCK]]]
 module {
   nv_tensor_ir.graph @dynamic_shape_static_stride_rank_1(
       %arg0: tensor<?xf32> {nv_tensor_ir.stride = "(1)"}) ->
@@ -39,8 +42,11 @@ module {
 // CHECK: %[[IDX2:.*]] = divi %[[TEMP]], %[[INDEX]]#1 unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]], %[[K0]]], strides = [16384, 128, 1]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], %[[KR]]], strides = [16384, 128, 1]
+// CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
+// CHECK: %[[COS:.*]] = cos %[[IN_TILE]] : tile<8x8x8xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], %[[KR]]], strides = [16384, 128, 1]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
 module {
   nv_tensor_ir.graph @dynamic_shape_static_stride_rank_3(
       %arg0: tensor<?x?x?xf32> {nv_tensor_ir.stride = "(16384,128,1)"}) ->
@@ -62,8 +68,11 @@ module {
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [1024], strides = [%[[S0]]]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[BLOCK]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [1024], strides = [%[[SR]]]
+// CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[BLOCK]]]
+// CHECK: %[[COS:.*]] = cos %[[IN_TILE]] : tile<32xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [1024], strides = [%[[SR]]]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[BLOCK]]]
 module {
   nv_tensor_ir.graph @static_shape_dynamic_stride_rank_1(
       %arg0: tensor<1024xf32> {nv_tensor_ir.stride = "(?)"}) ->
@@ -91,8 +100,11 @@ module {
 // CHECK: %[[IDX2:.*]] = divi %[[TEMP]], %[[C8]] unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [32, 64, 128], strides = [%[[S0]], %[[T0]], %[[U0]]]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [32, 64, 128], strides = [%[[SR]], %[[TR]], %[[UR]]]
+// CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
+// CHECK: %[[COS:.*]] = cos %[[IN_TILE]] : tile<8x8x8xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [32, 64, 128], strides = [%[[SR]], %[[TR]], %[[UR]]]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
 module {
   nv_tensor_ir.graph @static_shape_dynamic_stride_rank_3(
       %arg0: tensor<32x64x128xf32> {nv_tensor_ir.stride = "(?,?,?)"}) ->
@@ -114,8 +126,11 @@ module {
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]]], strides = [1]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[BLOCK]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [%[[MR]]], strides = [1]
+// CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[BLOCK]]]
+// CHECK: %[[COS:.*]] = cos %[[IN_TILE]] : tile<32xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]]], strides = [1]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[BLOCK]]]
 module {
   nv_tensor_ir.graph @dynamic_shape_implicit_stride_rank_1(
       %arg0: tensor<?xf32>) ->
@@ -146,8 +161,11 @@ module {
 // CHECK: %[[IDX2:.*]] = divi %[[TEMP]], %[[INDEX]]#1 unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]], %[[K0]]], strides = [%[[S0]], %[[K0]], 1]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], %[[KR]]], strides = [%[[SR]], %[[KR]], 1]
+// CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
+// CHECK: %[[COS:.*]] = cos %[[IN_TILE]] : tile<8x8x8xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], %[[KR]]], strides = [%[[SR]], %[[KR]], 1]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
 module {
   nv_tensor_ir.graph @dynamic_shape_implicit_stride_rank_3(
       %arg0: tensor<?x?x?xf32>) ->
@@ -169,8 +187,11 @@ module {
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]]], strides = [%[[S0]]]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[BLOCK]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [%[[MR]]], strides = [%[[SR]]]
+// CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[BLOCK]]]
+// CHECK: %[[COS:.*]] = cos %[[IN_TILE]] : tile<32xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]]], strides = [%[[SR]]]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[BLOCK]]]
 module {
   nv_tensor_ir.graph @dynamic_shape_and_stride_rank_1(
       %arg0: tensor<?xf32> {nv_tensor_ir.stride = "(?)"}) ->
@@ -199,8 +220,11 @@ module {
 // CHECK: %[[IDX2:.*]] = divi %[[TEMP]], %[[INDEX]]#1 unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]], %[[K0]]], strides = [%[[S0]], %[[T0]], %[[U0]]]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], %[[KR]]], strides = [%[[SR]], %[[TR]], %[[UR]]]
+// CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
+// CHECK: %[[COS:.*]] = cos %[[IN_TILE]] : tile<8x8x8xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], %[[KR]]], strides = [%[[SR]], %[[TR]], %[[UR]]]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
 module {
   nv_tensor_ir.graph @dynamic_shape_and_stride_rank_3(
       %arg0: tensor<?x?x?xf32> {nv_tensor_ir.stride = "(?,?,?)"}) ->
@@ -229,8 +253,11 @@ module {
 // CHECK: %[[IDX2:.*]] = divi %[[TEMP]], %[[INDEX]]#1 unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]], 32], strides = [%[[S0]], %[[T0]], 1]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], 32], strides = [%[[SR]], %[[TR]], 1]
+// CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
+// CHECK: %[[COS:.*]] = cos %[[IN_TILE]] : tile<8x8x8xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], 32], strides = [%[[SR]], %[[TR]], 1]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
 module {
   nv_tensor_ir.graph @mixed_dynamic_shape_and_stride(
       %arg0: tensor<?x?x32xf32> {nv_tensor_ir.stride = "(?,?,1)"}) ->
@@ -258,11 +285,14 @@ module {
 // CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[INDEX]]#0 unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]]], strides = [%[[N0]], 1]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]]]
+// CHECK: %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]]]
 // CHECK: %[[TVIEW1:.*]] = make_tensor_view %[[ARG1]], shape = [%[[M1]], %[[N1]]], strides = [%[[N1]], 1]
 // CHECK: %[[PVIEW1:.*]] = make_partition_view %[[TVIEW1]]
-// CHECK: load_view_tko weak %[[PVIEW1]][%[[IDX0]], %[[IDX1]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]]], strides = [%[[NR]], 1]
+// CHECK: %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[IDX0]], %[[IDX1]]]
+// CHECK: %[[SUM:.*]] = addf %[[TILE0]], %[[TILE1]] : tile<8x8xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]]], strides = [%[[NR]], 1]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[SUM]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]]]
 module {
   nv_tensor_ir.graph @dynamic_binary_pointwise_simple(
       %arg0: tensor<?x?xf32>,
@@ -291,11 +321,14 @@ module {
 // CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[INDEX]]#0 unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], 128], strides = [128, 1]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]]]
+// CHECK: %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]]]
 // CHECK: %[[TVIEW1:.*]] = make_tensor_view %[[ARG1]], shape = [%[[M1]], 128], strides = [128, 1]
 // CHECK: %[[PVIEW1:.*]] = make_partition_view %[[TVIEW1]]
-// CHECK: load_view_tko weak %[[PVIEW1]][%[[IDX0]], %[[IDX1]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [%[[MR]], 128], strides = [128, 1]
+// CHECK: %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[IDX0]], %[[IDX1]]]
+// CHECK: %[[SUM:.*]] = addf %[[TILE0]], %[[TILE1]] : tile<8x8xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], 128], strides = [128, 1]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[SUM]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]]]
 module {
   nv_tensor_ir.graph @dynamic_binary_pointwise_reshape(
       %arg0: tensor<?x32x4xf32>,
@@ -325,11 +358,14 @@ module {
 // CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[INDEX]]#0 unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[N0]], %[[M0]]], strides = [1, %[[N0]]]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
-// CHECK: load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]]]
+// CHECK: %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]]]
 // CHECK: %[[TVIEW1:.*]] = make_tensor_view %[[ARG1]], shape = [%[[M1]], %[[N1]]], strides = [%[[N1]], 1]
 // CHECK: %[[PVIEW1:.*]] = make_partition_view %[[TVIEW1]]
-// CHECK: load_view_tko weak %[[PVIEW1]][%[[IDX0]], %[[IDX1]]]
-// CHECK: make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]]], strides = [%[[NR]], 1]
+// CHECK: %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[IDX0]], %[[IDX1]]]
+// CHECK: %[[SUM:.*]] = addf %[[TILE0]], %[[TILE1]] : tile<8x8xf32>
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]]], strides = [%[[NR]], 1]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
+// CHECK: store_view_tko weak %[[SUM]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]]]
 module {
   nv_tensor_ir.graph @dynamic_binary_pointwise_reshape(
       %arg0: tensor<?x?xf32>,

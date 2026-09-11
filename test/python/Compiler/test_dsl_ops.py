@@ -111,6 +111,26 @@ def div_kernel(a, b):
 
 
 @tir.kernel
+def named_add_kernel(a, b):
+    return tir.add(a, b)
+
+
+@tir.kernel
+def named_sub_kernel(a, b):
+    return tir.sub(a, b)
+
+
+@tir.kernel
+def named_mul_kernel(a, b):
+    return tir.mul(a, b)
+
+
+@tir.kernel
+def named_div_kernel(a, b):
+    return tir.div(a, b)
+
+
+@tir.kernel
 def rem_kernel(a, b):
     return tir.rem(a, b)
 
@@ -286,7 +306,7 @@ def _make_reduce_kernel(dimensions: tuple[int, ...], mode: str) -> KernelFunctio
     return reduce_kernel
 
 
-def test_float64_input_output_type() -> None:
+def test_float64_input_output_type(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float64)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float64)
     output = torch.empty_like(a)
@@ -301,13 +321,14 @@ def test_float64_input_output_type() -> None:
         mlir_probes=("tensor<8x8xf64>",),
         rtol=1e-10,
         atol=1e-10,
+        profile=profiling,
     )
 
 
 @pytest.mark.parametrize(
     "kernel", [mixed_dtype_pow_kernel, mixed_dtype_pow_operator_kernel]
 )
-def test_mixed_dtype_pow(kernel: KernelFunction) -> None:
+def test_mixed_dtype_pow(kernel: KernelFunction, profiling: bool) -> None:
     base = torch.rand((8, 8), device="cuda", dtype=torch.float32) + 0.5
     exponent = torch.randint(0, 4, (8, 8), device="cuda", dtype=torch.int32)
     output = torch.empty_like(base)
@@ -322,7 +343,7 @@ def test_mixed_dtype_pow(kernel: KernelFunction) -> None:
     )
     mlir = _module_text(compiled)
     assert ": (tensor<8x8xf32>, tensor<8x8xsi32>) -> tensor<8x8xf32>" in mlir
-    _run_assert_trace(compiled, base, exponent, output=output)
+    _run_assert_trace(compiled, base, exponent, output=output, profile=profiling)
 
 
 def test_trace_frontend_op_mapping() -> None:
@@ -477,7 +498,9 @@ def test_trace_frontend_op_mapping() -> None:
     ],
     ids=["sub", "mul", "div"],
 )
-def test_binary_operator_overloads(name: str, kernel: KernelFunction) -> None:
+def test_binary_operator_overloads(
+    name: str, kernel: KernelFunction, profiling: bool
+) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float32) + 2.0
     output = torch.empty_like(a)
@@ -488,10 +511,35 @@ def test_binary_operator_overloads(name: str, kernel: KernelFunction) -> None:
         output=output,
         name=name,
         options=_layout_propagation_auto_options(),
+        profile=profiling,
     )
 
 
-def test_extended_pointwise_ops() -> None:
+@pytest.mark.parametrize(
+    ("kernel", "op_name"),
+    [
+        (named_add_kernel, "add"),
+        (named_sub_kernel, "sub"),
+        (named_mul_kernel, "mul"),
+        (named_div_kernel, "div"),
+    ],
+    ids=["add", "sub", "mul", "div"],
+)
+def test_named_binary_ops_trace(kernel: KernelFunction, op_name: str) -> None:
+    lhs = torch.randn((8, 8), dtype=torch.float32)
+    rhs = torch.randn((8, 8), dtype=torch.float32)
+
+    graph = _trace(kernel, lhs, rhs, output=torch.empty_like(lhs))
+    traced_ops = [
+        node.op_name
+        for node in graph.nodes
+        if node.kind not in (NodeKind.INPUT, NodeKind.OUTPUT_REF)
+    ]
+
+    assert traced_ops == [op_name]
+
+
+def test_extended_pointwise_ops(profiling: bool) -> None:
     a = torch.rand((8, 8), device="cuda", dtype=torch.float32) + 0.25
     b = torch.rand((8, 8), device="cuda", dtype=torch.float32) + 1.25
     output = torch.empty_like(a)
@@ -510,10 +558,11 @@ def test_extended_pointwise_ops() -> None:
         ),
         rtol=1e-4,
         atol=1e-4,
+        profile=profiling,
     )
 
 
-def test_extended_operator_overloads() -> None:
+def test_extended_operator_overloads(profiling: bool) -> None:
     a = torch.rand((8, 8), device="cuda", dtype=torch.float32) + 0.25
     b = torch.rand((8, 8), device="cuda", dtype=torch.float32) + 1.25
     output = torch.empty_like(a)
@@ -527,6 +576,7 @@ def test_extended_operator_overloads() -> None:
         options=_layout_propagation_auto_options(),
         rtol=1e-4,
         atol=1e-4,
+        profile=profiling,
     )
 
 
@@ -543,7 +593,7 @@ def test_atan2_rejects_integer_operands() -> None:
         tir.compile(integer_atan2_kernel, lhs, rhs, output=output)
 
 
-def test_rem_op() -> None:
+def test_rem_op(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.rand((8, 8), device="cuda", dtype=torch.float32) + 1.0
     output = torch.empty_like(a)
@@ -558,10 +608,11 @@ def test_rem_op() -> None:
         mlir_probes=("= rem ",),
         rtol=1e-4,
         atol=1e-4,
+        profile=profiling,
     )
 
 
-def test_convert_op() -> None:
+def test_convert_op(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     output = torch.empty((8, 8), device="cuda", dtype=torch.float16)
 
@@ -574,10 +625,11 @@ def test_convert_op() -> None:
         mlir_probes=("= convert ", "-> tensor<8x8xf16>"),
         rtol=1e-3,
         atol=1e-3,
+        profile=profiling,
     )
 
 
-def test_convert_supported_float_types_op() -> None:
+def test_convert_supported_float_types_op(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     output = torch.empty_like(a)
 
@@ -592,10 +644,10 @@ def test_convert_supported_float_types_op() -> None:
     for (_, src), (_, dst) in _tensor_ir_type_pairs(_FLOAT_CONVERT_TYPES):
         assert f": tensor<8x8x{src}> -> tensor<8x8x{dst}>" in mlir
 
-    _run_assert_trace(compiled, a, output=output)
+    _run_assert_trace(compiled, a, output=output, profile=profiling)
 
 
-def test_convert_int_float_op() -> None:
+def test_convert_int_float_op(profiling: bool) -> None:
     a = torch.randint(-8, 8, (8, 8), device="cuda", dtype=torch.int32)
     output = torch.empty_like(a)
 
@@ -610,10 +662,10 @@ def test_convert_int_float_op() -> None:
     for (_, src), (_, dst) in _tensor_ir_type_pairs(_INT_FLOAT_CONVERT_TYPES):
         assert f": tensor<8x8x{src}> -> tensor<8x8x{dst}>" in mlir
 
-    _run_assert_trace(compiled, a, output=output, rtol=0, atol=0)
+    _run_assert_trace(compiled, a, output=output, rtol=0, atol=0, profile=profiling)
 
 
-def test_int8_input_output_type() -> None:
+def test_int8_input_output_type(profiling: bool) -> None:
     a = torch.randint(-8, 8, (8, 8), device="cuda", dtype=torch.int8)
     b = torch.randint(-8, 8, (8, 8), device="cuda", dtype=torch.int8)
     output = torch.empty_like(a)
@@ -629,7 +681,7 @@ def test_int8_input_output_type() -> None:
     mlir = _module_text(compiled)
     assert "tensor<8x8xsi8>" in mlir
 
-    _run_assert_trace(compiled, a, b, output=output, rtol=0, atol=0)
+    _run_assert_trace(compiled, a, b, output=output, rtol=0, atol=0, profile=profiling)
 
 
 @pytest.mark.parametrize(
@@ -638,7 +690,7 @@ def test_int8_input_output_type() -> None:
     ids=[name for _, name in _SIGNED_INTEGER_TYPES[1:]],
 )
 def test_signed_integer_input_output_types(
-    dtype: torch.dtype, tensor_ir_dtype: str
+    dtype: torch.dtype, tensor_ir_dtype: str, profiling: bool
 ) -> None:
     a = torch.randint(-8, 8, (8, 8), device="cuda", dtype=dtype)
     b = torch.randint(-8, 8, (8, 8), device="cuda", dtype=dtype)
@@ -655,7 +707,7 @@ def test_signed_integer_input_output_types(
     mlir = _module_text(compiled)
     assert f"tensor<8x8x{tensor_ir_dtype}>" in mlir
 
-    _run_assert_trace(compiled, a, b, output=output, rtol=0, atol=0)
+    _run_assert_trace(compiled, a, b, output=output, rtol=0, atol=0, profile=profiling)
 
 
 @pytest.mark.parametrize(
@@ -691,7 +743,9 @@ def test_unsigned_integer_compile_path(
     _UNSIGNED_INTEGER_TYPES,
     ids=[name for _, name in _UNSIGNED_INTEGER_TYPES],
 )
-def test_unsigned_integer_abs_op(dtype: torch.dtype, tensor_ir_dtype: str) -> None:
+def test_unsigned_integer_abs_op(
+    dtype: torch.dtype, tensor_ir_dtype: str, profiling: bool
+) -> None:
     @tir.kernel
     def abs_kernel(a):
         return tir.abs(a)
@@ -707,6 +761,7 @@ def test_unsigned_integer_abs_op(dtype: torch.dtype, tensor_ir_dtype: str) -> No
         options=_layout_propagation_auto_options(),
         rtol=0,
         atol=0,
+        profile=profiling,
     )
 
 
@@ -716,7 +771,7 @@ def test_unsigned_integer_abs_op(dtype: torch.dtype, tensor_ir_dtype: str) -> No
     ids=[name for _, name in _UNSIGNED_INTEGER_TYPES],
 )
 def test_unsigned_integer_avg_reduce_op(
-    dtype: torch.dtype, tensor_ir_dtype: str
+    dtype: torch.dtype, tensor_ir_dtype: str, profiling: bool
 ) -> None:
     @tir.kernel
     def avg_reduce_kernel(a):
@@ -733,6 +788,7 @@ def test_unsigned_integer_avg_reduce_op(
         options=_layout_propagation_auto_options(),
         rtol=0,
         atol=0,
+        profile=profiling,
     )
 
 
@@ -741,7 +797,9 @@ def test_unsigned_integer_avg_reduce_op(
     _UNSIGNED_INTEGER_TYPES,
     ids=[name for _, name in _UNSIGNED_INTEGER_TYPES],
 )
-def test_unsigned_integer_cmp_op(dtype: torch.dtype, tensor_ir_dtype: str) -> None:
+def test_unsigned_integer_cmp_op(
+    dtype: torch.dtype, tensor_ir_dtype: str, profiling: bool
+) -> None:
     @tir.kernel
     def cmp_kernel(a, b):
         return tir.cmp(a, b, predicate="ge")
@@ -759,6 +817,7 @@ def test_unsigned_integer_cmp_op(dtype: torch.dtype, tensor_ir_dtype: str) -> No
         options=_layout_propagation_auto_options(),
         rtol=0,
         atol=0,
+        profile=profiling,
     )
 
 
@@ -767,7 +826,9 @@ def test_unsigned_integer_cmp_op(dtype: torch.dtype, tensor_ir_dtype: str) -> No
     _UNSIGNED_INTEGER_TYPES,
     ids=[name for _, name in _UNSIGNED_INTEGER_TYPES],
 )
-def test_unsigned_integer_select_op(dtype: torch.dtype, tensor_ir_dtype: str) -> None:
+def test_unsigned_integer_select_op(
+    dtype: torch.dtype, tensor_ir_dtype: str, profiling: bool
+) -> None:
     @tir.kernel
     def select_kernel(mask, a, b):
         return tir.where(mask, a, b)
@@ -787,10 +848,11 @@ def test_unsigned_integer_select_op(dtype: torch.dtype, tensor_ir_dtype: str) ->
         options=_layout_propagation_auto_options(),
         rtol=0,
         atol=0,
+        profile=profiling,
     )
 
 
-def test_signed_integer_div_op_rounds_toward_zero() -> None:
+def test_signed_integer_div_op_rounds_toward_zero(profiling: bool) -> None:
     @tir.kernel
     def div_kernel(a, b):
         return a / b
@@ -808,13 +870,14 @@ def test_signed_integer_div_op_rounds_toward_zero() -> None:
         options=_layout_propagation_auto_options(),
         rtol=0,
         atol=0,
+        profile=profiling,
     )
     reference = evaluate_trace_reference(compiled.graph, a, b)
     expected = torch.tensor([[-2, -2, 2, 2]], device="cuda", dtype=a.dtype).repeat(8, 1)
     assert torch.equal(reference, expected)
 
 
-def test_convert_int8_op() -> None:
+def test_convert_int8_op(profiling: bool) -> None:
     a = torch.randint(-8, 8, (8, 8), device="cuda", dtype=torch.int8)
     output = torch.empty_like(a)
 
@@ -829,7 +892,7 @@ def test_convert_int8_op() -> None:
     assert ": tensor<8x8xsi8> -> tensor<8x8xsi32>" in mlir
     assert ": tensor<8x8xsi32> -> tensor<8x8xsi8>" in mlir
 
-    _run_assert_trace(compiled, a, output=output, rtol=0, atol=0)
+    _run_assert_trace(compiled, a, output=output, rtol=0, atol=0, profile=profiling)
 
 
 @pytest.mark.parametrize(
@@ -876,7 +939,7 @@ def test_integer_full_like_rejects_unsupported_scalar_dtype(
         )
 
 
-def test_reduce_int8_max_op() -> None:
+def test_reduce_int8_max_op(profiling: bool) -> None:
     a = torch.randint(-8, 8, (8, 4), device="cuda", dtype=torch.int8)
     output = torch.empty((8, 1), device="cuda", dtype=torch.int8)
 
@@ -892,10 +955,10 @@ def test_reduce_int8_max_op() -> None:
     assert ": tensor<8x4xsi8> -> tensor<8x1xsi8>" in mlir
     assert "reduction_mode = <max>" in mlir
 
-    _run_assert_trace(compiled, a, output=output, rtol=0, atol=0)
+    _run_assert_trace(compiled, a, output=output, rtol=0, atol=0, profile=profiling)
 
 
-def test_splat_and_cmp_ops() -> None:
+def test_splat_and_cmp_ops(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     output = torch.empty_like(a)
@@ -908,10 +971,11 @@ def test_splat_and_cmp_ops() -> None:
         name="splat_cmp_ops",
         options=_layout_propagation_auto_options(),
         mlir_probes=("= constant ", "= splat ", "= cmp "),
+        profile=profiling,
     )
 
 
-def test_iota_op_without_graph_input() -> None:
+def test_iota_op_without_graph_input(profiling: bool) -> None:
     output = torch.empty((4, 8), device="cuda", dtype=torch.float32)
 
     compiled = _compile_run_assert(
@@ -922,11 +986,12 @@ def test_iota_op_without_graph_input() -> None:
         mlir_probes=("graph @iota_without_graph_input()", "= iota ", "dimension = 1"),
         rtol=0,
         atol=0,
+        profile=profiling,
     )
     assert not compiled.graph.input_ids
 
 
-def test_constant_op() -> None:
+def test_constant_op(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     output = torch.empty_like(a)
 
@@ -939,6 +1004,7 @@ def test_constant_op() -> None:
         mlir_probes=("= constant dense<2.500000e+00> : tensor<8x8xf32>",),
         rtol=0,
         atol=0,
+        profile=profiling,
     )
 
 
@@ -947,7 +1013,7 @@ def test_constant_rejects_call_outside_kernel() -> None:
         tir.constant(2.5, shape=(8, 8), dtype=tir.DataType.F32)
 
 
-def test_splat_op() -> None:
+def test_splat_op(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     output = torch.empty_like(a)
 
@@ -960,6 +1026,7 @@ def test_splat_op() -> None:
         mlir_probes=("= constant 2.500000e+00 : f32", "= splat "),
         rtol=0,
         atol=0,
+        profile=profiling,
     )
 
 
@@ -968,7 +1035,7 @@ def test_splat_op() -> None:
     [(64,), (16,), (8,)],
     ids=["tile_64", "tile_16", "tile_8"],
 )
-def test_logical_not_op(tile_sizes: tuple[int, ...]) -> None:
+def test_logical_not_op(tile_sizes: tuple[int, ...], profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     output = torch.empty((8, 8), device="cuda", dtype=torch.bool)
@@ -983,6 +1050,7 @@ def test_logical_not_op(tile_sizes: tuple[int, ...]) -> None:
         mlir_probes=("= not ",),
         rtol=0,
         atol=0,
+        profile=profiling,
     )
 
 
@@ -1012,7 +1080,7 @@ def test_logical_not_rejects_non_bool_operand() -> None:
     ],
     ids=["explicit_cmp", "operator_cmp"],
 )
-def test_int_cmp_op(name: str, kernel: KernelFunction) -> None:
+def test_int_cmp_op(name: str, kernel: KernelFunction, profiling: bool) -> None:
     a = torch.randint(0, 8, (8, 8), device="cuda", dtype=torch.int32)
     b = torch.randint(0, 8, (8, 8), device="cuda", dtype=torch.int32)
     output = torch.empty((8, 8), device="cuda", dtype=torch.bool)
@@ -1026,6 +1094,7 @@ def test_int_cmp_op(name: str, kernel: KernelFunction) -> None:
         options=_layout_propagation_auto_options(),
         rtol=0,
         atol=0,
+        profile=profiling,
     )
 
 
@@ -1105,6 +1174,7 @@ def test_movement_ops(
     tile_sizes: tuple[int, ...],
     auto_options: bool,
     mlir_probes: tuple[str, ...],
+    profiling: bool,
 ) -> None:
     inputs = tuple(
         torch.randn(shape, device="cuda", dtype=torch.float32) for shape in input_shapes
@@ -1122,6 +1192,7 @@ def test_movement_ops(
         name=name,
         options=options,
         mlir_probes=mlir_probes,
+        profile=profiling,
     )
 
 
@@ -1206,6 +1277,7 @@ def test_reduce_ops(
     tile_sizes: tuple[int, ...],
     mode: str,
     dimensions: tuple[int, ...],
+    profiling: bool,
 ) -> None:
     if mode in ("mul", "mul_no_zeros"):
         a = torch.rand(input_shape, device="cuda", dtype=torch.float32) + 0.5
@@ -1228,4 +1300,4 @@ def test_reduce_ops(
     assert f"dimensions = [{dimension_list}]" in mlir
     assert f"reduction_mode = <{mode}>" in mlir
 
-    _run_assert_trace(compiled, a, output=output)
+    _run_assert_trace(compiled, a, output=output, profile=profiling)

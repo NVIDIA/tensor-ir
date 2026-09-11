@@ -16,6 +16,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -117,6 +118,7 @@ createCompileOptions(const Options &options, const SmTarget &smTarget) {
   compileOptions.irDebug.loadTileIRBCPath = options.loadTileIRBC.getValue();
   compileOptions.irDebug.printIRAfterAll = bool(options.printIrAfterAll);
   compileOptions.irDebug.printIRTreeDir = options.printIrTreeDir.getValue();
+  compileOptions.irDebug.reproducerDir = options.reproducerDir.getValue();
   compileOptions.irDebug.enableTiming = bool(options.timing);
 
   return compileOptions;
@@ -142,7 +144,12 @@ Status dumpArtifact(IRuntimeKernel &runtimeKernel, const Options &options) {
   }
 
   auto *tileRuntimeKernel =
-      static_cast<CudaTileRuntimeKernel *>(&runtimeKernel);
+      llvm::dyn_cast<CudaTileRuntimeKernel>(&runtimeKernel);
+  if (!tileRuntimeKernel) {
+    return Status::InvalidArgument(
+        "Failed to dump artifact: runtime kernel is not a CudaTile runtime "
+        "kernel");
+  }
   if (!tileRuntimeKernel->hasDeviceCode()) {
     return Status::InvalidArgument(
         "Failed to dump artifact: runtime kernel has no CudaTile device "

@@ -139,7 +139,8 @@ buildConcatBlockStructure(RewriterBase &rewriter, ConcatenateOp concatOp,
     // Add the iteration space for the current operand.
     result.iterationSpaces.push_back(
         {&thenBlock, iterSpace.tileShape, index,
-         extractTensorSources(concatSource.getSource(i))});
+         extractTensorSources(concatSource.getSource(i)),
+         /*paddingValue=*/std::nullopt, /*paddingMask=*/{}});
 
     // Update the index value for the next operand.
     rewriter.setInsertionPointToStart(&elseBlock);
@@ -150,7 +151,8 @@ buildConcatBlockStructure(RewriterBase &rewriter, ConcatenateOp concatOp,
   // Add the iteration space for the last operand.
   result.iterationSpaces.push_back(
       {rewriter.getBlock(), iterSpace.tileShape, std::move(index),
-       extractTensorSources(concatSource.getSource(last))});
+       extractTensorSources(concatSource.getSource(last)),
+       /*paddingValue=*/std::nullopt, /*paddingMask=*/{}});
   return result;
 }
 
@@ -169,7 +171,7 @@ calculateReductionTileShape(ArrayRef<int64_t> reductionShape,
     // Calculate the maximum tile size for the dimension.
     // Make sure that the dimension size is divisible by the tile size.
     assert(size > 0 && "Dimension size must be positive");
-    int64_t maxTileSize = 1ull << llvm::countr_zero(uint64_t(size));
+    int64_t maxTileSize = 1ull << llvm::Log2_64_Ceil(uint64_t(size));
 
     // Calculate the average tile size for the remaining dimensions.
     size_t remainingDims = reductionShape.size() - idx;
@@ -183,6 +185,24 @@ calculateReductionTileShape(ArrayRef<int64_t> reductionShape,
   }
 
   return tileShape;
+}
+
+/// Verify that the operand value is neutral to the padding value.
+/// Allow layout operations and floating-point conversions only.
+bool isPaddingValueNeutral(Value value) {
+  auto getElementType = [](Value v) {
+    return cast<ShapedType>(v.getType()).getElementType();
+  };
+  while (Operation *op = value.getDefiningOp()) {
+    bool isF2F = isa<ConvertOp>(op) &&
+                 isa<FloatType>(getElementType(op->getOperand(0))) &&
+                 isa<FloatType>(getElementType(op->getResult(0)));
+    if (!isa<ReshapeOp, BroadcastOp, TransposeOp, SliceOp>(op) && !isF2F) {
+      return false;
+    }
+    value = op->getOperand(0);
+  }
+  return true;
 }
 
 /// Reduction operation is implemented as nested loops for each reduction
@@ -205,7 +225,8 @@ calculateReductionTileShape(ArrayRef<int64_t> reductionShape,
 /// }
 FailureOr<BlockStructure> buildCommonReduceBlockStructure(
     RewriterBase &rewriter, Operation *op, const IterationSpace &iterSpace,
-    int64_t reductionTileSize, ArrayRef<Attribute> identities) {
+    int64_t reductionTileSize, ArrayRef<Attribute> identities,
+    std::optional<cuda_tile::PaddingValue> paddingValue) {
   // Verify that the layout is a reduction layout.
   auto reductionSource = dyn_cast_if_present<ReductionSourceAttr>(
       op->getAttrOfType<LayoutSourceAttrInterface>(
@@ -239,6 +260,7 @@ FailureOr<BlockStructure> buildCommonReduceBlockStructure(
       calculateReductionTileShape(reductionShape, reductionTileSize);
   tileShape.append(reductionTileShape);
 
+  // Infer the index type.
   ShapedType indexType =
       !iterSpace.indexValues.empty()
           ? cast<ShapedType>(iterSpace.indexValues.front().getType())
@@ -250,38 +272,66 @@ FailureOr<BlockStructure> buildCommonReduceBlockStructure(
     return createConstant(rewriter, loc, indexType, value);
   };
 
-  // If the whole tile is reduced, no blocks are needed.
-  if (reductionTileShape == reductionShape) {
-    indexValues.resize(tileShape.size(), createIndex(0));
-    IterationSpace innerIterSpace{
-        rewriter.getBlock(), std::move(tileShape), std::move(indexValues),
-        extractTensorSources(reductionSource.getSource())};
-    return BlockStructure{{std::move(innerIterSpace)},
-                          /*yieldValues=*/{},
-                          /*iterationSpaceIndexForOperand=*/{}};
-  }
-
   // Generate the accumulator tiles.
   SmallVector<Value> accumulatorTiles;
-  for (Attribute identity : identities) {
-    // Get the underlying type of the identity literal.
-    Type identityType;
-    if (auto floatAttr = dyn_cast_if_present<FloatAttr>(identity)) {
-      identityType = floatAttr.getType();
-    } else if (auto integerAttr = dyn_cast_if_present<IntegerAttr>(identity)) {
-      identityType = integerAttr.getType();
-    } else {
-      return op->emitError() << "Unsupported identity type";
+  bool simpleReduction =
+      llvm::all_of(llvm::zip_equal(reductionShape, reductionTileShape),
+                   [](auto x) { return std::get<0>(x) <= std::get<1>(x); }) &&
+      (reductionShape == reductionTileShape || paddingValue.has_value());
+
+  if (!simpleReduction) {
+    for (Attribute identity : identities) {
+      // Get the underlying type of the identity literal.
+      Type identityType;
+      if (auto floatAttr = dyn_cast_if_present<FloatAttr>(identity)) {
+        identityType = floatAttr.getType();
+      } else if (auto integerAttr =
+                     dyn_cast_if_present<IntegerAttr>(identity)) {
+        identityType = integerAttr.getType();
+      } else {
+        return op->emitError() << "Unsupported identity type";
+      }
+
+      // Create dense attribute with the tile shape.
+      ShapedType tileType = cuda_tile::TileType::get(tileShape, identityType);
+      auto denseAttr = cast<DenseTypedElementsAttr>(
+          DenseElementsAttr::get(tileType, identity));
+      Value accumulator =
+          cuda_tile::ConstantOp::create(rewriter, loc, tileType, denseAttr);
+      accumulatorTiles.push_back(accumulator);
+    }
+  }
+
+  // Padding mask is needed for reduction dimensions where the tiles may contain
+  // invalid values that should be masked out.
+  Value paddingMask;
+
+  auto updateMask = [&](Value iota, size_t dim) {
+    // Compare the index with the tile size (single dimension).
+    Value cst = createConstant(rewriter, loc, cast<ShapedType>(iota.getType()),
+                               reductionShape[dim]);
+    Value mask = cuda_tile::CmpIOp::create(
+        rewriter, loc, cuda_tile::ComparisonPredicate::LESS_THAN, iota, cst,
+        cuda_tile::Signedness::Unsigned);
+
+    // Reshape and broadcast the mask to the reduction tile shape.
+    if (reductionShape.size() > 1) {
+      SmallVector<int64_t> tempSize(reductionShape.size(), 1);
+      tempSize[dim] = reductionTileShape[dim];
+      auto maskType = cast<ShapedType>(mask.getType());
+      mask = cuda_tile::ReshapeOp::create(rewriter, loc,
+                                          maskType.clone(tempSize), mask);
+      mask = cuda_tile::BroadcastOp::create(
+          rewriter, loc, maskType.clone(reductionTileShape), mask);
     }
 
-    // Create dense attribute with the tile shape.
-    ShapedType tileType = cuda_tile::TileType::get(tileShape, identityType);
-    auto denseAttr = cast<DenseTypedElementsAttr>(
-        DenseElementsAttr::get(tileType, identity));
-    Value accumulator =
-        cuda_tile::ConstantOp::create(rewriter, loc, tileType, denseAttr);
-    accumulatorTiles.push_back(accumulator);
-  }
+    // Set or update the padding mask.
+    if (paddingMask == nullptr) {
+      paddingMask = mask;
+    } else {
+      paddingMask = cuda_tile::AndIOp::create(rewriter, loc, paddingMask, mask);
+    }
+  };
 
   // Generate the loop nest.
   BlockStructure result;
@@ -289,11 +339,19 @@ FailureOr<BlockStructure> buildCommonReduceBlockStructure(
   Value stepValue = createIndex(1);
   ArrayRef<Value> accumulators(accumulatorTiles);
 
-  for (auto [size, tileSize] :
-       llvm::zip_equal(reductionShape, reductionTileShape)) {
+  for (size_t idx : llvm::seq(reductionShape.size())) {
+    int64_t size = reductionShape[idx];
+    int64_t tileSize = reductionTileShape[idx];
+
     // If the tile size covers the whole dimension, skip it.
-    if (size == tileSize) {
+    if (size <= tileSize) {
       indexValues.push_back(startIndex);
+      if (size < tileSize && !paddingValue.has_value()) {
+        // Update the padding mask for the current dimension.
+        Value iota = cuda_tile::IotaOp::create(rewriter, loc,
+                                               indexType.clone({tileSize}));
+        updateMask(iota, idx);
+      }
       continue;
     }
 
@@ -316,12 +374,41 @@ FailureOr<BlockStructure> buildCommonReduceBlockStructure(
 
     // Update the insertion point.
     setInsertionPointBeforeTerminatorOrToEnd(rewriter, forOp.getBody());
+
+    if (size % tileSize != 0 && !paddingValue.has_value()) {
+      // Update the padding mask for the current dimension.
+      Value offset = cuda_tile::MulIOp::create(
+          rewriter, loc, forOp.getInductionVar(), createIndex(tileSize));
+      offset = cuda_tile::ReshapeOp::create(rewriter, loc, indexType.clone({1}),
+                                            offset);
+      offset = cuda_tile::BroadcastOp::create(
+          rewriter, loc, indexType.clone({tileSize}), offset);
+
+      Value iota =
+          cuda_tile::IotaOp::create(rewriter, loc, indexType.clone({tileSize}));
+      updateMask(cuda_tile::AddIOp::create(rewriter, loc, offset, iota), idx);
+    }
+  }
+
+  // If padding mask is present, save it along with the neutral values.
+  SmallVector<Value> paddingMaskAndNeutralValues;
+  if (paddingMask != nullptr) {
+    SmallVector<int64_t> tempSize(tileShape.size() - reductionShape.size(), 1);
+    tempSize.append(reductionTileShape);
+
+    auto maskType = cast<ShapedType>(paddingMask.getType());
+    paddingMask = cuda_tile::ReshapeOp::create(
+        rewriter, loc, maskType.clone(tempSize), paddingMask);
+
+    paddingMaskAndNeutralValues.push_back(paddingMask);
+    paddingMaskAndNeutralValues.append(accumulatorTiles);
   }
 
   // Reduction operation has a single iteration space.
   IterationSpace innerIterSpace{
-      rewriter.getBlock(), std::move(tileShape), std::move(indexValues),
-      extractTensorSources(reductionSource.getSource())};
+      rewriter.getBlock(),    std::move(tileShape),
+      std::move(indexValues), extractTensorSources(reductionSource.getSource()),
+      paddingValue,           paddingMaskAndNeutralValues};
   result.iterationSpaces.push_back(std::move(innerIterSpace));
 
   return result;
@@ -342,9 +429,36 @@ buildReduceBlockStructure(RewriterBase &rewriter, ReduceOp reduceOp,
     return reduceOp.emitError() << "Unsupported reduction mode";
   }
 
+  // Set the padding value, if operating directly on the inputs.
+  std::optional<cuda_tile::PaddingValue> paddingValue;
+  if (isPaddingValueNeutral(reduceOp.getInput())) {
+    switch (reduceOp.getReductionMode()) {
+    case ReductionMode::add:
+    case ReductionMode::amax:
+    case ReductionMode::avg:
+    case ReductionMode::norm1:
+    case ReductionMode::norm2:
+      paddingValue = cuda_tile::PaddingValue::zero;
+      break;
+    case ReductionMode::max:
+      if (isa<FloatAttr>(identity)) {
+        paddingValue = cuda_tile::PaddingValue::neg_inf;
+      }
+      break;
+    case ReductionMode::min:
+      if (isa<FloatAttr>(identity)) {
+        paddingValue = cuda_tile::PaddingValue::pos_inf;
+      }
+      break;
+    default:
+      break;
+    }
+  }
+
   // Build the reduction loop nest.
   return buildCommonReduceBlockStructure(rewriter, reduceOp, iterSpace,
-                                         reductionTileSize, {identity});
+                                         reductionTileSize, {identity},
+                                         paddingValue);
 }
 
 /// Build the block structure for `ReduceUDOp`, where the identities are
@@ -369,9 +483,35 @@ buildReduceUDBlockStructure(RewriterBase &rewriter, ReduceUDOp reduceUDOp,
     }
     identities.push_back(identity);
   }
+
+  // Infer the padding value from the first identity value.
+  auto getDefaultIdentity = [&](ReductionMode mode) {
+    Type identityType = cast<TypedAttr>(identityArrayAttr[0]).getType();
+    return ReductionEmissionHelper{mode, identityType}.getIdentity(rewriter);
+  };
+  std::optional<cuda_tile::PaddingValue> paddingValue;
+  if (identities[0] == getDefaultIdentity(ReductionMode::add)) {
+    paddingValue = cuda_tile::PaddingValue::zero;
+  } else if (isa<FloatAttr>(identities[0]) &&
+             identities[0] == getDefaultIdentity(ReductionMode::max)) {
+    paddingValue = cuda_tile::PaddingValue::neg_inf;
+  } else if (isa<FloatAttr>(identities[0]) &&
+             identities[0] == getDefaultIdentity(ReductionMode::min)) {
+    paddingValue = cuda_tile::PaddingValue::pos_inf;
+  }
+
+  // Only allow padding values that are neutral to the identity values.
+  for (auto [identity, operand] :
+       llvm::zip_equal(identities, reduceUDOp.getOperands())) {
+    if (!isPaddingValueNeutral(operand) || identity != identities[0]) {
+      paddingValue = std::nullopt;
+    }
+  }
+
   // Build the reduction loop nest.
   return buildCommonReduceBlockStructure(rewriter, reduceUDOp, iterSpace,
-                                         reductionTileSize, identities);
+                                         reductionTileSize, identities,
+                                         paddingValue);
 }
 
 //===----------------------------------------------------------------------===//
@@ -467,28 +607,53 @@ buildMatmulBlockStructure(RewriterBase &rewriter, MatmulOp matmulOp,
     }
   }
 
-  // If the whole tile is reduced, no blocks are needed.
-  if (contractionTileShape == contractionShape) {
-    // Use zero index values for the contracting dimensions.
-    Value zero = createIndex(0);
-    for (size_t idx : lhsContractingDims) {
-      lhsIndexValues[idx] = zero;
-    }
-    for (size_t idx : rhsContractingDims) {
-      rhsIndexValues[idx] = zero;
+  // Set the padding values for sides where the operations are neutral.
+  std::optional<cuda_tile::PaddingValue> lhsPaddingValue;
+  if (isPaddingValueNeutral(matmulOp.getA())) {
+    lhsPaddingValue = cuda_tile::PaddingValue::zero;
+  }
+
+  std::optional<cuda_tile::PaddingValue> rhsPaddingValue;
+  if (isPaddingValueNeutral(matmulOp.getB())) {
+    rhsPaddingValue = cuda_tile::PaddingValue::zero;
+  }
+
+  bool maskNeeded =
+      llvm::any_of(
+          llvm::zip_equal(contractionShape, contractionTileShape),
+          [](auto x) { return std::get<0>(x) % std::get<1>(x) != 0; }) &&
+      (!lhsPaddingValue.has_value() || !rhsPaddingValue.has_value());
+
+  // Padding mask is needed for reduction dimensions where the tiles may contain
+  // invalid values that should be masked out.
+  Value paddingMask;
+
+  auto updateMask = [&](Value iota, size_t dim) {
+    // Compare the index with the tile size (single dimension).
+    Value cst = createConstant(rewriter, loc, cast<ShapedType>(iota.getType()),
+                               contractionShape[dim]);
+    Value mask = cuda_tile::CmpIOp::create(
+        rewriter, loc, cuda_tile::ComparisonPredicate::LESS_THAN, iota, cst,
+        cuda_tile::Signedness::Unsigned);
+
+    // Reshape and broadcast the mask to the contraction tile shape.
+    if (contractionShape.size() > 1) {
+      SmallVector<int64_t> tempSize(contractionShape.size(), 1);
+      tempSize[dim] = contractionTileShape[dim];
+      auto maskType = cast<ShapedType>(mask.getType());
+      mask = cuda_tile::ReshapeOp::create(rewriter, loc,
+                                          maskType.clone(tempSize), mask);
+      mask = cuda_tile::BroadcastOp::create(
+          rewriter, loc, maskType.clone(contractionTileShape), mask);
     }
 
-    // Create the iteration spaces in the same block.
-    IterationSpace lhsIterSpace{rewriter.getBlock(), std::move(lhsTileShape),
-                                std::move(lhsIndexValues),
-                                extractTensorSources(matmulSource.getLhs())};
-    IterationSpace rhsIterSpace{rewriter.getBlock(), std::move(rhsTileShape),
-                                std::move(rhsIndexValues),
-                                extractTensorSources(matmulSource.getRhs())};
-    return BlockStructure{{std::move(lhsIterSpace), std::move(rhsIterSpace)},
-                          /*yieldValues=*/{},
-                          /*iterationSpaceIndexForOperand=*/{}};
-  }
+    // Set or update the padding mask.
+    if (paddingMask == nullptr) {
+      paddingMask = mask;
+    } else {
+      paddingMask = cuda_tile::AndIOp::create(rewriter, loc, paddingMask, mask);
+    }
+  };
 
   // Calculate the batch tile size from the matmul view layout.
   int64_t tileB = 1;
@@ -537,12 +702,19 @@ buildMatmulBlockStructure(RewriterBase &rewriter, MatmulOp matmulOp,
   Value stepValue = createIndex(1);
 
   for (size_t idx : llvm::seq(contractionShape.size())) {
-    // If the tile size covers the whole dimension, skip it.
     int64_t size = contractionShape[idx];
     int64_t tileSize = contractionTileShape[idx];
-    if (size == tileSize) {
+
+    // If the tile size covers the whole dimension, skip it.
+    if (size <= tileSize) {
       lhsIndexValues[lhsContractingDims[idx]] = startIndex;
       rhsIndexValues[rhsContractingDims[idx]] = startIndex;
+      if (size < tileSize && maskNeeded) {
+        // Update the padding mask for the current dimension.
+        Value iota = cuda_tile::IotaOp::create(rewriter, loc,
+                                               indexType.clone({tileSize}));
+        updateMask(iota, idx);
+      }
       continue;
     }
 
@@ -565,17 +737,63 @@ buildMatmulBlockStructure(RewriterBase &rewriter, MatmulOp matmulOp,
 
     // Update the insertion point.
     setInsertionPointBeforeTerminatorOrToEnd(rewriter, forOp.getBody());
+
+    if (size % tileSize != 0 && maskNeeded) {
+      // Update the padding mask for the current dimension.
+      Value offset = cuda_tile::MulIOp::create(
+          rewriter, loc, forOp.getInductionVar(), createIndex(tileSize));
+      offset = cuda_tile::ReshapeOp::create(rewriter, loc, indexType.clone({1}),
+                                            offset);
+      offset = cuda_tile::BroadcastOp::create(
+          rewriter, loc, indexType.clone({tileSize}), offset);
+
+      Value iota =
+          cuda_tile::IotaOp::create(rewriter, loc, indexType.clone({tileSize}));
+      updateMask(cuda_tile::AddIOp::create(rewriter, loc, offset, iota), idx);
+    }
+  }
+
+  // If padding mask is present, save it (separate masks for LHS and RHS).
+  SmallVector<Value> lhsPaddingMask;
+  SmallVector<Value> rhsPaddingMask;
+
+  if (paddingMask != nullptr) {
+    // Set LHS padding mask.
+    if (!lhsPaddingValue.has_value()) {
+      SmallVector<int64_t> tempSize(lhsTileShape.size(), 1);
+      for (size_t idx : llvm::seq(contractionShape.size())) {
+        tempSize[lhsContractingDims[idx]] = contractionTileShape[idx];
+      }
+      Value mask = cuda_tile::ReshapeOp::create(
+          rewriter, loc,
+          cast<ShapedType>(paddingMask.getType()).clone(tempSize), paddingMask);
+      lhsPaddingMask.push_back(mask);
+    }
+
+    // Set RHS padding mask.
+    if (!rhsPaddingValue.has_value()) {
+      SmallVector<int64_t> tempSize(rhsTileShape.size(), 1);
+      for (size_t idx : llvm::seq(contractionShape.size())) {
+        tempSize[rhsContractingDims[idx]] = contractionTileShape[idx];
+      }
+      Value mask = cuda_tile::ReshapeOp::create(
+          rewriter, loc,
+          cast<ShapedType>(paddingMask.getType()).clone(tempSize), paddingMask);
+      rhsPaddingMask.push_back(mask);
+    }
   }
 
   // Matmul operation has two iteration spaces.
-  IterationSpace lhsIterSpace{rewriter.getBlock(), std::move(lhsTileShape),
-                              std::move(lhsIndexValues),
-                              extractTensorSources(matmulSource.getLhs())};
+  IterationSpace lhsIterSpace{
+      rewriter.getBlock(),       std::move(lhsTileShape),
+      std::move(lhsIndexValues), extractTensorSources(matmulSource.getLhs()),
+      lhsPaddingValue,           lhsPaddingMask};
   result.iterationSpaces.push_back(std::move(lhsIterSpace));
 
-  IterationSpace rhsIterSpace{rewriter.getBlock(), std::move(rhsTileShape),
-                              std::move(rhsIndexValues),
-                              extractTensorSources(matmulSource.getRhs())};
+  IterationSpace rhsIterSpace{
+      rewriter.getBlock(),       std::move(rhsTileShape),
+      std::move(rhsIndexValues), extractTensorSources(matmulSource.getRhs()),
+      rhsPaddingValue,           rhsPaddingMask};
   result.iterationSpaces.push_back(std::move(rhsIterSpace));
 
   return result;

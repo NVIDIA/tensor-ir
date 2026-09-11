@@ -6,6 +6,7 @@ config.llvm_obj_root = "@LLVM_BINARY_DIR@"
 config.llvm_tools_dir = "@LLVM_TOOLS_DIR@"
 config.llvm_lib_dir = "@LLVM_LIBRARY_DIR@"
 config.llvm_shlib_ext = "@CMAKE_SHARED_LIBRARY_SUFFIX@"
+config.mlir_include_dirs = [e for e in "@MLIR_INCLUDE_DIRS@".split(";") if e]
 config.python_executable = "@Python3_EXECUTABLE@"
 config.enable_bindings_python = @TENSOR_IR_ENABLE_BINDINGS_PYTHON@
 

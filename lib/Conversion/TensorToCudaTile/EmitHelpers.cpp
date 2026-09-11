@@ -211,7 +211,8 @@ TensorDescriptor applyLayout(OpBuilder &rewriter, const TensorDescriptor &desc,
 
 /// Create partition view for a tensor descriptor.
 Value createPartitionView(OpBuilder &rewriter, const TensorDescriptor &desc,
-                          ArrayRef<int64_t> tileShape) {
+                          ArrayRef<int64_t> tileShape,
+                          std::optional<cuda_tile::PaddingValue> paddingValue) {
   // Get the element type from the descriptor.
   Type ptrType = cast<ShapedType>(desc.pointer.getType()).getElementType();
   Type elemType = cast<cuda_tile::PointerType>(ptrType).getPointeeType();
@@ -277,10 +278,16 @@ Value createPartitionView(OpBuilder &rewriter, const TensorDescriptor &desc,
   SmallVector<int32_t> dimMap(tileShape.size());
   std::iota(dimMap.begin(), dimMap.end(), 0);
 
+  cuda_tile::PaddingValueAttr paddingValueAttr;
+  if (paddingValue.has_value()) {
+    paddingValueAttr =
+        cuda_tile::PaddingValueAttr::get(rewriter.getContext(), *paddingValue);
+  }
+
   // Create the partition view.
   auto partitionViewType = cuda_tile::PartitionViewType::get(
       rewriter.getContext(), tileSizesAttr, tensorViewType, dimMap,
-      /*padding_value=*/{});
+      paddingValueAttr);
   return cuda_tile::MakePartitionViewOp::create(rewriter, tensorView.getLoc(),
                                                 partitionViewType, tensorView);
 }
@@ -328,9 +335,10 @@ createEntryOptimizationHints(MLIRContext *ctx, int32_t numCTAs,
 
 /// Emit load operation (`cuda_tile::LoadViewTkoOp`).
 Value emitLoad(OpBuilder &rewriter, const TensorDescriptor &desc,
-               ShapedType tileType, ValueRange indexValues) {
+               ShapedType tileType, ValueRange indexValues,
+               std::optional<cuda_tile::PaddingValue> paddingValue) {
   Value partitionView =
-      createPartitionView(rewriter, desc, tileType.getShape());
+      createPartitionView(rewriter, desc, tileType.getShape(), paddingValue);
   Type tokenType = cuda_tile::TokenType::get(rewriter.getContext());
   auto optimizationHints = createLoadStoreOptimizationHints(
       rewriter.getContext(), desc.allowTma, desc.cost);

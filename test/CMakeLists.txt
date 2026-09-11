@@ -18,8 +18,10 @@ if(TENSOR_IR_INCLUDE_TESTS)
   set(MLIR_TEST_DEPENDS
     FileCheck
     not
+    split-file
     tensor_ir-compiler
     tensor_ir-opt
+    tensor_ir-tblgen
   )
 
 

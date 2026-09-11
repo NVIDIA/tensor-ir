@@ -6,11 +6,19 @@
 // ============================================================================
 
 // CHECK-LABEL: @loads_unary_elementwise
-// CHECK: %[[TILE1:.+]], %{{.+}} = load_view_tko {{.+}} tensor_view<32x32xf32, strides=[32,1]>
-// CHECK: %[[TILE2:.+]], %{{.+}} = load_view_tko {{.+}} tensor_view<32x32xf32, strides=[1,32]>
+// CHECK-SAME: (%[[INPTR:.+]]: tile<ptr<f32>>, %[[OUTPTR:.+]]: tile<ptr<f32>>)
+// CHECK: %[[VIEW1:.+]] = make_tensor_view %[[INPTR]], shape = [32, 32], strides = [32, 1]
+// CHECK: %[[PVIEW1:.+]] = make_partition_view %[[VIEW1]]
+// CHECK: %[[TILE1:.+]], %{{.+}} = load_view_tko weak %[[PVIEW1]][%{{.+}}, %{{.+}}] : {{.+}} -> tile<16x16xf32>, token
+// CHECK: %[[VIEW2:.+]] = make_tensor_view %[[INPTR]], shape = [32, 32], strides = [1, 32]
+// CHECK: %[[PVIEW2:.+]] = make_partition_view %[[VIEW2]]
+// CHECK: %[[TILE2:.+]], %{{.+}} = load_view_tko weak %[[PVIEW2]][%{{.+}}, %{{.+}}] : {{.+}} -> tile<16x16xf32>, token
 // CHECK: %[[NEG1:.+]] = negf %[[TILE1]]
 // CHECK: %[[NEG2:.+]] = negf %[[TILE2]]
-// CHECK: addf %[[NEG1]], %[[NEG2]]
+// CHECK: %[[SUM:.+]] = addf %[[NEG1]], %[[NEG2]]
+// CHECK: %[[OUTVIEW:.+]] = make_tensor_view %[[OUTPTR]], shape = [32, 32], strides = [32, 1]
+// CHECK: %[[OUTPVIEW:.+]] = make_partition_view %[[OUTVIEW]]
+// CHECK: store_view_tko weak %[[SUM]], %[[OUTPVIEW]][%{{.+}}, %{{.+}}]
 module {
   nv_tensor_ir.graph @loads_unary_elementwise(
       %arg0: tensor<32x32xf32>) ->
@@ -141,8 +149,13 @@ module {
 // -----
 
 // CHECK-LABEL: @loads_transpose_kernel
-// CHECK: %[[TILE:.+]], %{{.+}} = load_view_tko {{.+}} tensor_view<32x32xf32, strides=[1,32]>
-// CHECK: store_view_tko {{.+}} tensor_view<32x32xf32, strides=[32,1]>
+// CHECK-SAME: (%[[INPTR:.+]]: tile<ptr<f32>>, %[[OUTPTR:.+]]: tile<ptr<f32>>)
+// CHECK: %[[VIEW:.+]] = make_tensor_view %[[INPTR]], shape = [32, 32], strides = [1, 32]
+// CHECK: %[[PVIEW:.+]] = make_partition_view %[[VIEW]]
+// CHECK: %[[TILE:.+]], %{{.+}} = load_view_tko weak %[[PVIEW]][%{{.+}}, %{{.+}}] : {{.+}} -> tile<16x16xf32>, token
+// CHECK: %[[OUTVIEW:.+]] = make_tensor_view %[[OUTPTR]], shape = [32, 32], strides = [32, 1]
+// CHECK: %[[OUTPVIEW:.+]] = make_partition_view %[[OUTVIEW]]
+// CHECK: store_view_tko weak %[[TILE]], %[[OUTPVIEW]][%{{.+}}, %{{.+}}]
 module {
   nv_tensor_ir.graph @loads_transpose_kernel(
       %arg0: tensor<32x32xf32>) ->

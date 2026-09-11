@@ -127,6 +127,13 @@ struct Options {
                      "requires a path, and 0/false/off/no disables the dump"),
       llvm::cl::init(""), llvm::cl::cat(CompileCat)};
 
+  llvm::cl::opt<std::string> reproducerDir{
+      "reproducer-dir",
+      llvm::cl::desc(
+          "Directory for dumping reproducer pipelines;\n"
+          "it requires a path, and 0/false/off/no disables the dump"),
+      llvm::cl::init(""), llvm::cl::cat(CompileCat)};
+
   //=========================================================================
   // Test Options
   //=========================================================================

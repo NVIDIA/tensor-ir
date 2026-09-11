@@ -23,7 +23,15 @@ namespace tensor_ir::rt {
 
 class IRuntimeKernel {
 public:
+  /// Concrete implementation kind, for LLVM-style RTTI (isa/dyn_cast/cast).
+  /// RTTI (dynamic_cast) is disabled in parts of this build, so downcasting
+  /// to a concrete runtime kernel type must go through this discriminator.
+  enum class Kind { CudaTile };
+
   virtual ~IRuntimeKernel() = default;
+
+  /// Get the concrete kind of this runtime kernel, for LLVM-style RTTI.
+  virtual Kind getKind() const = 0;
 
   /// Get runtime kernel name (for debugging/logging)
   virtual const std::string &name() const = 0;

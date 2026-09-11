@@ -10,11 +10,11 @@
 //  CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 //       CHECK:   %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 //       CHECK:   %[[TVIEW_IN:.+]] = make_tensor_view %[[IN_PTR]], shape = [2048], strides = [1] : tensor_view<2048xf32, strides=[1]>
-//       CHECK:   %[[PVIEW_SHAPE:.+]] = make_partition_view %[[TVIEW_IN]] : partition_view<tile=({{[0-9]+}}), tensor_view<2048xf32, strides=[1]>>
-//       CHECK:   %[[TILE0:.+]], {{.*}} = load_view_tko weak %[[PVIEW_SHAPE]][{{.*}}] :{{.*}}-> tile<{{[0-9]+}}xf32>, token
-//       CHECK:   %[[ADD:.+]] = addf %[[TILE0]], %[[TILE0]] : tile<{{[0-9]+}}xf32>
+//       CHECK:   %[[PVIEW_SHAPE:.+]] = make_partition_view %[[TVIEW_IN]] : partition_view<tile=(32), tensor_view<2048xf32, strides=[1]>>
+//       CHECK:   %[[TILE0:.+]], {{.*}} = load_view_tko weak %[[PVIEW_SHAPE]][{{.*}}] :{{.*}}-> tile<32xf32>, token
+//       CHECK:   %[[ADD:.+]] = addf %[[TILE0]], %[[TILE0]] : tile<32xf32>
 //       CHECK:   %[[TVIEW_OUT:.+]] = make_tensor_view %[[OUT_PTR]], shape = [2048], strides = [1] : tensor_view<2048xf32, strides=[1]>
-//       CHECK:   %[[PVIEW_ST:.+]] = make_partition_view %[[TVIEW_OUT]] : partition_view<tile=({{[0-9]+}}), tensor_view<2048xf32, strides=[1]>>
+//       CHECK:   %[[PVIEW_ST:.+]] = make_partition_view %[[TVIEW_OUT]] : partition_view<tile=(32), tensor_view<2048xf32, strides=[1]>>
 //       CHECK:   store_view_tko weak %[[ADD]], %[[PVIEW_ST]][{{.*}}] :{{.*}}-> token
 //       CHECK:   return
 nv_tensor_ir.graph @add_self_single_input(
@@ -52,12 +52,15 @@ nv_tensor_ir.graph @add_self_single_input_col_major(
 // CHECK-LABEL: entry @add_two_inputs
 //  CHECK-SAME: (%[[IN0_PTR:.+]]: tile<ptr<f32>>, %[[IN1_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 //       CHECK:   %[[TVIEW_IN0:.+]] = make_tensor_view %[[IN0_PTR]], shape = [8192], strides = [1] : tensor_view<8192xf32, strides=[1]>
-//       CHECK:   %[[TILE0:.+]], {{.*}} = load_view_tko weak {{.*}} :{{.*}}-> tile<{{[0-9]+}}xf32>, token
+//       CHECK:   %[[PVIEW_IN0:.+]] = make_partition_view %[[TVIEW_IN0]] : partition_view<tile=(64), tensor_view<8192xf32, strides=[1]>>
+//       CHECK:   %[[TILE0:.+]], {{.*}} = load_view_tko weak %[[PVIEW_IN0]][%{{.*}}] :{{.*}}-> tile<64xf32>, token
 //       CHECK:   %[[TVIEW_IN1:.+]] = make_tensor_view %[[IN1_PTR]], shape = [8192], strides = [1] : tensor_view<8192xf32, strides=[1]>
-//       CHECK:   %[[TILE1:.+]], {{.*}} = load_view_tko weak {{.*}} :{{.*}}-> tile<{{[0-9]+}}xf32>, token
-//       CHECK:   %[[ADD:.+]] = addf %[[TILE0]], %[[TILE1]] : tile<{{[0-9]+}}xf32>
+//       CHECK:   %[[PVIEW_IN1:.+]] = make_partition_view %[[TVIEW_IN1]] : partition_view<tile=(64), tensor_view<8192xf32, strides=[1]>>
+//       CHECK:   %[[TILE1:.+]], {{.*}} = load_view_tko weak %[[PVIEW_IN1]][%{{.*}}] :{{.*}}-> tile<64xf32>, token
+//       CHECK:   %[[ADD:.+]] = addf %[[TILE0]], %[[TILE1]] : tile<64xf32>
 //       CHECK:   %[[TVIEW_OUT:.+]] = make_tensor_view %[[OUT_PTR]], shape = [8192], strides = [1] : tensor_view<8192xf32, strides=[1]>
-//       CHECK:   store_view_tko weak %[[ADD]], {{.*}} :{{.*}}-> token
+//       CHECK:   %[[PVIEW_OUT:.+]] = make_partition_view %[[TVIEW_OUT]] : partition_view<tile=({{[0-9]+}}), tensor_view<8192xf32, strides=[1]>>
+//       CHECK:   store_view_tko weak %[[ADD]], %[[PVIEW_OUT]][%{{.*}}] :{{.*}}-> token
 //       CHECK:   return
 module {
   nv_tensor_ir.graph @add_two_inputs(
@@ -74,14 +77,17 @@ module {
 
 // CHECK-LABEL: entry @add_chain_two_inputs
 //  CHECK-SAME: (%[[IN0_PTR:.+]]: tile<ptr<f32>>, %[[IN1_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
-//       CHECK:   make_tensor_view %[[IN0_PTR]], shape = [2048], strides = [1]
-//       CHECK:   %[[TILE0:.+]], {{.*}} = load_view_tko
-//       CHECK:   make_tensor_view %[[IN1_PTR]], shape = [2048], strides = [1]
-//       CHECK:   %[[TILE1:.+]], {{.*}} = load_view_tko
-//       CHECK:   %[[ADD0:.+]] = addf %[[TILE0]], %[[TILE1]] : tile<{{[0-9]+}}xf32>
-//       CHECK:   %[[ADD1:.+]] = addf %[[ADD0]], %[[TILE0]] : tile<{{[0-9]+}}xf32>
-//       CHECK:   make_tensor_view %[[OUT_PTR]], shape = [2048], strides = [1]
-//       CHECK:   store_view_tko weak %[[ADD1]]
+//       CHECK:   %[[VIEW0:.+]] = make_tensor_view %[[IN0_PTR]], shape = [2048], strides = [1]
+//       CHECK:   %[[PVIEW0:.+]] = make_partition_view %[[VIEW0]] : partition_view<tile=(32), tensor_view<2048xf32, strides=[1]>>
+//       CHECK:   %[[TILE0:.+]], {{.*}} = load_view_tko weak %[[PVIEW0]][%{{.*}}] :{{.*}}-> tile<32xf32>, token
+//       CHECK:   %[[VIEW1:.+]] = make_tensor_view %[[IN1_PTR]], shape = [2048], strides = [1]
+//       CHECK:   %[[PVIEW1:.+]] = make_partition_view %[[VIEW1]] : partition_view<tile=(32), tensor_view<2048xf32, strides=[1]>>
+//       CHECK:   %[[TILE1:.+]], {{.*}} = load_view_tko weak %[[PVIEW1]][%{{.*}}] :{{.*}}-> tile<32xf32>, token
+//       CHECK:   %[[ADD0:.+]] = addf %[[TILE0]], %[[TILE1]] : tile<32xf32>
+//       CHECK:   %[[ADD1:.+]] = addf %[[ADD0]], %[[TILE0]] : tile<32xf32>
+//       CHECK:   %[[VIEW_OUT:.+]] = make_tensor_view %[[OUT_PTR]], shape = [2048], strides = [1]
+//       CHECK:   %[[PVIEW_OUT:.+]] = make_partition_view %[[VIEW_OUT]] : partition_view<tile=({{[0-9]+}}), tensor_view<2048xf32, strides=[1]>>
+//       CHECK:   store_view_tko weak %[[ADD1]], %[[PVIEW_OUT]][%{{.*}}]
 //       CHECK:   return
 module {
   nv_tensor_ir.graph @add_chain_two_inputs(
@@ -98,16 +104,21 @@ module {
 // -----
 
 // CHECK-LABEL: entry @add_three_inputs
-//       CHECK:   make_tensor_view {{.*}}, shape = [512], strides = [1]
-//       CHECK:   %[[T0:.+]], {{.*}} = load_view_tko
-//       CHECK:   make_tensor_view {{.*}}, shape = [512], strides = [1]
-//       CHECK:   %[[T1:.+]], {{.*}} = load_view_tko
-//       CHECK:   make_tensor_view {{.*}}, shape = [512], strides = [1]
-//       CHECK:   %[[T2:.+]], {{.*}} = load_view_tko
-//       CHECK:   %[[A0:.+]] = addf %[[T0]], %[[T1]] : tile<{{[0-9]+}}xf32>
-//       CHECK:   %[[A1:.+]] = addf %[[A0]], %[[T2]] : tile<{{[0-9]+}}xf32>
-//       CHECK:   make_tensor_view {{.*}}, shape = [512], strides = [1]
-//       CHECK:   store_view_tko weak %[[A1]]
+//       CHECK-SAME: (%[[IN0_PTR:.+]]: tile<ptr<f32>>, %[[IN1_PTR:.+]]: tile<ptr<f32>>, %[[IN2_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
+//       CHECK:   %[[VIEW0:.+]] = make_tensor_view %[[IN0_PTR]], shape = [512], strides = [1]
+//       CHECK:   %[[PVIEW0:.+]] = make_partition_view %[[VIEW0]] : partition_view<tile=(32), tensor_view<512xf32, strides=[1]>>
+//       CHECK:   %[[T0:.+]], {{.*}} = load_view_tko weak %[[PVIEW0]][%{{.*}}] :{{.*}}-> tile<32xf32>, token
+//       CHECK:   %[[VIEW1:.+]] = make_tensor_view %[[IN1_PTR]], shape = [512], strides = [1]
+//       CHECK:   %[[PVIEW1:.+]] = make_partition_view %[[VIEW1]] : partition_view<tile=(32), tensor_view<512xf32, strides=[1]>>
+//       CHECK:   %[[T1:.+]], {{.*}} = load_view_tko weak %[[PVIEW1]][%{{.*}}] :{{.*}}-> tile<32xf32>, token
+//       CHECK:   %[[VIEW2:.+]] = make_tensor_view %[[IN2_PTR]], shape = [512], strides = [1]
+//       CHECK:   %[[PVIEW2:.+]] = make_partition_view %[[VIEW2]] : partition_view<tile=(32), tensor_view<512xf32, strides=[1]>>
+//       CHECK:   %[[T2:.+]], {{.*}} = load_view_tko weak %[[PVIEW2]][%{{.*}}] :{{.*}}-> tile<32xf32>, token
+//       CHECK:   %[[A0:.+]] = addf %[[T0]], %[[T1]] : tile<32xf32>
+//       CHECK:   %[[A1:.+]] = addf %[[A0]], %[[T2]] : tile<32xf32>
+//       CHECK:   %[[VIEW_OUT:.+]] = make_tensor_view %[[OUT_PTR]], shape = [512], strides = [1]
+//       CHECK:   %[[PVIEW_OUT:.+]] = make_partition_view %[[VIEW_OUT]] : partition_view<tile=(32), tensor_view<512xf32, strides=[1]>>
+//       CHECK:   store_view_tko weak %[[A1]], %[[PVIEW_OUT]][%{{.*}}]
 //       CHECK:   return
 module {
   nv_tensor_ir.graph @add_three_inputs(
@@ -125,13 +136,16 @@ module {
 // -----
 
 // CHECK-LABEL: entry @add_chain_single_input
-//       CHECK:   make_tensor_view {{.*}}, shape = [4096], strides = [1]
-//       CHECK:   %[[T:.+]], {{.*}} = load_view_tko
-//       CHECK:   %[[A0:.+]] = addf %[[T]], %[[T]] : tile<{{[0-9]+}}xf32>
-//       CHECK:   %[[A1:.+]] = addf %[[A0]], %[[T]] : tile<{{[0-9]+}}xf32>
-//       CHECK:   %[[A2:.+]] = addf %[[A1]], %[[A0]] : tile<{{[0-9]+}}xf32>
-//       CHECK:   make_tensor_view {{.*}}, shape = [4096], strides = [1]
-//       CHECK:   store_view_tko weak %[[A2]]
+//       CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
+//       CHECK:   %[[VIEW_IN:.+]] = make_tensor_view %[[IN_PTR]], shape = [4096], strides = [1]
+//       CHECK:   %[[PVIEW_IN:.+]] = make_partition_view %[[VIEW_IN]] : partition_view<tile=(32), tensor_view<4096xf32, strides=[1]>>
+//       CHECK:   %[[T:.+]], {{.*}} = load_view_tko weak %[[PVIEW_IN]][%{{.*}}] :{{.*}}-> tile<32xf32>, token
+//       CHECK:   %[[A0:.+]] = addf %[[T]], %[[T]] : tile<32xf32>
+//       CHECK:   %[[A1:.+]] = addf %[[A0]], %[[T]] : tile<32xf32>
+//       CHECK:   %[[A2:.+]] = addf %[[A1]], %[[A0]] : tile<32xf32>
+//       CHECK:   %[[VIEW_OUT:.+]] = make_tensor_view %[[OUT_PTR]], shape = [4096], strides = [1]
+//       CHECK:   %[[PVIEW_OUT:.+]] = make_partition_view %[[VIEW_OUT]] : partition_view<tile=(32), tensor_view<4096xf32, strides=[1]>>
+//       CHECK:   store_view_tko weak %[[A2]], %[[PVIEW_OUT]][%{{.*}}]
 //       CHECK:   return
 module {
   nv_tensor_ir.graph @add_chain_single_input(

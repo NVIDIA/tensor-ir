@@ -25,6 +25,7 @@ from .tracing import (
 
 __all__ = [
     "abs",
+    "add",
     "add_square",
     "atan2",
     "broadcast",
@@ -34,6 +35,7 @@ __all__ = [
     "constant",
     "convert",
     "cos",
+    "div",
     "elu",
     "exp",
     "floor",
@@ -49,6 +51,7 @@ __all__ = [
     "max",
     "min",
     "mod",
+    "mul",
     "neg",
     "pow",
     "reduce",
@@ -63,6 +66,7 @@ __all__ = [
     "softplus",
     "splat",
     "sqrt",
+    "sub",
     "swish",
     "tan",
     "tanh",
@@ -603,6 +607,26 @@ def cmp(lhs: object, rhs: object, *, predicate: str) -> TracedTensor:
     lhs_tensor = _ensure_traced(lhs, "cmp")
     rhs_tensor = _ensure_traced(rhs, "cmp")
     return _trace_cmp(lhs_tensor, rhs_tensor, predicate)
+
+
+def add(lhs: object, rhs: object) -> TracedTensor:
+    """Add two tensors elementwise."""
+    return _binary(BinaryOp.ADD, lhs, rhs)
+
+
+def sub(lhs: object, rhs: object) -> TracedTensor:
+    """Subtract ``rhs`` from ``lhs`` elementwise."""
+    return _binary(BinaryOp.SUB, lhs, rhs)
+
+
+def mul(lhs: object, rhs: object) -> TracedTensor:
+    """Multiply two tensors elementwise."""
+    return _binary(BinaryOp.MUL, lhs, rhs)
+
+
+def div(lhs: object, rhs: object) -> TracedTensor:
+    """Divide ``lhs`` by ``rhs`` elementwise."""
+    return _binary(BinaryOp.DIV, lhs, rhs)
 
 
 def max(lhs: object, rhs: object) -> TracedTensor:

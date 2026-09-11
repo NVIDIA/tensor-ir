@@ -74,6 +74,10 @@ struct IRDebugOptions {
   /// Env: TENSOR_IR_PRINT_IR_TREE_DIR=<dir> (0/false/off/no disables)
   std::string printIRTreeDir;
 
+  /// Generates MLIR reproducer files containing the state of the IR
+  /// and the executed pass pipeline.
+  std::string reproducerDir;
+
   /// Enable pass timing report printed to stderr.
   /// Env: TENSOR_IR_TIMING=1/0, true/false, on/off, yes/no
   bool enableTiming = false;

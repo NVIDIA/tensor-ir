@@ -162,11 +162,45 @@ public:
       setInsertionPointBeforeTerminatorOrToEnd(
           rewriter, blockStructure->iterationSpaces[0].insertionBlock);
 
+      // Apply LHS padding mask, if present.
+      const IterationSpace &lhsIterSpace = blockStructure->iterationSpaces[0];
+      if (!lhsIterSpace.paddingMask.empty()) {
+        LLVM_DEBUG(llvm::dbgs() << "Masking the LHS tile value\n");
+        auto lhsType = cast<ShapedType>(lhsTile.getType());
+        Value broadcastedMask = cuda_tile::BroadcastOp::create(
+            rewriter, loc, lhsType.clone(rewriter.getI1Type()),
+            lhsIterSpace.paddingMask[0]);
+
+        auto denseAttr = cast<DenseTypedElementsAttr>(DenseElementsAttr::get(
+            lhsType, rewriter.getZeroAttr(lhsType.getElementType())));
+        Value zero =
+            cuda_tile::ConstantOp::create(rewriter, loc, lhsType, denseAttr);
+        lhsTile = cuda_tile::SelectOp::create(rewriter, loc, broadcastedMask,
+                                              lhsTile, zero);
+      }
+
       // Reshape LHS input, if needed.
       if (mmaLhsShape != lhsTileShape) {
         auto lhsType = cast<ShapedType>(lhsTile.getType());
         lhsTile = cuda_tile::ReshapeOp::create(
             rewriter, loc, lhsType.clone(mmaLhsShape), lhsTile);
+      }
+
+      // Apply RHS padding mask, if present.
+      const IterationSpace &rhsIterSpace = blockStructure->iterationSpaces[1];
+      if (!rhsIterSpace.paddingMask.empty()) {
+        LLVM_DEBUG(llvm::dbgs() << "Masking the RHS tile value\n");
+        auto rhsType = cast<ShapedType>(rhsTile.getType());
+        Value broadcastedMask = cuda_tile::BroadcastOp::create(
+            rewriter, loc, rhsType.clone(rewriter.getI1Type()),
+            rhsIterSpace.paddingMask[0]);
+
+        auto denseAttr = cast<DenseTypedElementsAttr>(DenseElementsAttr::get(
+            rhsType, rewriter.getZeroAttr(rhsType.getElementType())));
+        Value zero =
+            cuda_tile::ConstantOp::create(rewriter, loc, rhsType, denseAttr);
+        rhsTile = cuda_tile::SelectOp::create(rewriter, loc, broadcastedMask,
+                                              rhsTile, zero);
       }
 
       // Reshape RHS input, if needed.

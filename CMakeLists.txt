@@ -4,7 +4,15 @@ if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
 endif()
 
-project(TensorIRCompiler VERSION 0.1.2 LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(cmake/TensorIRCrossCompile.cmake)
+if(LLVM_TARGET_IS_CROSSCOMPILE_HOST)
+  tensor_ir_configure_native_tablegen()
+  return()
+endif()
+
+project(TensorIRCompiler VERSION 0.1.3 LANGUAGES C CXX)
 
 # ==============================================================================
 # Project Options
@@ -32,8 +40,6 @@ set(LLVM_LIT_ARGS "-sv" CACHE STRING "Default options for lit")
 # Project Configuration
 # ==============================================================================
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
@@ -80,6 +86,10 @@ if(TENSOR_IR_DOWNLOAD_LLVM)
 endif()
 
 tensor_ir_find_mlir()
+
+if(CMAKE_CROSSCOMPILING)
+  tensor_ir_configure_cross_compile()
+endif()
 
 include(TableGen)
 include(AddLLVM)
@@ -181,6 +191,7 @@ include_directories(
 set(TENSOR_IR_TOOLS_DIR "${LLVM_RUNTIME_OUTPUT_INTDIR}")
 set(TENSOR_IR_LIBRARY_DIR "${LLVM_LIBRARY_OUTPUT_INTDIR}")
 
+add_subdirectory(tools/tensor_ir-tblgen)
 add_subdirectory(include/tensor_ir)
 add_subdirectory(lib)
 if(TENSOR_IR_INCLUDE_TESTS)
@@ -202,3 +213,23 @@ include(GNUInstallDirs)
 
 install(TARGETS tensor_ir-compiler tensor_ir-opt
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+if(TENSOR_IR_INCLUDE_TESTS)
+  set(TENSOR_IR_MLIR_TABLEGEN_INCLUDE_DIR "")
+  foreach(_tensor_ir_mlir_include_dir IN LISTS MLIR_INCLUDE_DIRS)
+    if(EXISTS "${_tensor_ir_mlir_include_dir}/mlir/IR/Constraints.td" AND
+       EXISTS "${_tensor_ir_mlir_include_dir}/mlir/IR/EnumAttr.td")
+      set(TENSOR_IR_MLIR_TABLEGEN_INCLUDE_DIR
+          "${_tensor_ir_mlir_include_dir}")
+      break()
+    endif()
+  endforeach()
+  if(NOT TENSOR_IR_MLIR_TABLEGEN_INCLUDE_DIR)
+    message(FATAL_ERROR
+      "TensorIR tests require MLIR TableGen definitions, but Constraints.td "
+      "and EnumAttr.td were not found in MLIR_INCLUDE_DIRS")
+  endif()
+  install(
+    DIRECTORY "${TENSOR_IR_MLIR_TABLEGEN_INCLUDE_DIR}/mlir/IR"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/tensor_ir/tablegen/mlir"
+    FILES_MATCHING PATTERN "*.td")
+endif()

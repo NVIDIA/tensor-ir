@@ -175,15 +175,18 @@ TensorDescriptor applyLayout(OpBuilder &rewriter, const TensorDescriptor &desc,
                              TensorSourceAttr tensorSource);
 
 /// Create a partition view for a tensor descriptor and tile shape.
-Value createPartitionView(OpBuilder &rewriter, const TensorDescriptor &desc,
-                          ArrayRef<int64_t> tileShape);
+Value createPartitionView(
+    OpBuilder &rewriter, const TensorDescriptor &desc,
+    ArrayRef<int64_t> tileShape,
+    std::optional<cuda_tile::PaddingValue> paddingValue = std::nullopt);
 
 /// Emit tile load operation.
 /// @param desc The tensor descriptor (pointer, alignment, sizes, strides).
 /// @param tileType The shaped type of the tile to load.
 /// @param indexValues The index values for the load, same rank as `tileType`.
 Value emitLoad(OpBuilder &rewriter, const TensorDescriptor &desc,
-               ShapedType tileType, ValueRange indexValues);
+               ShapedType tileType, ValueRange indexValues,
+               std::optional<cuda_tile::PaddingValue> paddingValue);
 
 /// Emit tile store operation.
 /// @param desc The tensor descriptor (pointer, alignment, sizes, strides).

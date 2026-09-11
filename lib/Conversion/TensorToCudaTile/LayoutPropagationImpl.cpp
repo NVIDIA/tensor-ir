@@ -503,13 +503,17 @@ public:
         calculateIndex(rewriter, tileIndex, outputDesc, tileShape));
 
     // Build the block structures and the iteration spaces.
-    IterationSpace initial{
-        rootInsertionBlock, std::move(tileShape), std::move(indexValues), {}};
-    MLIR_ASSIGN_OR_RETURN(
-        state.blockStructures,
-        buildSkeleton(rewriter, std::move(initial), *getTypeConverter(),
-                      state.options.reductionTileSize,
-                      /*sourceBlock=*/entryBlock));
+    IterationSpace initial{rootInsertionBlock,
+                           std::move(tileShape),
+                           std::move(indexValues),
+                           /*loadedTiles=*/{},
+                           /*paddingValue=*/std::nullopt,
+                           /*paddingMask=*/{}};
+    MLIR_ASSIGN_OR_RETURN(state.blockStructures,
+                          buildSkeleton(rewriter, std::move(initial),
+                                        *getTypeConverter(),
+                                        state.options.reductionTileSize,
+                                        /*sourceBlock=*/entryBlock));
 
     // Process all the generated block structures.
     for (auto &[op, blockStructure] : state.blockStructures) {
@@ -612,7 +616,8 @@ private:
 
     // If there are no broadcasted dimensions, use simple load.
     if (broadcastDims.empty()) {
-      return emitLoad(rewriter, desc, tileType, iterationSpace.indexValues);
+      return emitLoad(rewriter, desc, tileType, iterationSpace.indexValues,
+                      iterationSpace.paddingValue);
     }
 
     // Update tile shape and index values for broadcasted dimensions.
@@ -625,7 +630,8 @@ private:
 
     // Emit load and broadcast.
     auto loadType = cast<ShapedType>(tileType).clone(tileShape);
-    Value result = emitLoad(rewriter, desc, loadType, indexValues);
+    Value result = emitLoad(rewriter, desc, loadType, indexValues,
+                            iterationSpace.paddingValue);
     if (loadType != tileType) {
       result = cuda_tile::BroadcastOp::create(rewriter, result.getLoc(),
                                               tileType, result);
@@ -934,7 +940,7 @@ LogicalResult ConversionStateImpl::start(GraphOp graphOp) {
   staticPersistenceGridSize = 0;
   staticPersistenceTotalTiles = 0;
   if (options.persistence == PersistenceMode::Static) {
-    ArrayRef<int64_t> iterShape = normalizedLayout.getShape();
+    SmallVector<int64_t> iterShape = normalizedLayout.getShape();
     bool hasDynamicIterDim = llvm::any_of(
         iterShape, [](int64_t dim) { return ShapedType::isDynamic(dim); });
     if (hasDynamicIterDim) {

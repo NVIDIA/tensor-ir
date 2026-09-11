@@ -24,6 +24,7 @@ namespace mlir::nv_tensor_ir::compiler::cuda_tile {
 struct CudaTileFrontendDebugOptions {
   std::string dumpCudaTileIRPath;
   std::string printIRTreeDir;
+  std::string reproducerDir;
   bool printIRAfterAll = false;
   bool printCudaTileIR = false;
   bool enableTiming = false;

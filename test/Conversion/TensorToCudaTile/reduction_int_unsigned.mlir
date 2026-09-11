@@ -360,8 +360,16 @@ nv_tensor_ir.graph @test_reduce_min_large(
 // ============================================================================
 
 // CHECK-LABEL: @test_reduce_min_i8
-// CHECK: constant <i8: -1> : tile<32x128xi8>
-// CHECK: identities=[-1 : i8]
+// CHECK: %[[IDENTITY:.*]] = constant <i8: -1> : tile<32x128xi8>
+// CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[IDENTITY]])
+// CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
+// CHECK: %[[INNER:.*]] = mini %[[IARG]], %[[ARG0]] unsigned
+// CHECK: continue %[[INNER]]
+// CHECK: %[[REDUCE:.*]] = reduce %[[LOOP]] dim=1 identities=[-1 : i8]
+// CHECK:   (%[[LHS:.*]]: tile<i8>, %[[RHS:.*]]: tile<i8>)
+// CHECK:   %[[RES:.*]] = mini %[[RHS]], %[[LHS]] unsigned
+// CHECK:   yield %[[RES]]
+// CHECK: store_view_tko weak %[[REDUCE]]
 
 nv_tensor_ir.graph @test_reduce_min_i8(
     %arg0: tensor<64x8192xui8>
@@ -375,8 +383,16 @@ nv_tensor_ir.graph @test_reduce_min_i8(
 // -----
 
 // CHECK-LABEL: @test_reduce_min_i16
-// CHECK: constant <i16: -1> : tile<32x128xi16>
-// CHECK: identities=[-1 : i16]
+// CHECK: %[[IDENTITY:.*]] = constant <i16: -1> : tile<32x128xi16>
+// CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[IDENTITY]])
+// CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
+// CHECK: %[[INNER:.*]] = mini %[[IARG]], %[[ARG0]] unsigned
+// CHECK: continue %[[INNER]]
+// CHECK: %[[REDUCE:.*]] = reduce %[[LOOP]] dim=1 identities=[-1 : i16]
+// CHECK:   (%[[LHS:.*]]: tile<i16>, %[[RHS:.*]]: tile<i16>)
+// CHECK:   %[[RES:.*]] = mini %[[RHS]], %[[LHS]] unsigned
+// CHECK:   yield %[[RES]]
+// CHECK: store_view_tko weak %[[REDUCE]]
 
 nv_tensor_ir.graph @test_reduce_min_i16(
     %arg0: tensor<64x8192xui16>
@@ -390,8 +406,16 @@ nv_tensor_ir.graph @test_reduce_min_i16(
 // -----
 
 // CHECK-LABEL: @test_reduce_min_i64
-// CHECK: constant <i64: -1> : tile<32x128xi64>
-// CHECK: identities=[-1]
+// CHECK: %[[IDENTITY:.*]] = constant <i64: -1> : tile<32x128xi64>
+// CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[IDENTITY]])
+// CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
+// CHECK: %[[INNER:.*]] = mini %[[IARG]], %[[ARG0]] unsigned
+// CHECK: continue %[[INNER]]
+// CHECK: %[[REDUCE:.*]] = reduce %[[LOOP]] dim=1 identities=[-1]
+// CHECK:   (%[[LHS:.*]]: tile<i64>, %[[RHS:.*]]: tile<i64>)
+// CHECK:   %[[RES:.*]] = mini %[[RHS]], %[[LHS]] unsigned
+// CHECK:   yield %[[RES]]
+// CHECK: store_view_tko weak %[[REDUCE]]
 
 nv_tensor_ir.graph @test_reduce_min_i64(
     %arg0: tensor<64x8192xui64>

@@ -18,6 +18,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
@@ -289,7 +290,8 @@ getCudaTileEntryFunctionName(mlir::Operation *op,
 static void configureDebugInstrumentation(
     mlir::ModuleOp module, mlir::PassManager &pm,
     const mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendDebugOptions
-        &debug) {
+        &debug,
+    llvm::StringRef pipelineName) {
   if (debug.printIRAfterAll || !debug.printIRTreeDir.empty()) {
     module->getContext()->disableMultithreading();
   }
@@ -300,15 +302,33 @@ static void configureDebugInstrumentation(
            "set; using --print-ir-tree-dir and skipping stderr IR dumps.\n";
   }
 
-  if (!debug.printIRTreeDir.empty()) {
-    if (!llvm::sys::fs::exists(debug.printIRTreeDir)) {
-      std::error_code ec =
-          llvm::sys::fs::create_directory(debug.printIRTreeDir);
+  auto ensureDirectoryExists = [](llvm::StringRef dir) {
+    if (!llvm::sys::fs::exists(dir)) {
+      std::error_code ec = llvm::sys::fs::create_directory(dir);
       if (ec) {
-        llvm::errs() << "Warning: cannot create IR tree directory '"
-                     << debug.printIRTreeDir << "': " << ec.message() << "\n";
+        llvm::errs() << "Warning: cannot create IR tree directory '" << dir
+                     << "': " << ec.message() << "\n";
       }
     }
+  };
+
+  if (!debug.reproducerDir.empty()) {
+    ensureDirectoryExists(debug.reproducerDir);
+    std::string reproducerName(pipelineName);
+    std::transform(pipelineName.begin(), pipelineName.end(),
+                   reproducerName.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    std::replace(reproducerName.begin(), reproducerName.end(), ' ', '-');
+    llvm::SmallString<128> reproducerFile;
+    llvm::sys::path::append(reproducerFile, debug.reproducerDir,
+                            reproducerName + ".mlir");
+
+    mlir::makeReproducer(pm.getOpAnchorName(), pm.getPasses(),
+                         module.getOperation(), reproducerFile, true);
+  }
+
+  if (!debug.printIRTreeDir.empty()) {
+    ensureDirectoryExists(debug.printIRTreeDir);
     pm.enableIRPrintingToFileTree(
         [](mlir::Pass *, mlir::Operation *) { return false; },
         [](mlir::Pass *, mlir::Operation *) { return true; },
@@ -333,12 +353,13 @@ static mlir::LogicalResult runPipeline(
     mlir::ModuleOp module,
     const mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions
         &options,
-    llvm::StringRef timingName, PopulatePipeline &&populatePipeline) {
+    llvm::StringRef pipelineName, PopulatePipeline &&populatePipeline) {
   mlir::TimingScope timing =
-      options.timing ? options.timing->nest(timingName) : mlir::TimingScope();
+      options.timing ? options.timing->nest(pipelineName) : mlir::TimingScope();
   mlir::PassManager pm(module->getContext());
   populatePipeline(pm);
-  configureDebugInstrumentation(module, pm, options.debug);
+
+  configureDebugInstrumentation(module, pm, options.debug, pipelineName);
   if (options.timing) {
     pm.enableTiming(timing);
   } else if (options.debug.enableTiming) {
