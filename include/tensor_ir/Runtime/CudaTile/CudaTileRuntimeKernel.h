@@ -74,7 +74,6 @@ public:
       : name_(std::move(name)), funcName_(std::move(funcName)),
         cubin_(std::move(cubin)), bytecodeVersion_(bytecodeVersion) {}
 
-
   explicit CudaTileRuntimeKernel(std::string name) : name_(std::move(name)) {}
 
   Kind getKind() const override { return Kind::CudaTile; }
@@ -109,7 +108,6 @@ public:
 
   const std::string &funcName() const { return funcName_; }
 
-
   /// Set the argument packer strategy (static or dynamic shapes).
   /// Must be called after construction and before first launch.
   void setArgPacker(std::unique_ptr<RuntimeArgPacker> packer) {
@@ -136,7 +134,6 @@ private:
 
   mutable CUlibrary lib_ = nullptr;
   mutable CUkernel kernel_ = nullptr;
-
 
   /// Strategy for packing tensor operands into the flat kernel arg list.
   std::unique_ptr<RuntimeArgPacker> argPacker_;
