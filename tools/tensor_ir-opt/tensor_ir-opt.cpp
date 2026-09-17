@@ -38,8 +38,7 @@ struct TensorToCudaTilePipelineCLOptions
       llvm::cl::values(clEnumValN(nv_tensor_ir::PersistenceMode::None, "none",
                                   "Normal kernel launch."),
                        clEnumValN(nv_tensor_ir::PersistenceMode::Static,
-                                  "static", "Static persistent kernel.")
-                       )};
+                                  "static", "Static persistent kernel."))};
   PassOptions::Option<int32_t> smCount{
       *this, "sm-count",
       llvm::cl::desc("Runtime SM count for persistent kernels."),

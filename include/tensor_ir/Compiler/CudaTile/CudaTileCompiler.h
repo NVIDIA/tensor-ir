@@ -109,7 +109,6 @@ public:
   bool canCompile(mlir::ModuleOp module,
                   const CompileOptions &options) const override;
 
-
 private:
   static mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions
   makePipelineOptions(const CudaTileCompileOptions &opts);
@@ -160,7 +159,6 @@ public:
   /// arch-conditional compute target; unavailable assemblers fall back to
   /// TileIR bytecode.
   CudaTileArtifactKind artifactKind = CudaTileArtifactKind::TileIR;
-
 
   CudaTileCompileOptions(SmTarget computeCapability_)
       : CompileOptions(computeCapability_, CompilerBackend::CudaTile) {}

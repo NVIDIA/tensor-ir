@@ -57,7 +57,6 @@ std::string formatBytecodeVersion(const PyBytecodeVersion &bytecodeVersion) {
   return formatted;
 }
 
-
 struct CompileOptions {
   int32_t computeCapability = 100;
   MlirTensorIRArchPortability archPortability =
@@ -521,7 +520,6 @@ NB_MODULE(_tensor_ir, m) {
       .value("TileIR", MlirTensorIRCudaTileArtifactKindTileIR)
       .value("Cubin", MlirTensorIRCudaTileArtifactKindCubin);
 
-
   nb::class_<PyBytecodeVersion>(m, "BytecodeVersion")
       .def_static("current",
                   [] {
@@ -569,8 +567,7 @@ NB_MODULE(_tensor_ir, m) {
       .def_rw("print_ir_after_all", &CompileOptions::printIRAfterAll)
       .def_rw("enable_timing", &CompileOptions::enableTiming)
       .def_rw("bytecode_version", &CompileOptions::bytecodeVersion)
-      .def_rw("artifact_kind", &CompileOptions::artifactKind)
-      ;
+      .def_rw("artifact_kind", &CompileOptions::artifactKind);
 
   nb::class_<PyProgram>(m, "_Program")
       .def("initialize", &PyProgram::initialize)

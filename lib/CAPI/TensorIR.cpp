@@ -138,7 +138,6 @@ makeCudaTileCompileOptions(MlirTensorIRCudaTileCompileOptions options) {
   }
   cudaTileOptions.artifactKind = *artifactKind;
 
-
   Status status = cudaTileOptions.validate();
   if (!status.ok()) {
     return status;
