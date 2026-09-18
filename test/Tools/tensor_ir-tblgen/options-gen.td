@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-
 // RUN: tensor_ir-tblgen %s --gen-component-options \
 // RUN:   -I %S/../../../include %mlir_include_dirs \
 // RUN:   | FileCheck %s --check-prefix=CORE
@@ -22,7 +19,9 @@ def ModeEnum : I32Enum<"Mode", "Compilation mode",
   let underlyingType = "int";
 }
 
-def Mode : EnumOption<"mode", "mode", ModeEnum, "Auto", "Compilation mode">;
+def Mode : EnumOption<"mode", "mode", ModeEnum, "Auto", "Compilation mode"> {
+  let capiType = "MlirTensorIRCustomMode";
+}
 def FallbackMode
     : EnumOption<"fallback_mode", "fallback-mode", ModeEnum, "2D",
                  "Fallback compilation mode">;
@@ -92,6 +91,8 @@ def CompilerInvocation
 // CORE:        symbolizeMode(value)
 // CORE:      std::optional<std::string>
 // CORE:      FrontendOptions::validate() const
+// CORE:        if (auto status = ::verifyFrontend(*this); !status.ok())
+// CORE-NEXT:     return status.message();
 // CORE:      CompilerInvocationComponents::parseFromString(
 // CORE:        CompilerInvocationComponents parsed = *this;
 // CORE:        parseFrontendOptsOption(
@@ -108,17 +109,20 @@ def CompilerInvocation
 // CORE:      llvm::cl::opt<unsigned> optLevel{"opt-level"
 // CORE:      llvm::cl::list<std::string> tileShape{"tile-shape"
 // CORE:      llvm::cl::opt<std::string> problemShape{"problem-shape"
+// CORE:      void mlir::nv_tensor_ir::applyFrontendOptionsFromCL(
 // CORE:      optd::parseListOrFatal(opts.tileShape, clFrontendOptions->tileShape, 'x',
 // CORE:      optd::parseShapeOrFatal(opts.problemShape, clFrontendOptions->problemShape.getValue(),
+// CORE:      FrontendOptions mlir::nv_tensor_ir::getFrontendOptionsFromCL()
+// CORE:      applyFrontendOptionsFromCL(opts);
 // CORE:      #undef GEN_OPTIONS_CL_BINDINGS
 // CORE-NEXT: #endif // GEN_OPTIONS_CL_BINDINGS
 
 // CORE:      #ifdef GEN_COMPILERINVOCATION_CAPI_DECLS
-// CORE:      typedef enum MlirTensorIRFrontendMode {
-// CORE-NEXT: MlirTensorIRFrontendModeAuto = 0,
-// CORE-NEXT: MlirTensorIRFrontendModeFast = 1,
-// CORE-NEXT: MlirTensorIRFrontendMode_2D = 2,
-// CORE-NOT:  typedef enum MlirTensorIRFrontendMode
+// CORE:      typedef enum MlirTensorIRCustomMode {
+// CORE-NEXT: MlirTensorIRCustomModeAuto = 0,
+// CORE-NEXT: MlirTensorIRCustomModeFast = 1,
+// CORE-NEXT: MlirTensorIRCustomMode_2D = 2,
+// CORE-NOT:  typedef enum MlirTensorIRCustomMode
 // CORE:      typedef struct MlirTensorIRCompilerInvocation { void *ptr; } MlirTensorIRCompilerInvocation;
 // CORE:      mlirTensorIRCompilerInvocationCreate(void);
 // CORE:      mlirTensorIRCompilerInvocationSetFromString(

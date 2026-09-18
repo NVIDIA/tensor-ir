@@ -88,6 +88,7 @@ struct OptionInfo {
     if (rec->isSubClassOf("EnumOption")) {
       kind = Kind::Enum;
       enumInfo.emplace(rec->getValueAsDef("enumInfo"));
+      capiType = rec->getValueAsString("capiType");
     } else if (rec->isSubClassOf("ListOption")) {
       kind = Kind::List;
       elementType = rec->getValueAsString("elementType");
@@ -103,6 +104,7 @@ struct OptionInfo {
   StringRef helpText;
   bool emitTypedCAPI = true;
   std::optional<EnumInfo> enumInfo;
+  StringRef capiType;
   StringRef elementType;
   StringRef delimiter;
   std::string fullDefaultExpr() const {
@@ -138,6 +140,9 @@ struct ComponentInfo {
     return (Twine(kCppNamespace.drop_front(2)) + "::" + structName()).str();
   }
   std::string capiEnumType(const OptionInfo &opt) const {
+    if (!opt.capiType.empty()) {
+      return opt.capiType.str();
+    }
     return (Twine("MlirTensorIR") + name + opt.cppType).str();
   }
   std::string clStructName() const { return (name + "CLOptions").str(); }
@@ -412,8 +417,9 @@ void ComponentEmitter::emitValidateImpl() {
     }
   }
   if (!comp.verifyFunction.empty()) {
-    os << "  if (auto error = " << comp.verifyFunction << "(*this)) {\n";
-    os << "    return error;\n";
+    os << "  if (auto status = " << comp.verifyFunction
+       << "(*this); !status.ok()) {\n";
+    os << "    return status.message();\n";
     os << "  }\n";
   }
   os << "  return std::nullopt;\n}\n";
@@ -469,12 +475,17 @@ void ComponentEmitter::emitCLAccessorDefs() {
                 "  return {1}->category;\n"
                 "}\n\n",
                 comp.clCategoryFnName(), comp.clStaticName());
-  os << formatv("{0} mlir::nv_tensor_ir::{1}() {{\n", comp.qualStructName(),
-                comp.clGetterFnName());
-  os << formatv("  {0} opts;\n", comp.qualStructName());
+  os << formatv("void mlir::nv_tensor_ir::apply{0}OptionsFromCL({1} &opts) "
+                "{{\n",
+                comp.name, comp.qualStructName());
   for (const OptionInfo &opt : comp.options) {
     emitCLAssignment(opt);
   }
+  os << "}\n\n";
+  os << formatv("{0} mlir::nv_tensor_ir::{1}() {{\n", comp.qualStructName(),
+                comp.clGetterFnName());
+  os << formatv("  {0} opts;\n", comp.qualStructName());
+  os << formatv("  apply{0}OptionsFromCL(opts);\n", comp.name);
   os << "  return opts;\n}\n";
 }
 void ComponentEmitter::emitCLAssignment(const OptionInfo &opt) {
@@ -724,9 +735,9 @@ static bool emitComponentOptions(const RecordKeeper &records, raw_ostream &os) {
       ComponentEmitter emitter(comp, os);
       emitter.emitOptionsStruct();
       os << "\n";
-      os << formatv("void {0}();\nllvm::cl::OptionCategory &{1}();\n{2} "
-                    "{3}();\n",
-                    comp.clRegisterFnName(), comp.clCategoryFnName(),
+      os << formatv("void {0}();\nllvm::cl::OptionCategory &{1}();\n"
+                    "void apply{2}OptionsFromCL({3} &opts);\n{3} {4}();\n",
+                    comp.clRegisterFnName(), comp.clCategoryFnName(), comp.name,
                     comp.structName(), comp.clGetterFnName());
     }
     emitInvocationComponents(*invocationComps, os);

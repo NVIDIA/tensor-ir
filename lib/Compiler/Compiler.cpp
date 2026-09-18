@@ -47,17 +47,6 @@ std::string calculateCacheKey(mlir::ModuleOp module,
   return key;
 }
 
-llvm::StringRef stringifyCompilerBackend(CompilerBackend backend) {
-  switch (backend) {
-  case CompilerBackend::Auto:
-    return "auto";
-  case CompilerBackend::CudaTile:
-    return "cuda_tile";
-  default:
-    return "";
-  }
-}
-
 Status CompileOptions::validate() const { return validateDerived(); }
 
 std::string CompileOptions::toString() const {

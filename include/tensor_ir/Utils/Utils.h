@@ -65,23 +65,23 @@ namespace mlir::nv_tensor_ir {
                                    expr)
 
 #define MLIR_ASSIGN_OR_RETURN_NOMSG_IMPL(status_or, lhs, expr)                 \
-  auto status_or = (expr);                                                     \
+  auto status_or /* NOLINT(bugprone-macro-parentheses) */ = (expr);            \
   MLIR_RETURN_IF_ERROR(status_or);                                             \
-  lhs = std::move(*status_or)
+  lhs /* NOLINT(bugprone-macro-parentheses) */ = std::move(*status_or)
 
 #define MLIR_ASSIGN_OR_RETURN_MSG(lhs, expr, msg)                              \
   MLIR_ASSIGN_OR_RETURN_MSG_IMPL(TIR_CONCAT(_status_or_, __COUNTER__), lhs,    \
                                  expr, msg)
 
 #define MLIR_ASSIGN_OR_RETURN_MSG_IMPL(status_or, lhs, expr, msg)              \
-  auto status_or = (expr);                                                     \
+  auto status_or /* NOLINT(bugprone-macro-parentheses) */ = (expr);            \
   do {                                                                         \
     if (failed(status_or)) {                                                   \
       msg;                                                                     \
       return failure();                                                        \
     }                                                                          \
   } while (false);                                                             \
-  lhs = std::move(*status_or)
+  lhs /* NOLINT(bugprone-macro-parentheses) */ = std::move(*status_or)
 #endif
 
 // Get the alignment of the tensor which should be graph input or output
@@ -174,7 +174,7 @@ FailureOr<llvm::hash_code> getModuleHash(ModuleOp moduleOp);
 using DimSize = int64_t;
 
 template <typename T>
-FailureOr<llvm::SmallVector<int64_t>> toSmallVector(T attribute) {
+FailureOr<llvm::SmallVector<int64_t>> toSmallVector(const T &attribute) {
   if (!tcutegen::is_static(attribute) ||
       (tcutegen::depth(attribute) != 0 && tcutegen::depth(attribute) != 1)) {
     return failure();

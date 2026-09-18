@@ -32,6 +32,8 @@
 
 #include "tensor_ir/Runtime/CudaTile/KernelArgLayout.h"
 
+#include "llvm/ADT/ArrayRef.h"
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -90,19 +92,21 @@ public:
   /// Pack tensor operands into a flat int64_t argument array.
   ///
   /// @param operands  Runtime tensor operands wrapped in an Accessor.
-  /// @param outArgs   Output buffer; must have at least numKernelArgs()
-  ///                  entries.
+  /// @param outArgs   Bounded output buffer; must have at least
+  ///                  numKernelArgs() entries. Packers return an error before
+  ///                  writing when the capacity is insufficient.
   /// @return number of arguments written, or < 0 on error.
   virtual int32_t packArgs(const Accessor &operands,
-                           int64_t *outArgs) const = 0;
+                           llvm::MutableArrayRef<int64_t> outArgs) const = 0;
 
   /// Seed the launch argument array during host-reserved initialization.
   ///
   /// The default implementation is strict and delegates to packArgs().
   /// Packers may override this to tolerate unresolved pointer operands that
   /// are expected to be patched in a later lifecycle phase.
-  virtual int32_t packArgsAllowPlaceholders(const Accessor &operands,
-                                            int64_t *outArgs) const {
+  virtual int32_t
+  packArgsAllowPlaceholders(const Accessor &operands,
+                            llvm::MutableArrayRef<int64_t> outArgs) const {
     return packArgs(operands, outArgs);
   }
 
@@ -121,7 +125,12 @@ public:
 template <typename Accessor>
 class PointerOnlyArgPacker final : public KernelArgPacker<Accessor> {
 public:
-  int32_t packArgs(const Accessor &operands, int64_t *outArgs) const override {
+  int32_t packArgs(const Accessor &operands,
+                   llvm::MutableArrayRef<int64_t> outArgs) const override {
+    if (outArgs.size() < static_cast<size_t>(operands.size())) {
+      return -1;
+    }
+
     int32_t idx = 0;
     for (int32_t i = 0; i < operands.size(); ++i) {
       void *ptr = operands.pointer(i);
@@ -145,8 +154,13 @@ public:
     return idx;
   }
 
-  int32_t packArgsAllowPlaceholders(const Accessor &operands,
-                                    int64_t *outArgs) const override {
+  int32_t packArgsAllowPlaceholders(
+      const Accessor &operands,
+      llvm::MutableArrayRef<int64_t> outArgs) const override {
+    if (outArgs.size() < static_cast<size_t>(operands.size())) {
+      return -1;
+    }
+
     int32_t idx = 0;
     for (int32_t i = 0; i < operands.size(); ++i) {
       void *ptr = operands.pointer(i);
@@ -185,12 +199,14 @@ class FlatArgPacker final : public KernelArgPacker<Accessor> {
 public:
   explicit FlatArgPacker(KernelArgLayout layout) : layout_(std::move(layout)) {}
 
-  int32_t packArgs(const Accessor &operands, int64_t *outArgs) const override {
+  int32_t packArgs(const Accessor &operands,
+                   llvm::MutableArrayRef<int64_t> outArgs) const override {
     return packArgsImpl(operands, outArgs, /*allowUnresolvedPointers=*/false);
   }
 
-  int32_t packArgsAllowPlaceholders(const Accessor &operands,
-                                    int64_t *outArgs) const override {
+  int32_t packArgsAllowPlaceholders(
+      const Accessor &operands,
+      llvm::MutableArrayRef<int64_t> outArgs) const override {
     return packArgsImpl(operands, outArgs, /*allowUnresolvedPointers=*/true);
   }
 
@@ -199,8 +215,14 @@ public:
   }
 
 private:
-  int32_t packArgsImpl(const Accessor &operands, int64_t *outArgs,
+  int32_t packArgsImpl(const Accessor &operands,
+                       llvm::MutableArrayRef<int64_t> outArgs,
                        bool allowUnresolvedPointers) const {
+    if (layout_.totalKernelArgs < 0 ||
+        outArgs.size() < static_cast<size_t>(layout_.totalKernelArgs)) {
+      return -1;
+    }
+
     int32_t idx = 0;
     for (size_t tensorIdx = 0; tensorIdx < layout_.tensorDescs.size();
          ++tensorIdx) {
@@ -219,10 +241,10 @@ private:
           outArgs[idx++] = 0;
           continue;
         }
-        // Reject scalars that do not fit into a single int64_t slot (e.g.
-        // 16-byte complex types) instead of overflowing the slot.
+        // ElementTypeInfo::byteWidth() is always 1/2/4/8, so this can't
+        // actually fail here; kept as defense-in-depth.
         if (!detail::packScalarIntoInt64Slot(&outArgs[idx], ptr,
-                                             desc.scalarSizeInBytes, i)) {
+                                             desc.elementInfo.byteWidth(), i)) {
           return -1;
         }
         ++idx;

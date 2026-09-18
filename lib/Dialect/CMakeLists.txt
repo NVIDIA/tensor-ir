@@ -7,6 +7,7 @@ add_tensor_ir_dialect_library(NVTensorIRDialect
   TensorAttrs.cpp
   TensorDialect.cpp
   TensorOps.cpp
+  TensorTypes.cpp
 
   DEPENDS
   TensorIRIncGen
@@ -16,8 +17,11 @@ add_tensor_ir_dialect_library(NVTensorIRDialect
   NVTensorIR::Support
   MLIRControlFlowInterfaces
   MLIRFunctionInterfaces
+  MLIRGPUDialect
   MLIRInferTypeOpInterface
   MLIRIR
+  MLIRPtrDialect
+  MLIRViewLikeInterface
  )
 
 target_include_directories(NVTensorIRDialect

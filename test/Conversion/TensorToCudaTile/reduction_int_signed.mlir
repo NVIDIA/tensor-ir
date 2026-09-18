@@ -192,7 +192,7 @@ nv_tensor_ir.graph @test_reduce_add_large(
 // -----
 
 // CHECK-LABEL: @test_reduce_avg_large
-// CHECK-DAG: %[[C8192:.*]] = constant <i32: 8192>
+// CHECK-DAG: %[[C8192:.*]] = constant <i32: 8192> : tile<32x1xi32>
 // CHECK-DAG: %[[ACCUM:.*]] = constant <i32: 0> : tile<32x128xi32>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -202,7 +202,9 @@ nv_tensor_ir.graph @test_reduce_add_large(
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
 // CHECK:   %[[RES:.*]] = addi %[[RHS]], %[[LHS]]
 // CHECK:   yield %[[RES]]
-// CHECK: %[[RESULT:.*]] = divi %[[REDUCE]], %[[C8192]] signed
+// CHECK: %[[RESHAPED:.*]] = reshape %[[REDUCE]] : tile<32xi32> -> tile<32x1xi32>
+// CHECK: %[[DIVIDED:.*]] = divi %[[RESHAPED]], %[[C8192]] signed : tile<32x1xi32>
+// CHECK: %[[RESULT:.*]] = reshape %[[DIVIDED]] : tile<32x1xi32> -> tile<32xi32>
 // CHECK: store_view_tko weak %[[RESULT]]
 
 nv_tensor_ir.graph @test_reduce_avg_large(
@@ -506,8 +508,9 @@ nv_tensor_ir.graph @test_reduce_min_i64(
 // ============================================================================
 
 // CHECK-LABEL: @test_reduce_avg_i8
-// CHECK: %[[ZERO:.*]] = constant <i8: 0> : tile<32xi8>
-// CHECK: store_view_tko weak %[[ZERO]]
+// CHECK: %[[ZERO:.*]] = constant <i8: 0> : tile<32x1xi8>
+// CHECK: %[[OUTPUT:.*]] = reshape %[[ZERO]] : tile<32x1xi8> -> tile<32xi8>
+// CHECK: store_view_tko weak %[[OUTPUT]]
 
 nv_tensor_ir.graph @test_reduce_avg_i8(
     %arg0: tensor<64x129xsi8>
@@ -521,8 +524,9 @@ nv_tensor_ir.graph @test_reduce_avg_i8(
 // -----
 
 // CHECK-LABEL: @test_reduce_avg_i16
-// CHECK: %[[ZERO:.*]] = constant <i16: 0> : tile<32xi16>
-// CHECK: store_view_tko weak %[[ZERO]]
+// CHECK: %[[ZERO:.*]] = constant <i16: 0> : tile<32x1xi16>
+// CHECK: %[[OUTPUT:.*]] = reshape %[[ZERO]] : tile<32x1xi16> -> tile<32xi16>
+// CHECK: store_view_tko weak %[[OUTPUT]]
 
 nv_tensor_ir.graph @test_reduce_avg_i16(
     %arg0: tensor<64x32769xsi16>

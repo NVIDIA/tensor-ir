@@ -14,9 +14,77 @@
 
 #include "tensor_ir/Conversion/TensorToCudaTile/Options.h"
 
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/ErrorHandling.h"
+
+#include <cstdint>
+#include <limits>
 
 namespace tensor_ir::rt {
+
+/// Element type of a tensor or scalar kernel argument.
+enum class ElementType : uint8_t {
+  Bool = 0,
+  F16,
+  BF16,
+  F32,
+  F64,
+  F8E4M3FN,
+  F8E5M2,
+  SI8,
+  SI16,
+  SI32,
+  SI64,
+  UI8,
+  UI16,
+  UI32,
+  UI64,
+  // The largest defined value -- the enum is dense, so [Bool,
+  // kMaxElementType] is exactly its valid range.
+  kMaxElementType = UI64,
+};
+
+/// Wraps an ElementType with a byteWidth() accessor computed on demand.
+class ElementTypeInfo {
+public:
+  explicit ElementTypeInfo(ElementType type) : type_(type) {}
+
+  ElementType type() const { return type_; }
+
+  int32_t byteWidth() const {
+    switch (type_) {
+    case ElementType::Bool:
+    case ElementType::SI8:
+    case ElementType::UI8:
+    case ElementType::F8E4M3FN:
+    case ElementType::F8E5M2:
+      return 1;
+    case ElementType::F16:
+    case ElementType::BF16:
+    case ElementType::SI16:
+    case ElementType::UI16:
+      return 2;
+    case ElementType::F32:
+    case ElementType::SI32:
+    case ElementType::UI32:
+      return 4;
+    case ElementType::F64:
+    case ElementType::SI64:
+    case ElementType::UI64:
+      return 8;
+    }
+    llvm_unreachable("unhandled ElementType");
+  }
+
+  bool operator==(const ElementTypeInfo &other) const {
+    return type_ == other.type_;
+  }
+
+private:
+  ElementType type_;
+};
 
 /// Describes how one operand maps to flat kernel arguments.
 ///
@@ -24,9 +92,8 @@ namespace tensor_ir::rt {
 ///   [ptr] [dyn_size_0, dyn_size_1, ...] [dyn_stride_0, dyn_stride_1, ...]
 ///
 /// For scalar (non-tensor) operands the kernel signature is a single
-/// by-value argument.  `isScalar` is set to true and `scalarSizeInBytes`
-/// records the argument width so the runtime arg-packer can copy the
-/// value bytes instead of a pointer.
+/// by-value argument.  `isScalar` is set to true; the runtime arg-packer
+/// memcpy's `elementInfo.byteWidth()` bytes instead of copying a pointer.
 ///
 /// staticShape/staticStrides use kDynamic for runtime-determined dims.
 /// This matches mlir::ShapedType::kDynamic so that values extracted from
@@ -51,9 +118,8 @@ struct TensorArgDesc {
   /// is passed by value, not via a pointer + size/stride tuple.
   bool isScalar = false;
 
-  /// Width in bytes of the scalar value (only meaningful when isScalar).
-  /// For tensor operands this field is 0.
-  int32_t scalarSizeInBytes = 0;
+  /// Element type of the tensor, or the value type of the scalar.
+  ElementTypeInfo elementInfo;
 
   /// Total flat kernel args consumed by this operand.  A scalar operand
   /// contributes exactly one by-value argument; a tensor operand
@@ -61,7 +127,22 @@ struct TensorArgDesc {
   int32_t totalArgs() const {
     return isScalar ? 1 : (1 + numDynSizes + numDynStrides);
   }
+
+  bool operator==(const TensorArgDesc &other) const {
+    return rank == other.rank && staticShape == other.staticShape &&
+           staticStrides == other.staticStrides &&
+           numDynSizes == other.numDynSizes &&
+           numDynStrides == other.numDynStrides &&
+           hasExplicitStrides == other.hasExplicitStrides &&
+           isScalar == other.isScalar && elementInfo == other.elementInfo;
+  }
 };
+
+/// Count elements equal to kDynamic in an int64_t array.
+inline int32_t countDynamicDims(llvm::ArrayRef<int64_t> vals) {
+  return llvm::count_if(vals,
+                        [](int64_t v) { return v == TensorArgDesc::kDynamic; });
+}
 
 /// Complete layout of the kernel's flat argument list.
 struct KernelArgLayout {
@@ -118,6 +199,18 @@ struct KernelArgLayout {
       off += tensorDescs[i].totalArgs();
     }
     return off;
+  }
+
+  bool operator==(const KernelArgLayout &other) const {
+    return tensorDescs == other.tensorDescs && tileSizes == other.tileSizes &&
+           numInputs == other.numInputs &&
+           totalKernelArgs == other.totalKernelArgs &&
+           gridShapeTensorIdx == other.gridShapeTensorIdx &&
+           gridShape == other.gridShape &&
+           gridShapeDimMapping == other.gridShapeDimMapping &&
+           uniformSignature == other.uniformSignature &&
+           persistence == other.persistence && smCount == other.smCount &&
+           occupancy == other.occupancy;
   }
 };
 

@@ -34,7 +34,7 @@ enum class StatusCode : int32_t {
 // Status
 //===----------------------------------------------------------------------===//
 
-class Status {
+class [[nodiscard]] Status {
   StatusCode code_;
   std::string message_;
 
@@ -103,7 +103,7 @@ inline bool ok(const Status &s) { return s.ok(); }
 //===----------------------------------------------------------------------===//
 
 template <typename T>
-class StatusOr {
+class [[nodiscard]] StatusOr {
   std::optional<T> value_;
   Status status_;
 

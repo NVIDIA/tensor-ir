@@ -6,6 +6,7 @@
 #ifndef TENSOR_IR_RUNTIME_CUDATILE_CUDATILERUNTIMEKERNEL_H
 #define TENSOR_IR_RUNTIME_CUDATILE_CUDATILERUNTIMEKERNEL_H
 
+#include "tensor_ir/Artifact/TensorIRArtifact.h"
 #include "tensor_ir/Runtime/CudaTile/KernelLaunchHelpers.h"
 #include "tensor_ir/Runtime/CudaTile/RuntimeOperandAccessor.h"
 #include "tensor_ir/Runtime/IRuntimeKernel.h"
@@ -14,6 +15,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/MemoryBuffer.h"
 
 #include "cuda.h"
 #include "cuda_tile/Bytecode/Common/Version.h"
@@ -68,13 +70,16 @@ public:
       std::function<StatusOr<llvm::SmallVector<char, 0>>(
           llvm::ArrayRef<char>, int deviceComputeCapability)>;
 
-  CudaTileRuntimeKernel(
-      std::string name, std::string funcName, llvm::SmallVector<char, 0> cubin,
-      std::optional<::mlir::cuda_tile::BytecodeVersion> bytecodeVersion)
-      : name_(std::move(name)), funcName_(std::move(funcName)),
-        cubin_(std::move(cubin)), bytecodeVersion_(bytecodeVersion) {}
+  /// Builds a ready-to-launch kernel from an artifact: wires the arg packer
+  /// and grid computer strategies from the artifact's layout, so the
+  /// result needs no further setup before initializeRuntimeState()/launch().
+  static StatusOr<IRuntimeKernelPtr>
+  create(std::unique_ptr<TensorIRArtifact> artifact);
 
-  explicit CudaTileRuntimeKernel(std::string name) : name_(std::move(name)) {}
+  /// Rebuilds a kernel from bytes produced by serializeArtifact(), restoring
+  /// the same launch-readiness as create(), plus the TileIR JIT fallback
+  /// when the artifact carries bytecode.
+  static StatusOr<IRuntimeKernelPtr> deserialize(llvm::MemoryBufferRef bytes);
 
   Kind getKind() const override { return Kind::CudaTile; }
 
@@ -94,42 +99,58 @@ public:
   Status launch(PackedArgs args, Workspace workspace,
                 Stream stream) const override;
 
-  bool hasDeviceCode() const { return !cubin_.empty(); }
+  bool hasDeviceCode() const { return !activeDeviceCode().empty(); }
 
-  llvm::ArrayRef<char> deviceCode() const { return cubin_; }
+  llvm::ArrayRef<char> deviceCode() const { return activeDeviceCode(); }
 
   bool hasTileIRBytecode() const {
     static constexpr char kTileIRMagic[] = "\x7fTileIR\x00";
-    return llvm::StringRef(cubin_.data(), cubin_.size())
+    llvm::ArrayRef<char> code = activeDeviceCode();
+    return llvm::StringRef(code.data(), code.size())
         .starts_with(llvm::StringRef(kTileIRMagic, sizeof(kTileIRMagic) - 1));
   }
 
-  const std::string &name() const override { return name_; }
+  const std::string &name() const override { return artifact_->kernelName; }
 
-  const std::string &funcName() const { return funcName_; }
+  const std::string &funcName() const { return artifact_->funcName; }
 
-  /// Set the argument packer strategy (static or dynamic shapes).
-  /// Must be called after construction and before first launch.
+  const TensorIRArtifact &getArtifact() const { return *artifact_; }
+
+private:
+  explicit CudaTileRuntimeKernel(
+      std::unique_ptr<const TensorIRArtifact> artifact)
+      : artifact_(std::move(artifact)) {}
+
+  /// Set by create(); must be non-null before first launch (checked there).
   void setArgPacker(std::unique_ptr<RuntimeArgPacker> packer) {
     argPacker_ = std::move(packer);
   }
 
-  /// Set the grid-size computation strategy.
-  /// Must be called after construction and before first launch.
   void setGridComputer(std::unique_ptr<RuntimeGridComputer> computer) {
     gridComputer_ = std::move(computer);
   }
 
-  /// Set the fallback used when the CUDA driver cannot JIT TileIR.
+  /// Set when the artifact carries TileIR bytecode, for the case the CUDA
+  /// driver can't JIT it directly.
   void setTileIRFallbackAssembler(TileIRFallbackAssembler assembler) {
     tileIRFallbackAssembler_ = std::move(assembler);
   }
 
-private:
-  std::string name_;
-  std::string funcName_;
-  mutable llvm::SmallVector<char, 0> cubin_;
-  mutable std::optional<::mlir::cuda_tile::BytecodeVersion> bytecodeVersion_;
+  /// The original binary, unless a TileIR fallback JIT has since replaced
+  /// it (fallbackCubin_ non-empty), in which case that takes precedence.
+  /// The artifact's own binary is never mutated -- it stays the immutable
+  /// compile product.
+  llvm::ArrayRef<char> activeDeviceCode() const {
+    if (!fallbackCubin_.empty()) {
+      return llvm::ArrayRef<char>(fallbackCubin_);
+    }
+    return std::visit(
+        [](const auto &b) { return llvm::ArrayRef<char>(b.bytes); },
+        artifact_->binary);
+  }
+
+  std::unique_ptr<const TensorIRArtifact> artifact_;
+  mutable llvm::SmallVector<char, 0> fallbackCubin_;
   TileIRFallbackAssembler tileIRFallbackAssembler_;
 
   mutable CUlibrary lib_ = nullptr;

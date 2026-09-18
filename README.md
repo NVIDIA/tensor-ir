@@ -276,6 +276,23 @@ options.bytecode_version = nv_tensor_ir.BytecodeVersion.compatibility()
 program = nv_tensor_ir.compile(module, options=options)
 ```
 
+A compiled `program` can be serialized and written to disk, so a separate
+runtime process can load and launch it later without depending on the
+compiler at all:
+
+```python
+# Host/compile-time process: compile once, persist the result.
+with open("add_op.tirprogram", "wb") as f:
+    f.write(program.serialize())
+```
+
+```python
+# Runtime process: load the persisted program and launch it directly.
+with open("add_op.tirprogram", "rb") as f:
+    program = nv_tensor_ir.Program.deserialize(f.read())
+program.launch(a, b, out)
+```
+
 ### Python DSL
 
 The OSS build also packages a lightweight Python DSL under `nv_tensor_ir.dsl`.

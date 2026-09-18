@@ -98,7 +98,7 @@ nv_tensor_ir.graph @test_pad_load_two_loops(
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko weak %[[PVIEW]]{{.*}} -> tile<32x64xf32>
 // CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1 identities=[0xFF800000 : f32]
 // CHECK:   (%[[VAL:.*]]: tile<f32>, %[[ACC:.*]]: tile<f32>)
-// CHECK:   %[[RES:.*]] = maxf %[[ACC]], %[[VAL]] : tile<f32>
+// CHECK:   %[[RES:.*]] = maxf %[[ACC]], %[[VAL]] propagate_nan : tile<f32>
 // CHECK:   yield %[[RES]]
 // CHECK: store_view_tko weak %[[RESULT]]
 
@@ -120,7 +120,7 @@ nv_tensor_ir.graph @test_pad_load_max(
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko weak %[[PVIEW]]{{.*}} -> tile<32x64xf32>
 // CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1 identities=[0x7F800000 : f32]
 // CHECK:   (%[[VAL:.*]]: tile<f32>, %[[ACC:.*]]: tile<f32>)
-// CHECK:   %[[RES:.*]] = minf %[[ACC]], %[[VAL]] : tile<f32>
+// CHECK:   %[[RES:.*]] = minf %[[ACC]], %[[VAL]] propagate_nan : tile<f32>
 // CHECK:   yield %[[RES]]
 // CHECK: store_view_tko weak %[[RESULT]]
 
@@ -171,13 +171,13 @@ nv_tensor_ir.graph @test_pad_load_chain(
 // ============================================================================
 
 // CHECK-LABEL: @test_pad_mask_no_loop
-// CHECK-NOT: padding_value
 // CHECK-DAG: %[[C50:.*]] = constant <i32: 50>
 // CHECK-DAG: %[[NEUTRAL:.*]] = constant <f32: 1.000000e+00> : [[TILE:tile<32x64xf32>]]
 // CHECK: %[[IOTA:.*]] = iota : tile<64xi32>
 // CHECK: %[[CMP:.*]] = cmpi less_than %[[IOTA]], %[[C50]], unsigned : tile<64xi32> -> tile<64xi1>
 // CHECK: %[[CMP1:.*]] = reshape %[[CMP]] : tile<64xi1> -> tile<1x64xi1>
-// CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
+// CHECK: %[[PVIEW:.*]] = make_partition_view %{{.*}} : partition_view<tile=(32x64), tensor_view<
+// CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko weak %[[PVIEW]]{{.*}} -> [[TILE]]
 // CHECK: %[[CMP2:.*]] = broadcast %[[CMP1]] : tile<1x64xi1> -> tile<32x64xi1>
 // CHECK: %[[MASKED:.*]] = select %[[CMP2]], %[[INPUT]], %[[NEUTRAL]] : tile<32x64xi1>, [[TILE]]
 // CHECK: %[[RESULT:.*]] = reduce %[[MASKED]] dim=1 identities=[1.000000e+00 : f32]
@@ -199,8 +199,41 @@ nv_tensor_ir.graph @test_pad_mask_no_loop(
 
 // -----
 
+// Pointwise transformations are cloned before explicit tail masking so that
+// invalid transformed values are replaced with the reduction identity.
+// CHECK-LABEL: @test_pad_mask_transformed_input
+// CHECK-DAG: %[[ONE:.*]] = constant <f32: 1.000000e+00> : [[TILE:tile<32x64xf32>]]
+// CHECK-DAG: %[[C50:.*]] = constant <i32: 50> : tile<64xi32>
+// CHECK-DAG: %[[ZERO:.*]] = constant <f32: 0.000000e+00> : [[TILE]]
+// CHECK: %[[IOTA:.*]] = iota : tile<64xi32>
+// CHECK: %[[CMP:.*]] = cmpi less_than %[[IOTA]], %[[C50]], unsigned : tile<64xi32> -> tile<64xi1>
+// CHECK: %[[RESHAPED:.*]] = reshape %[[CMP]] : tile<64xi1> -> tile<1x64xi1>
+// CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
+// CHECK: %[[RECIPROCAL:.*]] = divf %[[ONE]], %[[INPUT]] rounding<full> : [[TILE]]
+// CHECK: %[[MASK:.*]] = broadcast %[[RESHAPED]] : tile<1x64xi1> -> tile<32x64xi1>
+// CHECK: %[[MASKED:.*]] = select %[[MASK]], %[[RECIPROCAL]], %[[ZERO]]
+// CHECK: %[[RESULT:.*]] = reduce %[[MASKED]] dim=1 identities=[0.000000e+00 : f32]
+// CHECK:   (%[[VAL:.*]]: tile<f32>, %[[ACC:.*]]: tile<f32>)
+// CHECK:   %[[SUM:.*]] = addf %[[ACC]], %[[VAL]] : tile<f32>
+// CHECK:   yield %[[SUM]] : tile<f32>
+// CHECK: store_view_tko weak %[[RESULT]]
+nv_tensor_ir.graph @test_pad_mask_transformed_input(
+    %arg0: tensor<64x50xf32>
+    ) -> (tensor<64x1xf32>)
+    attributes {tile_size = array<i32: 32>} {
+  %ones = constant dense<1.0> : tensor<64x50xf32>
+  %reciprocal = div %ones, %arg0 : tensor<64x50xf32>
+  %out = reduce_ud(%reciprocal) <dimensions = [1], identity = [0.0 : f32]>
+      (%acc: f32, %val: f32) {
+    %sum = arith.addf %acc, %val : f32
+    nv_tensor_ir.yield %sum : f32
+  } : tensor<64x50xf32> -> tensor<64x1xf32>
+  results %out : tensor<64x1xf32>
+}
+
+// -----
+
 // CHECK-LABEL: @test_pad_mask_one_loop
-// CHECK-NOT: padding_value
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C4:.*]] = constant <i32: 4>
@@ -217,7 +250,8 @@ nv_tensor_ir.graph @test_pad_mask_no_loop(
 // CHECK:   %[[ADD:.*]] = addi %[[MUL2]], %[[IOTA]] : tile<128xi32>
 // CHECK:   %[[CMP:.*]] = cmpi less_than %[[ADD]], %[[C500]], unsigned : tile<128xi32> -> tile<128xi1>
 // CHECK:   %[[CMP1:.*]] = reshape %[[CMP]] : tile<128xi1> -> tile<1x128xi1>
-// CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}}[%[[BLOCK]], %[[IVAR]]]
+// CHECK:   %[[PVIEW:.*]] = make_partition_view %{{.*}} : partition_view<tile=(32x128), tensor_view<
+// CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW]][%[[BLOCK]], %[[IVAR]]]
 // CHECK:   %[[CMP2:.*]] = broadcast %[[CMP1]] : tile<1x128xi1> -> tile<32x128xi1>
 // CHECK:   %[[MASKED:.*]] = select %[[CMP2]], %[[ARG0]], %[[ACCUM]] : tile<32x128xi1>, [[TILE]]
 // CHECK:   %[[INNER:.*]] = mulf %[[IARG]], %[[MASKED]] : [[TILE]]
@@ -242,7 +276,6 @@ nv_tensor_ir.graph @test_pad_mask_one_loop(
 // -----
 
 // CHECK-LABEL: @test_pad_mask_two_loops
-// CHECK-NOT: padding_value
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C2:.*]] = constant <i32: 2>
@@ -274,7 +307,8 @@ nv_tensor_ir.graph @test_pad_mask_one_loop(
 // CHECK:     %[[B_CMP2:.*]] = broadcast %[[B_CMP1]] : tile<1x8xi1> -> tile<16x8xi1>
 // CHECK:     %[[MASK:.*]] = andi %[[A_CMP2]], %[[B_CMP2]] : tile<16x8xi1>
 // CHECK:     %[[MASK1:.*]] = reshape %[[MASK]] : tile<16x8xi1> -> tile<1x16x8xi1>
-// CHECK:     %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}}[%[[BLOCK]], %[[IVAR1]], %[[IVAR2]]]
+// CHECK:     %[[PVIEW:.*]] = make_partition_view %{{.*}} : partition_view<tile=(32x16x8), tensor_view<
+// CHECK:     %[[ARG0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW]][%[[BLOCK]], %[[IVAR1]], %[[IVAR2]]]
 // CHECK:     %[[MASK2:.*]] = broadcast %[[MASK1]] : tile<1x16x8xi1> -> tile<32x16x8xi1>
 // CHECK:     %[[MASKED:.*]] = select %[[MASK2]], %[[ARG0]], %[[ACCUM]] : tile<32x16x8xi1>, [[TILE]]
 // CHECK:     %[[INNER:.*]] = mulf %[[IARG2]], %[[MASKED]] : [[TILE]]
@@ -301,19 +335,19 @@ nv_tensor_ir.graph @test_pad_mask_two_loops(
 // -----
 
 // CHECK-LABEL: @test_pad_mask_chain
-// CHECK-NOT: padding_value
 // CHECK-DAG: %[[C50:.*]] = constant <i32: 50>
 // CHECK-DAG: %[[NEUTRAL:.*]] = constant <f32: 0xFF800000> : [[TILE:tile<32x64xf32>]]
 // CHECK: %[[IOTA:.*]] = iota : tile<64xi32>
 // CHECK: %[[CMP:.*]] = cmpi less_than %[[IOTA]], %[[C50]], unsigned : tile<64xi32> -> tile<64xi1>
 // CHECK: %[[CMP1:.*]] = reshape %[[CMP]] : tile<64xi1> -> tile<1x64xi1>
-// CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
+// CHECK: %[[PVIEW:.*]] = make_partition_view %{{.*}} : partition_view<tile=(32x64), tensor_view<
+// CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko weak %[[PVIEW]]{{.*}} -> [[TILE]]
 // CHECK: %[[ABS:.*]] = absf %[[INPUT]] : [[TILE]]
 // CHECK: %[[CMP2:.*]] = broadcast %[[CMP1]] : tile<1x64xi1> -> tile<32x64xi1>
 // CHECK: %[[MASKED:.*]] = select %[[CMP2]], %[[ABS]], %[[NEUTRAL]] : tile<32x64xi1>, [[TILE]]
 // CHECK: %[[RESULT:.*]] = reduce %[[MASKED]] dim=1 identities=[0xFF800000 : f32]
 // CHECK:   (%[[VAL:.*]]: tile<f32>, %[[ACC:.*]]: tile<f32>)
-// CHECK:   %[[RES:.*]] = maxf %[[ACC]], %[[VAL]] : tile<f32>
+// CHECK:   %[[RES:.*]] = maxf %[[ACC]], %[[VAL]] propagate_nan : tile<f32>
 // CHECK:   yield %[[RES]] : tile<f32>
 // CHECK: store_view_tko weak %[[RESULT]]
 

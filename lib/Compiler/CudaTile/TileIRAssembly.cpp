@@ -75,9 +75,9 @@ Status processError(llvm::StringRef action, const ProcessResult &result,
   return Status::CompilationError(std::move(message));
 }
 
-[[maybe_unused]] StatusOr<llvm::SmallVector<char, 0>>
-assembleWithExecutable(llvm::ArrayRef<char> bytecode, SmTarget target,
-                       mlir::cuda_tile::BytecodeVersion bytecodeVersion) {
+[[maybe_unused]] StatusOr<llvm::SmallVector<char, 0>> assembleWithExecutable(
+    llvm::ArrayRef<char> bytecode, SmTarget target,
+    std::optional<mlir::cuda_tile::BytecodeVersion> bytecodeVersion) {
   auto program = llvm::sys::findProgramByName("tileiras");
   if (!program) {
     return Status::NotFound("tileiras was not found on PATH");
@@ -85,23 +85,30 @@ assembleWithExecutable(llvm::ArrayRef<char> bytecode, SmTarget target,
 
   TIR_ASSIGN_OR_RETURN(auto stdoutFile, createTemporaryFile("stdout"));
   TIR_ASSIGN_OR_RETURN(auto stderrFile, createTemporaryFile("stderr"));
-  llvm::SmallVector<llvm::StringRef, 2> versionArgs{*program,
-                                                    "--list-versions"};
-  ProcessResult query =
-      runProgram(*program, versionArgs, stdoutFile.path, stderrFile.path);
-  if (query.exitCode != 0) {
-    return processError("tileiras --list-versions", query, stderrFile.path);
-  }
+  // `tileiras` itself takes no version argument -- it determines the
+  // bytecode's version from the bytecode's own contents. When we know the
+  // version up front, do a cheap pre-flight check so an unsupported version
+  // fails fast with a clear message instead of via `tileiras`'s own error.
+  if (bytecodeVersion) {
+    llvm::SmallVector<llvm::StringRef, 2> versionArgs{*program,
+                                                      "--list-versions"};
+    ProcessResult query =
+        runProgram(*program, versionArgs, stdoutFile.path, stderrFile.path);
+    if (query.exitCode != 0) {
+      return processError("tileiras --list-versions", query, stderrFile.path);
+    }
 
-  auto stdoutBuffer = llvm::MemoryBuffer::getFile(stdoutFile.path);
-  std::string requested =
-      std::to_string(static_cast<unsigned>(bytecodeVersion.getMajor())) + "." +
-      std::to_string(static_cast<unsigned>(bytecodeVersion.getMinor()));
-  if (!stdoutBuffer ||
-      !llvm::is_contained(llvm::split((*stdoutBuffer)->getBuffer(), "\n"),
-                          requested)) {
-    return Status::NotSupported("tileiras does not support TileIR " +
-                                requested);
+    auto stdoutBuffer = llvm::MemoryBuffer::getFile(stdoutFile.path);
+    std::string requested =
+        std::to_string(static_cast<unsigned>(bytecodeVersion->getMajor())) +
+        "." +
+        std::to_string(static_cast<unsigned>(bytecodeVersion->getMinor()));
+    if (!stdoutBuffer ||
+        !llvm::is_contained(llvm::split((*stdoutBuffer)->getBuffer(), "\n"),
+                            requested)) {
+      return Status::NotSupported("tileiras does not support TileIR " +
+                                  requested);
+    }
   }
 
   TIR_ASSIGN_OR_RETURN(auto inputFile, createTemporaryFile("tilebc"));
@@ -144,9 +151,9 @@ bool isUnavailable(const Status &status) {
 
 } // namespace
 
-StatusOr<std::optional<llvm::SmallVector<char, 0>>>
-assembleTileIRToCubin(llvm::ArrayRef<char> bytecode, SmTarget target,
-                      mlir::cuda_tile::BytecodeVersion bytecodeVersion) {
+StatusOr<std::optional<llvm::SmallVector<char, 0>>> assembleTileIRToCubin(
+    llvm::ArrayRef<char> bytecode, SmTarget target,
+    std::optional<mlir::cuda_tile::BytecodeVersion> bytecodeVersion) {
 
   auto executable = assembleWithExecutable(bytecode, target, bytecodeVersion);
   if (executable.ok()) {

@@ -1,16 +1,17 @@
-// RUN: tensor_ir-opt -verify-layout-prop-lowerable -verify-diagnostics -split-input-file %s
+// RUN: tensor_ir-opt -layout-propagation-pipeline -verify-diagnostics -split-input-file %s
 
-// Verify that the layout-propagation lowerability check rejects pointwise ops
-// whose element type is not supported by the lowering. The legality check is
-// shared between the conversion pattern and this pre-flight feasibility check,
-// so the same diagnostics cover the canCompile path.
+// Verify failures at each relevant stage of layout-propagation lowering:
+// tensor constants are validated during grid formation, while compute ops are
+// validated during outlined-kernel conversion. The accept case confirms that a
+// supported pointwise op completes the full pipeline.
 
 // `pow` only supports a floating-point result; an integer result is rejected.
 nv_tensor_ir.graph @negative_pow_integer_result(
     %arg0: tensor<128xsi32>,
     %arg1: tensor<128xsi32>) -> (tensor<128xsi32>)
     attributes {tile_size = array<i32: 128>} {
-  // expected-error@below {{unsupported element type}}
+  // expected-error @below {{unsupported element type}}
+  // expected-error @below {{failed to legalize operation 'nv_tensor_ir.pow'}}
   %out = pow %arg0, %arg1 : (tensor<128xsi32>, tensor<128xsi32>) -> tensor<128xsi32>
   results %out : tensor<128xsi32>
 }
@@ -21,7 +22,8 @@ nv_tensor_ir.graph @negative_pow_integer_result(
 nv_tensor_ir.graph @negative_not_non_boolean(
     %arg0: tensor<128xsi32>) -> (tensor<128xsi32>)
     attributes {tile_size = array<i32: 128>} {
-  // expected-error@below {{unsupported element type}}
+  // expected-error @below {{unsupported element type}}
+  // expected-error @below {{failed to legalize operation 'nv_tensor_ir.not'}}
   %out = not %arg0 : tensor<128xsi32>
   results %out : tensor<128xsi32>
 }
@@ -33,7 +35,8 @@ nv_tensor_ir.graph @negative_not_non_boolean(
 nv_tensor_ir.graph @negative_gelu_fwd_f16(
     %arg0: tensor<128xf16>) -> (tensor<128xf16>)
     attributes {tile_size = array<i32: 128>} {
-  // expected-error@below {{unsupported element type}}
+  // expected-error @below {{unsupported element type}}
+  // expected-error @below {{failed to legalize operation 'nv_tensor_ir.gelu_fwd'}}
   %out = gelu_fwd %arg0 : tensor<128xf16>
   results %out : tensor<128xf16>
 }
@@ -45,7 +48,7 @@ nv_tensor_ir.graph @negative_gelu_fwd_f16(
 nv_tensor_ir.graph @negative_non_splat_constant(
     %arg0: tensor<4xf32>) -> (tensor<4xf32>)
     attributes {tile_size = array<i32: 4>} {
-  // expected-error@below {{unsupported constant value}}
+  // expected-error @below {{grid formation requires tensor constants to be splats}}
   %c = nv_tensor_ir.constant dense<[0.0, 1.0, 2.0, 3.0]> : tensor<4xf32>
   %out = add %arg0, %c : tensor<4xf32>
   results %out : tensor<4xf32>
@@ -70,10 +73,13 @@ nv_tensor_ir.graph @accept_supported_pointwise(
 
 // `reduce` with the `customize` reduction mode carries a user-defined combiner
 // that the tile lowering cannot synthesize, so the mode is rejected.
+// The staged converter currently groups this with unsupported element types
+// under "Unsupported reduction type".
 nv_tensor_ir.graph @negative_reduce_customize(
     %arg0: tensor<128xf32>) -> (tensor<1xf32>)
     attributes {tile_size = array<i32: 1>} {
-  // expected-error@below {{Unsupported reduction mode}}
+  // expected-error @below {{Unsupported reduction type}}
+  // expected-error @below {{failed to legalize operation 'nv_tensor_ir.reduce'}}
   %out = nv_tensor_ir.reduce(%arg0)<
       dimensions = [0],
       reduction_mode = <customize> >
@@ -85,7 +91,7 @@ nv_tensor_ir.graph @negative_reduce_customize(
 
 // Metadata-driven single-output lowering requires both entries to use the
 // normalized carrier shape, not merely to have one entry each.
-// expected-error @+1 {{single-output result metadata is not expressed in normalized carrier shape [8]}}
+// expected-error @below {{single-output result metadata is not expressed in normalized carrier shape [8]}}
 nv_tensor_ir.graph @invalid_single_output_metadata_shape(
     %arg0: tensor<8xf32>) -> (tensor<8xf32>)
     attributes {tile_size = array<i32: 8>} {

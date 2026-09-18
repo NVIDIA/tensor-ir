@@ -6,6 +6,8 @@
 
 #include "tensor_ir/Runtime/CudaTile/KernelArgLayout.h"
 
+#include "mlir/Support/LogicalResult.h"
+
 #include "llvm/ADT/ArrayRef.h"
 
 #include <cstdint>
@@ -18,8 +20,10 @@ struct TensorToCudaTilePipelineOptions;
 namespace tensor_ir {
 
 /// Build runtime kernel argument ABI metadata by inspecting a TensorIR graph's
-/// types, stride attributes, and conversion options.
-rt::KernelArgLayout extractKernelArgLayout(
+/// types, stride attributes, and conversion options. Fails (with an MLIR
+/// diagnostic on graphOp) if an argument's element type is not one of the
+/// recognized runtime dtypes.
+::mlir::FailureOr<rt::KernelArgLayout> extractKernelArgLayout(
     ::mlir::nv_tensor_ir::GraphOp graphOp,
     const ::mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions &options);
 

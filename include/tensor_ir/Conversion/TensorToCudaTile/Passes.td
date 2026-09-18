@@ -11,24 +11,26 @@ include "mlir/Pass/PassBase.td"
 def TensorToCudaTileConversionPass : Pass<"convert-tensor-to-cuda-tile", "mlir::ModuleOp"> {
   let summary = "Convert Tensor IR to Cuda Tile IR";
   let description = [{
-    Lower `nv_tensor_ir` graph and tensor-level ops to the `cuda_tile` dialect.
+    Lower TensorIR programs to the `cuda_tile` dialect.
 
     Two codegen strategies (controlled by `codegen-strategy`):
-      - `layout_propagation` (default): uses the layout-propagation pipeline
-        (`-tensor-ir-layout-propagation-*` + `-tensor-ir-tile-analyzer` +
-        `-tensor-ir-tile-selection` running before this pass); `tile-size`
-        is read from the `tile_size` attribute placed on `GraphOp` by
-        `-tensor-ir-tile-selection`, so the pass option is silently ignored
-        in this mode.
+      - `layout_propagation` (default): lowers destination-passing
+        `func.func` operations marked `gpu.kernel` inside `gpu.module`
+        operations. Run grid formation, strip-mining, and outlining before this
+        pass. Retained host wrappers and their staging `gpu.launch_func`
+        operations are consumed before kernel conversion; the emptied GPU
+        modules and `gpu.container_module` attribute are then removed. Analysis
+        attributes and `nv_tensor_ir.graph` are consumed or rejected at this
+        boundary.
       - `affine_map`: uses affine maps per op; `tile-size` is interpreted
         directly from the pass option.
 
     Option groups by strategy:
-      - Always read: `num-ctas`, `occupancy`, `num-warps`, `persistence`,
-        `sm-count`, `uniform-signature`.
-      - `affine_map`-only: `tile-size`.
-      - `layout_propagation`-only: `reduction-tile-size`; other layout decisions
-        live on `GraphOp` attributes produced by earlier passes.
+      - Always read: `num-ctas`, `occupancy`, `num-warps`, and
+        `uniform-signature`.
+      - `affine_map`-only: `tile-size`, `persistence`, and `sm-count`.
+      - Tiling, reduction strip-mining, and layout-path persistence are owned by
+        the preceding formation passes.
   }];
   let dependentDialects = [
     "mlir::cuda_tile::CudaTileDialect",
@@ -44,9 +46,8 @@ def TensorToCudaTileConversionPass : Pass<"convert-tensor-to-cuda-tile", "mlir::
                           "Per-op affine-map codegen."),
                clEnumValN(mlir::nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation,
                           "layout_propagation",
-                          "Layout-propagation codegen (requires the "
-                          "layout-propagation + tile-analyzer + tile-selection "
-                          "pipeline to have run before this pass; default).")
+                          "Lower an explicitly formed and outlined TensorIR "
+                          "tiled program (default).")
            )}]>,
     Option<"num_ctas", "num-ctas", "int32_t", /*default=*/"1",
            "Number of CTAs per cluster (CGA). Used to set num_cta_in_cga in "
@@ -64,7 +65,7 @@ def TensorToCudaTileConversionPass : Pass<"convert-tensor-to-cuda-tile", "mlir::
     Option<"persistence", "persistence",
            "mlir::nv_tensor_ir::PersistenceMode",
            /*default=*/"mlir::nv_tensor_ir::PersistenceMode::None",
-           "Kernel persistence mode.",
+           "Kernel persistence mode for affine-map conversion.",
            [{llvm::cl::values(
                clEnumValN(mlir::nv_tensor_ir::PersistenceMode::None,
                           "none",
@@ -78,22 +79,15 @@ def TensorToCudaTileConversionPass : Pass<"convert-tensor-to-cuda-tile", "mlir::
                           "size >= total tiles.")
            )}]>,
     Option<"sm_count", "sm-count", "int32_t", /*default=*/"0",
-           "Runtime SM count for persistent kernels. Required for static persistence mode.">,
+           "Runtime SM count for affine-map persistent kernels. Required for static persistence mode.">,
     Option<"uniform_signature", "uniform-signature", "bool",
            /*default=*/"false",
            "When true, the kernel signature always includes arguments for "
            "ALL tensor sizes and strides, even for statically-known "
            "dimensions (uniform layout). When false, only dynamic dims "
            "produce kernel arguments (original behavior).">,
-    Option<"reduction_tile_size", "reduction-tile-size", "int64_t",
-           /*default=*/"128",
-           "Tile size for contracting dimensions in layout-propagation "
-           "lowering. Must be a positive power of two.">,
     ListOption<"tile_size", "tile-size", "int32_t",
-               "A list of integers for the tile size. Only read when "
-               "codegen-strategy=affine_map; in layout_propagation mode, "
-               "tile_size is read from the GraphOp attribute set by "
-               "-tensor-ir-tile-selection.">,
+               "A list of integers for affine-map tile selection.">,
   ];
 }
 

@@ -3,11 +3,10 @@
 
 #include "tensor_ir/Compiler/CudaTile/CudaTileCompiler.h"
 
+#include "tensor_ir/Artifact/TensorIRArtifact.h"
 #include "tensor_ir/Compiler/CudaTile/CudaTileFrontend.h"
 #include "tensor_ir/Compiler/CudaTile/TileIRAssembly.h"
 #include "tensor_ir/Runtime/CudaTile/CudaTileRuntimeKernel.h"
-#include "tensor_ir/Runtime/CudaTile/KernelLaunchHelpers.h"
-#include "tensor_ir/Runtime/CudaTile/RuntimeOperandAccessor.h"
 #include "tensor_ir/Runtime/IRuntimeKernel.h"
 #include "tensor_ir/Support/Status.h"
 
@@ -255,76 +254,45 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
     }
     llvm::StringRef bc = (*bufOrErr)->getBuffer();
     tileirBytecode.assign(bc.begin(), bc.end());
+    // This file's bytecode version is unknown (it wasn't written by
+    // writeBytecode() above); the assembler and the runtime fallback
+    // assembler both still work without it -- they recover the version from
+    // the bytecode's own contents -- but the version-aware driver
+    // compatibility diagnostic on failure needs a known version, so that
+    // diagnostic won't be available for this artifact.
     runtimeBytecodeVersion = std::nullopt;
   }
 
-  if (runtimeBytecodeVersion &&
-      cudaTileOptions->artifactKind == CudaTileArtifactKind::Cubin) {
+  // The binary starts out as the TileIR bytecode just produced above (with
+  // whatever version -- possibly unknown, if the load-from-disk debug path
+  // ran) -- unless artifactKind asks for a cubin, in which case it's
+  // assembled into a real cubin below regardless of whether the version is
+  // known.
+  ::tensor_ir::rt::Binary binary = ::tensor_ir::rt::TileIRBytecode{
+      std::move(tileirBytecode), runtimeBytecodeVersion};
+  if (cudaTileOptions->artifactKind == CudaTileArtifactKind::Cubin) {
+    const auto &tileirBinary =
+        std::get<::tensor_ir::rt::TileIRBytecode>(binary);
     TIR_ASSIGN_OR_RETURN(
-        auto cubin, assembleTileIRToCubin(tileirBytecode,
+        auto cubin, assembleTileIRToCubin(tileirBinary.bytes,
                                           cudaTileOptions->computeCapability,
-                                          *runtimeBytecodeVersion));
+                                          runtimeBytecodeVersion));
     if (cubin) {
-      tileirBytecode = std::move(*cubin);
-      runtimeBytecodeVersion = std::nullopt;
+      binary = ::tensor_ir::rt::Cubin{std::move(*cubin)};
     }
   }
 
-  ::tensor_ir::rt::IRuntimeKernelPtr rtk =
-      std::make_unique<::tensor_ir::rt::CudaTileRuntimeKernel>(
+  std::optional<std::array<int32_t, 3>> staticGrid;
+  if (!frontend.useRuntimeGrid) {
+    staticGrid = compiler::cuda_tile::computeStaticGridSize(frontend);
+  }
+  TIR_ASSIGN_OR_RETURN(
+      std::unique_ptr<::tensor_ir::rt::TensorIRArtifact> artifact,
+      ::tensor_ir::rt::TensorIRArtifact::create(
           frontend.runtimeKernelName, frontend.entryFunctionName,
-          std::move(tileirBytecode), runtimeBytecodeVersion);
-
-  using RuntimeAcc = ::tensor_ir::rt::RuntimeOperandAccessor;
-  auto *tileRtk =
-      static_cast<::tensor_ir::rt::CudaTileRuntimeKernel *>(rtk.get());
-  if (runtimeBytecodeVersion) {
-    SmTarget compiledTarget = cudaTileOptions->computeCapability;
-    mlir::cuda_tile::BytecodeVersion bytecodeVersion = *runtimeBytecodeVersion;
-    tileRtk->setTileIRFallbackAssembler(
-        [compiledTarget, bytecodeVersion](
-            llvm::ArrayRef<char> bytecode,
-            int deviceCc) -> StatusOr<llvm::SmallVector<char, 0>> {
-          if (!compiledTarget.validateCodegenTargetCompatibility(deviceCc)) {
-            return Status::NotSupported("TileIR target is incompatible with "
-                                        "the current CUDA device");
-          }
-          FailureOr<SmTarget> deviceTarget =
-              SmTarget::fromCc(deviceCc, ArchPortability::arch_conditional);
-          if (failed(deviceTarget)) {
-            return Status::NotSupported(
-                "unrecognized CUDA device compute capability");
-          }
-          TIR_ASSIGN_OR_RETURN(
-              auto cubin,
-              assembleTileIRToCubin(bytecode, *deviceTarget, bytecodeVersion));
-          if (!cubin) {
-            return Status::NotSupported("no compatible TileIR assembler");
-          }
-          return std::move(*cubin);
-        });
-  }
-  const auto &argLayout = frontend.argLayout;
-  if (argLayout.uniformSignature || argLayout.hasDynamicShapes()) {
-    tileRtk->setArgPacker(
-        std::make_unique<::tensor_ir::rt::FlatArgPacker<RuntimeAcc>>(
-            argLayout));
-  } else {
-    tileRtk->setArgPacker(
-        std::make_unique<::tensor_ir::rt::PointerOnlyArgPacker<RuntimeAcc>>());
-  }
-
-  if (frontend.useRuntimeGrid) {
-    tileRtk->setGridComputer(
-        std::make_unique<::tensor_ir::rt::TileBasedGridComputer<RuntimeAcc>>(
-            argLayout));
-  } else {
-    tileRtk->setGridComputer(
-        std::make_unique<::tensor_ir::rt::StaticGridComputer<RuntimeAcc>>(
-            compiler::cuda_tile::computeStaticGridSize(frontend)));
-  }
-
-  return rtk;
+          std::move(binary), cudaTileOptions->computeCapability,
+          std::move(frontend.argLayout), staticGrid));
+  return ::tensor_ir::rt::CudaTileRuntimeKernel::create(std::move(artifact));
 }
 
 Status CudaTileCompileOptions::validateDerived() const {

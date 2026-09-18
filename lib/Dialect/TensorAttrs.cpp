@@ -25,7 +25,9 @@ namespace {
 
 constexpr int64_t kDynamic = mlir::ShapedType::kDynamic;
 
-bool isValidTensorElementType(Type type) {
+} // namespace
+
+bool isValidElementType(Type type) {
   if (auto intTy = dyn_cast<IntegerType>(type)) {
     if (intTy.getWidth() == 1) {
       return true;
@@ -45,6 +47,8 @@ bool isValidTensorElementType(Type type) {
   }
   return isa<FloatType>(type);
 }
+
+namespace {
 
 /// Calculate product of dimension sizes, yields one for an empty range.
 /// Returns `kDynamic` if any sizes are non-positive.
@@ -309,7 +313,7 @@ tcg::Layout composition(const tcg::Layout &layout, const tcg::Shape &target) {
 
 bool isTensorType(Type type) {
   auto tensorType = dyn_cast<RankedTensorType>(type);
-  if (!tensorType || !isValidTensorElementType(tensorType.getElementType())) {
+  if (!tensorType || !isValidElementType(tensorType.getElementType())) {
     return false;
   }
   Attribute encoding = tensorType.getEncoding();
@@ -1286,7 +1290,7 @@ LayoutSourceAttrInterface ReductionSourceAttr::normalize() const {
 
   // [2] Reshape the underlying source, if necessary.
   SmallVector<int64_t> newShape;
-  llvm::sort(nonBroadcasted, [](auto lhs, auto rhs) {
+  llvm::sort(nonBroadcasted, [](const auto &lhs, const auto &rhs) {
     return lhs.second.stride().as_int() > rhs.second.stride().as_int();
   });
   for (const auto &part : nonBroadcasted) {
@@ -1493,7 +1497,7 @@ SmallVector<int64_t> extractSizes(const tcg::Layout &layout, int64_t start,
     }
   }
   // Build the shape from the components sorted by stride.
-  llvm::sort(parts, [](auto lhs, auto rhs) {
+  llvm::sort(parts, [](const auto &lhs, const auto &rhs) {
     return lhs.stride().as_int() < rhs.stride().as_int();
   });
 

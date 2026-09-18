@@ -95,6 +95,9 @@ class EnumOption<string cppName, string flag, EnumInfo enumDef,
                  string default, string helpStr>
     : Option<cppName, flag, enumDef.className, default, helpStr> {
   EnumInfo enumInfo = enumDef;
+  /// Explicit C API enum type name. The component and C++ type names are used
+  /// when this is empty.
+  string capiType = "";
 }
 
 /// A numeric vector parsed using `,` or `x` and exposed through strings.

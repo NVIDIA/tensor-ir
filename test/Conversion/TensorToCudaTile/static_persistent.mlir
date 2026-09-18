@@ -11,7 +11,7 @@ module {
 //
 // CHECK-LABEL: cuda_tile.module @cuda_tile_module
 // CHECK:         entry @add_static_persistent
-// CHECK-SAME:      optimization_hints=<default = {occupancy = 2}>
+// CHECK-SAME:      optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 2}>
 // Check for get_tile_block_id
 // CHECK:           %[[BLOCK_X:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
 // Check for constants: totalTiles=12800 and gridSize=296

@@ -138,7 +138,7 @@ nv_tensor_ir.graph @gelu_fwd_f32(%arg0: tensor<32x64xf32>) -> (tensor<32x64xf32>
 // CHECK-DAG: %[[MUL2:.*]] = mulf %[[CST1]], %[[ADD1]] : [[TILE]]
 // CHECK-DAG: %[[TANH:.*]] = tanh %[[MUL2]] : [[TILE]]
 // CHECK-DAG: %[[ADD2:.*]] = addf %[[ONE]], %[[TANH]] : [[TILE]]
-// CHECK-DAG: %[[XHALF:.*]] = mulf %[[ARG0]], %[[HALF]] : [[TILE]]
+// CHECK-DAG: %[[XHALF:.*]] = mulf %[[HALF]], %[[ARG0]] : [[TILE]]
 // CHECK-DAG: %[[RESULT:.*]] = mulf %[[XHALF]], %[[ADD2]] : [[TILE]]
 // CHECK-DAG: store_view_tko weak %[[RESULT]]
 nv_tensor_ir.graph @gelu_approx_tanh_f32(%arg0: tensor<32x64xf32>) -> (tensor<32x64xf32>) {

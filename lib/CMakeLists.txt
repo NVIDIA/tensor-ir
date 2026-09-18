@@ -1,6 +1,8 @@
 add_subdirectory(Analysis)
 add_subdirectory(Support)
+add_subdirectory(Artifact)
 add_subdirectory(Runtime)
+add_subdirectory(Options)
 add_subdirectory(Compiler)
 add_subdirectory(Conversion)
 add_subdirectory(Dialect)

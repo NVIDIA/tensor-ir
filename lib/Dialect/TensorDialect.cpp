@@ -4,10 +4,15 @@
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Support/TCutegen.h"
 
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/Ptr/IR/PtrDialect.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/TypeSwitch.h"
+
+#include <optional>
 
 // ODS-generated definitions.
 #include "tensor_ir/Dialect/TensorDialect.cpp.inc"
@@ -204,6 +209,8 @@ static LogicalResult verifyTensorSignatureAttribute(Operation *op, Type type,
 }
 
 void TensorIRDialect::initialize() {
+  registerTypes();
+
   addAttributes<
 #define GET_ATTRDEF_LIST
 #include "tensor_ir/Dialect/TensorAttrs.cpp.inc"

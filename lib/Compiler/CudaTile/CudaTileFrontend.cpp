@@ -140,6 +140,7 @@ static bool isStaticPersistenceActive(
 static mlir::LogicalResult configureLayoutPropGridMetadata(
     mlir::nv_tensor_ir::GraphOp graphOp,
     ::tensor_ir::rt::KernelArgLayout &argLayout,
+    llvm::SmallVectorImpl<int64_t> &resolvedIterationSpaceShape,
     const mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions &options) {
   using namespace mlir::nv_tensor_ir;
   using ::tensor_ir::rt::TensorArgDesc;
@@ -165,6 +166,8 @@ static mlir::LogicalResult configureLayoutPropGridMetadata(
     return graphOp.emitError(
         "iteration-space rank does not match the selected tile rank");
   }
+  resolvedIterationSpaceShape.assign(iterationShape.begin(),
+                                     iterationShape.end());
 
   if (isStaticPersistenceActive(iterationShape, tileSizes, options)) {
     argLayout.persistence = PersistenceMode::Static;
@@ -404,6 +407,19 @@ static mlir::LogicalResult runLayoutPropagationLowering(
   if (options.onTensorIRReady) {
     options.onTensorIRReady(module);
   }
+  if (failed(runPipeline(module, options, "Form TensorIR tiled program",
+                         [&](mlir::PassManager &pm) {
+                           buildTensorIRTiledProgramFormationPipeline(
+                               pm, options.pipelineOptions);
+                         }))) {
+    return mlir::failure();
+  }
+  if (failed(runPipeline(module, options, "Outline TensorIR kernel",
+                         [&](mlir::PassManager &pm) {
+                           buildTensorIRKernelOutliningPipeline(pm);
+                         }))) {
+    return mlir::failure();
+  }
   return runPipeline(module, options, "Lower TensorIR to CudaTile",
                      [&](mlir::PassManager &pm) {
                        buildTensorToCudaTileConversionOnlyPipeline(
@@ -456,16 +472,7 @@ static void resolveFrontendMetadata(
     }
   }
 
-  if (auto shapeAttr =
-          result.module->getOperation()->getAttrOfType<mlir::DenseI64ArrayAttr>(
-              kResolvedIterationSpaceShapeAttrName)) {
-    llvm::ArrayRef<int64_t> shape = shapeAttr.asArrayRef();
-    result.resolvedIterationSpaceShape.assign(shape.begin(), shape.end());
-  }
-
   result.module->getOperation()->removeAttr(kResolvedTileSizeAttrName);
-  result.module->getOperation()->removeAttr(
-      kResolvedIterationSpaceShapeAttrName);
 }
 
 static llvm::ArrayRef<int64_t> getStaticGridShape(
@@ -536,10 +543,15 @@ lowerTensorIRToCudaTile(ModuleOp module,
     return failure();
   }
 
+  FailureOr<::tensor_ir::rt::KernelArgLayout> argLayout =
+      ::tensor_ir::extractKernelArgLayout(*graph, options.pipelineOptions);
+  if (failed(argLayout)) {
+    return failure();
+  }
+
   CudaTileFrontendResult result;
   result.runtimeKernelName = getRuntimeKernelName(module);
-  result.argLayout =
-      ::tensor_ir::extractKernelArgLayout(*graph, options.pipelineOptions);
+  result.argLayout = *argLayout;
   result.module = OwningOpRef<ModuleOp>(module.clone());
 
   CudaTileFrontendOptions loweringOptions = options;
@@ -554,7 +566,8 @@ lowerTensorIRToCudaTile(ModuleOp module,
         gridMetadataStatus = failure();
       } else {
         gridMetadataStatus = configureLayoutPropGridMetadata(
-            *graphOps.begin(), result.argLayout, options.pipelineOptions);
+            *graphOps.begin(), result.argLayout,
+            result.resolvedIterationSpaceShape, options.pipelineOptions);
       }
       if (options.onTensorIRReady) {
         options.onTensorIRReady(analyzedModule);

@@ -331,6 +331,7 @@ nv_tensor_ir.graph @matmul_blockarg_lhs(
 // CHECK-DAG: %[[CST1:.*]] = constant <i32: 1> : tile<i32>
 // CHECK-DAG: %[[CST6:.*]] = constant <i32: 6> : tile<i32>
 // CHECK-DAG: %[[INIT:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
+// CHECK: %[[BLOCK_X:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK: %[[RESULT:.*]] = for %[[IDX_K:.*]] in (%[[ZERO]] to %[[CST6]], step %[[CST1]])
 // CHECK-SAME: iter_values(%[[ACCUM:.*]] = %[[INIT]])
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [32, 16, 48], strides = [1, 32, 1024]
@@ -345,7 +346,7 @@ nv_tensor_ir.graph @matmul_blockarg_lhs(
 // CHECK: continue %[[MMA]] : tile<32x16xf32>
 // CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 16], strides = [16, 1]
 // CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
-// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[ZERO]]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[BLOCK_X]]]
 
 nv_tensor_ir.graph @test_matmul_two_dimensions_one_loop(
     %arg0: tensor<32x16x48xf32> {nv_tensor_ir.stride = "(1,32,1024)"},

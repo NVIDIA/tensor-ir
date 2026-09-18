@@ -5,10 +5,13 @@
 #include "tensor_ir/Support/TCutegen.h"
 
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/AffineMap.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/FunctionImplementation.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
@@ -29,7 +32,9 @@ bool mlir::nv_tensor_ir::isGraphInput(Value value) {
   if (!blockArg) {
     return false;
   }
-  return isa<GraphOp>(blockArg.getOwner()->getParentOp());
+  Operation *parent = blockArg.getOwner()->getParentOp();
+  bool isGraph = isa<GraphOp>(parent);
+  return isGraph;
 }
 
 bool mlir::nv_tensor_ir::isGraphOutput(Value value) {
@@ -154,6 +159,110 @@ static void printReductionBody(OpAsmPrinter &printer, Operation *,
 // enum attribute definitions
 #include "tensor_ir/Dialect/TensorEnums.cpp.inc"
 
+namespace {
+
+template <typename OpTy>
+LogicalResult verifyViewOperands(OpTy op) {
+  if (llvm::any_of(op.getStaticStrides(), [](int64_t stride) {
+        return !ShapedType::isDynamic(stride) && stride < 0;
+      })) {
+    return op->emitOpError() << "expected nonnegative or dynamic strides";
+  }
+  size_t rank = op.getStaticSizes().size();
+  if (op.getStaticIndices().size() != rank) {
+    return op->emitOpError()
+           << "expected " << rank << " tile coordinate(s), but got "
+           << op.getStaticIndices().size();
+  }
+  if (failed(verifyListOfOperandsOrIntegers(
+          op, "indices", rank, op.getStaticIndices(), op.getIndices()))) {
+    return failure();
+  }
+  auto verifyDynamicValues = [&](ValueRange values,
+                                 StringRef field) -> LogicalResult {
+    for (auto [position, value] : llvm::enumerate(values)) {
+      std::optional<int64_t> constant = getConstantIntValue(value);
+      if (constant && *constant < 0) {
+        return op->emitOpError()
+               << "expected dynamic " << field << " #" << position << " to be "
+               << "nonnegative, but got " << *constant;
+      }
+    }
+    return success();
+  };
+  if (failed(verifyDynamicValues(op.getSizes(), "size")) ||
+      failed(verifyDynamicValues(op.getStrides(), "stride")) ||
+      failed(verifyDynamicValues(op.getOffsets(), "offset"))) {
+    return failure();
+  }
+  for (auto [position, index] : llvm::enumerate(op.getMixedIndices())) {
+    std::optional<int64_t> constant = getConstantIntValue(index);
+    if (constant && *constant < 0) {
+      return op->emitOpError() << "expected nonnegative tile coordinate #"
+                               << position << ", but got " << *constant;
+    }
+  }
+  return success();
+}
+
+} // namespace
+
+SmallVector<OpFoldResult> LoadOp::getMixedIndices() {
+  return getMixedValues(getStaticIndices(), getIndices(), getContext());
+}
+
+void LoadOp::build(OpBuilder &builder, OperationState &state, Type tile,
+                   Value base, OpFoldResult offset,
+                   ArrayRef<OpFoldResult> sizes, ArrayRef<OpFoldResult> strides,
+                   ArrayRef<OpFoldResult> indices, IntegerAttr alignment,
+                   TilePaddingAttr padding) {
+  auto [staticOffsets, dynamicOffsets] = decomposeMixedValues({offset});
+  auto [staticSizes, dynamicSizes] = decomposeMixedValues(sizes);
+  auto [staticStrides, dynamicStrides] = decomposeMixedValues(strides);
+  auto [staticIndices, dynamicIndices] = decomposeMixedValues(indices);
+  build(builder, state, tile, base, dynamicOffsets, dynamicSizes,
+        dynamicStrides, dynamicIndices,
+        builder.getDenseI64ArrayAttr(staticOffsets),
+        builder.getDenseI64ArrayAttr(staticSizes),
+        builder.getDenseI64ArrayAttr(staticStrides),
+        builder.getDenseI64ArrayAttr(staticIndices), alignment, padding);
+}
+
+SmallVector<OpFoldResult> StoreOp::getMixedIndices() {
+  return getMixedValues(getStaticIndices(), getIndices(), getContext());
+}
+
+void StoreOp::build(OpBuilder &builder, OperationState &state, Value tile,
+                    Value base, OpFoldResult offset,
+                    ArrayRef<OpFoldResult> sizes,
+                    ArrayRef<OpFoldResult> strides,
+                    ArrayRef<OpFoldResult> indices, IntegerAttr alignment) {
+  auto [staticOffsets, dynamicOffsets] = decomposeMixedValues({offset});
+  auto [staticSizes, dynamicSizes] = decomposeMixedValues(sizes);
+  auto [staticStrides, dynamicStrides] = decomposeMixedValues(strides);
+  auto [staticIndices, dynamicIndices] = decomposeMixedValues(indices);
+  build(builder, state, tile, base, dynamicOffsets, dynamicSizes,
+        dynamicStrides, dynamicIndices,
+        builder.getDenseI64ArrayAttr(staticOffsets),
+        builder.getDenseI64ArrayAttr(staticSizes),
+        builder.getDenseI64ArrayAttr(staticStrides),
+        builder.getDenseI64ArrayAttr(staticIndices), alignment);
+}
+
+LogicalResult LoadOp::verify() {
+  auto tileType = cast<RankedTensorType>(getTile().getType());
+  std::optional<TilePadding> padding = getPadding();
+  if (padding && *padding != TilePadding::Zero &&
+      !isa<FloatType>(tileType.getElementType())) {
+    return emitOpError() << "padding " << stringifyTilePadding(*padding)
+                         << " requires a floating-point element type, got "
+                         << tileType.getElementType();
+  }
+  return verifyViewOperands(*this);
+}
+
+LogicalResult StoreOp::verify() { return verifyViewOperands(*this); }
+
 void GraphOp::getAsmBlockArgumentNames(Region &region,
                                        OpAsmSetValueNameFn setNameFn) {
   // TODO: use an attribute on the graph to name the inputs.
@@ -162,24 +271,24 @@ void GraphOp::getAsmBlockArgumentNames(Region &region,
   }
 }
 
-LogicalResult GraphOp::verify() {
-  auto verifyGraphType = [&](Type type, StringRef kind,
-                             unsigned idx) -> LogicalResult {
-    if (isa<RankedTensorType>(type) && !isTensorType(type)) {
-      return emitOpError() << "expects " << kind << " #" << idx
-                           << " to be a TensorIR ranked tensor, but got "
-                           << type;
-    }
-    return success();
-  };
+static LogicalResult verifyDenseGraphType(Operation *op, Type type,
+                                          StringRef kind, unsigned index) {
+  if (isa<RankedTensorType>(type) && !isTensorType(type)) {
+    return op->emitOpError()
+           << "expects " << kind << " #" << index
+           << " to be a TensorIR ranked tensor, but got " << type;
+  }
+  return success();
+}
 
+LogicalResult GraphOp::verify() {
   for (auto [idx, type] : llvm::enumerate(getArgumentTypes())) {
-    if (failed(verifyGraphType(type, "argument", idx))) {
+    if (failed(verifyDenseGraphType(*this, type, "argument", idx))) {
       return failure();
     }
   }
   for (auto [idx, type] : llvm::enumerate(getResultTypes())) {
-    if (failed(verifyGraphType(type, "result", idx))) {
+    if (failed(verifyDenseGraphType(*this, type, "result", idx))) {
       return failure();
     }
   }
@@ -384,14 +493,14 @@ LogicalResult ReduceUDOp::verifyRegions() {
   auto bodyBlockArgs = bodyBlock.getArguments();
   auto bodyBlockYields = bodyBlock.getTerminator()->getOperands();
 
-  // The body has N accumulator arguments followed by N current-value
-  // arguments and yields N updated accumulator values.
+  // The body has N left-hand arguments followed by N right-hand arguments and
+  // yields N combined values.
   size_t expectedNumArgs = 2 * getNumResults();
   if (bodyBlockArgs.size() != expectedNumArgs) {
-    return emitOpError()
-           << "expects body region to have exactly " << expectedNumArgs
-           << " arguments (prev_result_i, curr_operand_i), but got "
-           << bodyBlockArgs.size() << " arguments";
+    return emitOpError() << "expects body region to have exactly "
+                         << expectedNumArgs
+                         << " arguments (lhs_i, rhs_i), but got "
+                         << bodyBlockArgs.size() << " arguments";
   }
 
   if (bodyBlockYields.size() != getNumResults()) {
@@ -404,11 +513,11 @@ LogicalResult ReduceUDOp::verifyRegions() {
   for (size_t i = 0; i < getNumResults(); ++i) {
     Type identityType = cast<TypedAttr>(identityAttr.getValue()[i]).getType();
 
-    // Check that the block argument types in pair (prev_result_i,
-    // curr_operand_i) matches the identity type.
+    // Check that the block argument types in pair (lhs_i, rhs_i) match the
+    // identity type.
     // Convert signed/unsigned integer types to signless integer types.
-    auto argType_prev = bodyBlockArgs[i].getType();
-    auto argType_curr = bodyBlockArgs[i + getNumOperands()].getType();
+    auto argTypeLhs = bodyBlockArgs[i].getType();
+    auto argTypeRhs = bodyBlockArgs[i + getNumOperands()].getType();
     auto yieldType = bodyBlockYields[i].getType();
 
     Type convertedIdentityType = identityType;
@@ -417,18 +526,18 @@ LogicalResult ReduceUDOp::verifyRegions() {
           IntegerType::get(getContext(), identityType.getIntOrFloatBitWidth());
     }
 
-    if (argType_prev != convertedIdentityType) {
+    if (argTypeLhs != convertedIdentityType) {
       return emitOpError() << "expects block argument " << i
                            << " type to match identity type, but got argument "
                               "type: "
-                           << argType_prev
+                           << argTypeLhs
                            << " and identity type: " << convertedIdentityType;
     }
-    if (argType_curr != convertedIdentityType) {
+    if (argTypeRhs != convertedIdentityType) {
       return emitOpError()
              << "expects block argument " << i + getNumOperands()
              << " type to match identity type, but got argument type: "
-             << argType_curr << " and identity type: " << convertedIdentityType;
+             << argTypeRhs << " and identity type: " << convertedIdentityType;
     }
 
     if (yieldType != convertedIdentityType) {

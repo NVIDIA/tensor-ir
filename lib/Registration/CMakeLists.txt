@@ -9,5 +9,9 @@ add_tensor_ir_library(NVTensorIRRegistration
   MLIRIR
   NVTensorIR::Dialect
   MLIRFuncInlinerExtension
+  MLIRGPUDialect
+  MLIRMemRefDialect
+  MLIRSCFDialect
+  MLIRTensorDialect
 
 )

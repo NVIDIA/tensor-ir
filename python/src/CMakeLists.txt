@@ -19,6 +19,7 @@ declare_mlir_python_sources(TensorIRPythonPublicSources
 set(_tensor_ir_python_dialect_dependencies
   "${TENSOR_IR_SOURCE_DIR}/include/tensor_ir/Dialect/TensorOps.td"
   "${TENSOR_IR_SOURCE_DIR}/include/tensor_ir/Dialect/TensorAttrs.td"
+  "${TENSOR_IR_SOURCE_DIR}/include/tensor_ir/Dialect/TensorTypes.td"
 )
 
 # GEN_ENUM_BINDINGS_TD_FILE is resolved against ROOT_DIR, so it has to be a

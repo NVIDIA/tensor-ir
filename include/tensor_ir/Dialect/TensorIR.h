@@ -5,6 +5,7 @@
 #define TENSOR_IR_DIALECT_TENSOR_IR_H_
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
+#include "mlir/Dialect/Ptr/IR/PtrTypes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -18,6 +19,7 @@
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/SmallVector.h"
 
@@ -28,12 +30,18 @@ namespace nv_tensor_ir {} // namespace nv_tensor_ir
 #include "tensor_ir/Dialect/TensorDialect.h.inc"
 #include "tensor_ir/Dialect/TensorIRAttrs.h"
 
+#define GET_TYPEDEF_CLASSES
+#include "tensor_ir/Dialect/TensorTypes.h.inc"
+
 namespace mlir::nv_tensor_ir {
 /// Compatibility alias for TensorIR's builtin ranked tensor representation.
 using TensorType = ::mlir::RankedTensorType;
 
 /// Returns whether `type` is a ranked tensor supported by TensorIR.
 bool isTensorType(Type type);
+
+/// Returns whether `type` is a scalar element type supported by TensorIR.
+bool isValidElementType(Type type);
 
 /// Returns true if `value` is a block argument of a TensorIR graph.
 bool isGraphInput(Value value);

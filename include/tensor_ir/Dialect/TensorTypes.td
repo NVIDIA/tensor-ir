@@ -12,6 +12,16 @@ include "tensor_ir/Dialect/TensorDialect.td"
 include "tensor_ir/Dialect/TensorEnums.td"
 include "tensor_ir/Dialect/TensorAttrs.td"
 
+//===----------------------------------------------------------------------===//
+// TensorIR container types
+//===----------------------------------------------------------------------===//
+
+class TensorIR_TypeDef<string name, string _mnemonic, list<Trait> traits = []>
+    : TypeDef<TensorIR_Dialect, name, traits> {
+  let mnemonic = _mnemonic;
+}
+
+
 // Floating-point Type
 def TensorIR_Float
     : Type<CPred<"::llvm::isa<::mlir::FloatType>($_self)">, "floating-point">;
@@ -39,6 +49,12 @@ def TensorIR_IntTensorLike : AnyTypeOf<[TensorIR_Int, TensorIR_IntTensor]>;
 def TensorIR_TensorElementType : AnyTypeOf<[TensorIR_Float, I1, TensorIR_Int]>;
 def TensorIR_TensorType : TensorIR_TensorTypeOf<[TensorIR_TensorElementType]>;
 def TensorIR_TensorLike : AnyTypeOf<[TensorIR_FloatTensorLike, TensorIR_BoolTensorLike, TensorIR_IntTensorLike]>;
+
+
+// Only graph transport accepts collections. Do not extend TensorIR_TensorType:
+// dense arithmetic must keep rejecting grouped operands in internal builds.
+def TensorIR_GraphResultType : AnyTypeOf<[TensorIR_TensorType
+    ]>;
 
 // 32b Integer Type
 def TensorIR_SignedInt32Tensor  : TensorIR_TensorTypeOf<[SI32]>;

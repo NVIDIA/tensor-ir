@@ -2,6 +2,10 @@ set(LLVM_TARGET_DEFINITIONS TensorOps.td)
 mlir_tablegen(TensorOps.h.inc -gen-op-decls)
 mlir_tablegen(TensorOps.cpp.inc -gen-op-defs)
 
+set(LLVM_TARGET_DEFINITIONS TensorTypes.td)
+mlir_tablegen(TensorTypes.h.inc -gen-typedef-decls -typedefs-dialect=nv_tensor_ir)
+mlir_tablegen(TensorTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=nv_tensor_ir)
+
 set(LLVM_TARGET_DEFINITIONS TensorEnums.td)
 mlir_tablegen(TensorEnums.h.inc -gen-enum-decls)
 mlir_tablegen(TensorEnums.cpp.inc -gen-enum-defs)

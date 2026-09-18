@@ -60,7 +60,6 @@ add_mlir_python_common_capi_library(NVTensorIRPythonCAPI
 tensor_ir_register_library(NVTensorIRPythonCAPI)
 
 
-
 ################################################################################
 # Package assembly
 ################################################################################

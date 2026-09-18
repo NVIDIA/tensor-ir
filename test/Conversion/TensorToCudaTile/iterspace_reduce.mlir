@@ -179,23 +179,18 @@ nv_tensor_ir.graph @test_reduce_nested_small(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
-// CHECK-DAG: %[[ACCUM_SUM:.*]] = constant <f32: 0.000000e+00> : [[TILE1:tile<1x128x128xf32>]]
-// CHECK-DAG: %[[ACCUM_MUL:.*]] = constant <f32: 1.000000e+00> : [[TILE2:tile<1x128xf32>]]
+// CHECK-DAG: %[[ACCUM_SUM:.*]] = constant <f32: 0.000000e+00> : [[TILE1:tile<1x1024x128xf32>]]
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[LOOP1:.*]] = for %[[IVAR1:.*]] in (%[[ZERO]] to %[[C8]], step %[[ONE]])
-// CHECK-SAME: iter_values(%[[IARG1:.*]] = %[[ACCUM_MUL]]) -> ([[TILE2]])
-// CHECK:   %[[LOOP2:.*]] = for %[[IVAR2:.*]] in (%[[ZERO]] to %[[C8]], step %[[ONE]])
+// CHECK: %[[LOOP2:.*]] = for %[[IVAR2:.*]] in (%[[ZERO]] to %[[C8]], step %[[ONE]])
 // CHECK-SAME: iter_values(%[[IARG2:.*]] = %[[ACCUM_SUM]]) -> ([[TILE1]])
-// CHECK:     %[[ARG0:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[BLOCK]], %[[IVAR1]], %[[IVAR2]]]
-// CHECK:     %[[TADD:.*]] = addf %[[IARG2]], %[[ARG0]] : [[TILE1]]
-// CHECK:     continue %[[TADD]] : [[TILE1]]
-// CHECK:   %[[REDUCE1:.*]] = reduce %[[LOOP2]] dim=2 identities=[0.000000e+00 : f32] : [[TILE1]] -> [[TILE2]]
+// CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko weak %{{.*}}[%[[BLOCK]], %[[ZERO]], %[[IVAR2]]]
+// CHECK:   %[[TADD:.*]] = addf %[[IARG2]], %[[ARG0]] : [[TILE1]]
+// CHECK:   continue %[[TADD]] : [[TILE1]]
+// CHECK: %[[REDUCE1:.*]] = reduce %[[LOOP2]] dim=2 identities=[0.000000e+00 : f32] : [[TILE1]] -> [[TILE2:tile<1x1024xf32>]]
 // CHECK:     (%[[VAL1:.*]]: tile<f32>, %[[ACC1:.*]]: tile<f32>)
 // CHECK:     %[[RES1:.*]] = addf %[[ACC1]], %[[VAL1]] : tile<f32>
 // CHECK:     yield %[[RES1]] : tile<f32>
-// CHECK:   %[[TMUL:.*]] = mulf %[[IARG1]], %[[REDUCE1]] : [[TILE2]]
-// CHECK:   continue %[[TMUL]] : [[TILE2]]
-// CHECK: %[[REDUCE2:.*]] = reduce %[[LOOP1]] dim=1 identities=[1.000000e+00 : f32] : [[TILE2]] -> tile<1xf32>
+// CHECK: %[[REDUCE2:.*]] = reduce %[[REDUCE1]] dim=1 identities=[1.000000e+00 : f32] : [[TILE2]] -> tile<1xf32>
 // CHECK:   (%[[VAL2:.*]]: tile<f32>, %[[ACC2:.*]]: tile<f32>)
 // CHECK:   %[[RES2:.*]] = mulf %[[ACC2]], %[[VAL2]] : tile<f32>
 // CHECK:   yield %[[RES2]] : tile<f32>

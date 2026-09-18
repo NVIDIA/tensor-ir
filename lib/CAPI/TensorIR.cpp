@@ -3,6 +3,7 @@
 
 #include "tensor_ir-c/TensorIR.h"
 
+#include "tensor_ir/Artifact/TensorIRArtifactCodec.h"
 #include "tensor_ir/Compiler/Compiler.h"
 #include "tensor_ir/Compiler/CudaTile/CudaTileCompiler.h"
 #include "tensor_ir/Dialect/TensorIR.h"
@@ -16,7 +17,9 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MemoryBuffer.h"
 
 #include <memory>
 #include <optional>
@@ -187,7 +190,8 @@ void emitError(llvm::StringRef message, MlirStringCallback errorCallback,
   }
 }
 
-MlirLogicalResult reportStatus(Status status, MlirStringCallback errorCallback,
+MlirLogicalResult reportStatus(const Status &status,
+                               MlirStringCallback errorCallback,
                                void *errorUserData) {
   if (status.ok()) {
     return mlirLogicalResultSuccess();
@@ -205,7 +209,7 @@ getCudaTileRuntimeKernel(const IRuntimeKernelPtr &rtk) {
   if (!rtk) {
     return nullptr;
   }
-  return static_cast<const CudaTileRuntimeKernel *>(rtk.get());
+  return llvm::dyn_cast<CudaTileRuntimeKernel>(rtk.get());
 }
 
 class Program {
@@ -286,6 +290,19 @@ public:
           "TensorIR compiled program is not a CudaTile runtime kernel");
     }
     return rtk->deviceCode();
+  }
+
+  StatusOr<std::unique_ptr<llvm::MemoryBuffer>> serialize() const {
+    Status s = validate();
+    if (!s.ok()) {
+      return s;
+    }
+    const CudaTileRuntimeKernel *rtk = getCudaTileRuntimeKernel(rtk_);
+    if (!rtk) {
+      return Status::NotSupported(
+          "TensorIR compiled program is not a CudaTile runtime kernel");
+    }
+    return serializeArtifact(rtk->getArtifact());
   }
 
 private:
@@ -546,4 +563,42 @@ MlirLogicalResult mlirTensorIRProgramGetBytecode(
   bytecodeCallback(mlirStringRefCreate(bytecode->data(), bytecode->size()),
                    bytecodeUserData);
   return mlirLogicalResultSuccess();
+}
+
+/// Sends the serialized artifact bytes for `program` to `bytesCallback`:
+/// the compiled binary plus its full launch metadata, as an opaque blob.
+MlirLogicalResult mlirTensorIRProgramSerialize(MlirTensorIRProgram program,
+                                               MlirStringCallback bytesCallback,
+                                               void *bytesUserData,
+                                               MlirStringCallback errorCallback,
+                                               void *errorUserData) {
+  Program *cppProgram = unwrapProgram(program);
+  if (!cppProgram) {
+    return reportNullProgram(errorCallback, errorUserData);
+  }
+  StatusOr<std::unique_ptr<llvm::MemoryBuffer>> bytes = cppProgram->serialize();
+  if (!bytes.ok()) {
+    return reportStatus(bytes.status(), errorCallback, errorUserData);
+  }
+  bytesCallback(mlirStringRefCreate((*bytes)->getBufferStart(),
+                                    (*bytes)->getBufferSize()),
+                bytesUserData);
+  return mlirLogicalResultSuccess();
+}
+
+/// Rebuilds a program from bytes produced by `mlirTensorIRProgramSerialize`.
+MlirTensorIRProgram
+mlirTensorIRProgramDeserialize(MlirStringRef bytes,
+                               MlirStringCallback errorCallback,
+                               void *errorUserData) {
+  llvm::StringRef data(bytes.data, bytes.length);
+  auto buffer = llvm::MemoryBuffer::getMemBuffer(
+      data, /*BufferName=*/"", /*RequiresNullTerminator=*/false);
+  StatusOr<IRuntimeKernelPtr> rtk =
+      CudaTileRuntimeKernel::deserialize(buffer->getMemBufferRef());
+  if (!rtk.ok()) {
+    reportStatus(rtk.status(), errorCallback, errorUserData);
+    return wrapProgram(nullptr);
+  }
+  return wrapProgram(new Program(/*compiler=*/nullptr, std::move(rtk).value()));
 }

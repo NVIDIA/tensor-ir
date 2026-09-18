@@ -63,46 +63,6 @@ static void buildTensorToCudaTileConversionPassPipeline(
   nv_tensor_ir::buildTensorToCudaTileConversionPipeline(pm, options);
 }
 
-namespace {
-
-/// Runs the layout-propagation lowerability check on each
-/// graph without materializing any IR. Exercises the per-op validators (which
-/// the conversion driver would otherwise swallow as a generic "failed to
-/// legalize" diagnostic) so they can be covered by -verify-diagnostics tests.
-struct TestVerifyLayoutPropLowerablePass
-    : public PassWrapper<TestVerifyLayoutPropLowerablePass,
-                         OperationPass<nv_tensor_ir::GraphOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
-      TestVerifyLayoutPropLowerablePass)
-
-  void runOnOperation() override {
-    nv_tensor_ir::GraphOp graphOp = getOperation();
-    if (failed(nv_tensor_ir::tensor_to_cuda_tile::verifyLayoutPropLowerable(
-            graphOp))) {
-      signalPassFailure();
-    }
-  }
-};
-} // namespace
-
-/// Pipeline that runs the layout-propagation analysis (annotation,
-/// normalization, tile selection, graph splitting) and then the lowerability
-/// check, but does not run the IR-materializing conversion.
-static void buildVerifyLayoutPropLowerablePassPipeline(
-    OpPassManager &pm, const TensorToCudaTilePipelineCLOptions &opts) {
-  nv_tensor_ir::TensorToCudaTilePipelineOptions options;
-  options.tileSize.assign(opts.tileSize.begin(), opts.tileSize.end());
-  options.persistence = opts.persistence;
-  options.smCount = opts.smCount;
-  options.occupancy = opts.occupancy;
-  options.codegenStrategy =
-      nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation;
-  nv_tensor_ir::buildGraphAnalysisPipeline(pm, options);
-  nv_tensor_ir::buildTileSelectionPipeline(pm, options);
-  pm.addNestedPass<nv_tensor_ir::GraphOp>(
-      std::make_unique<TestVerifyLayoutPropLowerablePass>());
-}
-
 static void registerToolPipelines() {
 
   // Layout propagation pipeline
@@ -113,18 +73,15 @@ static void registerToolPipelines() {
   // 4. TileSelection: Selects tile configuration based on a heuristic
   // 5. GraphSplitting: Back-propagates iteration_space layouts and enforces
   //    that non-unary elementwise ops have composite layouts with separated
-  //    operand layouts (required for TensorToCudaTile codegen)
-  // 6. TensorToCudaTileConversion: Converts the graph to CudaTile dialect
+  //    operand layouts
+  // 6. FormGridPass: Forms the flattened destination-passing tiled grid
+  // 7. TileReductionsPass: Materializes contraction/persistence loops
+  // 8. OutlineKernelPass: Outlines the mapped forall body
+  // 9. TensorToCudaTileConversion: Converts the explicit program to CudaTile
   PassPipelineRegistration<TensorToCudaTilePipelineCLOptions>(
       "layout-propagation-pipeline",
       "Pipeline to convert TensorIR to CudaTile using layout propagation",
       buildTensorToCudaTileConversionPassPipeline);
-
-  PassPipelineRegistration<TensorToCudaTilePipelineCLOptions>(
-      "verify-layout-prop-lowerable",
-      "Pipeline that runs the layout-propagation analysis and then checks "
-      "lowerability, without materializing the conversion.",
-      buildVerifyLayoutPropLowerablePassPipeline);
 
   mlir::nv_tensor_ir::registerTensorToCudaTileConversionPasses();
 }

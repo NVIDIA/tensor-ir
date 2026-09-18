@@ -12,7 +12,7 @@ if(LLVM_TARGET_IS_CROSSCOMPILE_HOST)
   return()
 endif()
 
-project(TensorIRCompiler VERSION 0.1.3 LANGUAGES C CXX)
+project(TensorIRCompiler VERSION 0.1.4 LANGUAGES C CXX)
 
 # ==============================================================================
 # Project Options

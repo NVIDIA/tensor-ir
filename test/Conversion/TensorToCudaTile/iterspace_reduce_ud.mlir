@@ -221,9 +221,9 @@ nv_tensor_ir.graph @test_reduce_2loops_multiple(
 // ============================================================================
 // CHECK-LABEL: @test_reduce_broadcast
 // CHECK: %[[REDUCE:.*]]:2 = reduce %{{.*}} dim=1 identities=[1.000000e+00 : f32, 0.000000e+00 : f16]
-// CHECK: %[[RESHAPE1:.*]] = reshape %[[REDUCE]]#0 : tile<32xf32> -> tile<32x1xf32>
+// CHECK-DAG: %[[RESHAPE1:.*]] = reshape %[[REDUCE]]#0 : tile<32xf32> -> tile<32x1xf32>
+// CHECK-DAG: %[[RESHAPE2:.*]] = reshape %[[REDUCE]]#1 : tile<32xf16> -> tile<32x1xf16>
 // CHECK: %[[BCAST1:.*]] = broadcast %[[RESHAPE1]] : tile<32x1xf32> -> tile<32x8xf32>
-// CHECK: %[[RESHAPE2:.*]] = reshape %[[REDUCE]]#1 : tile<32xf16> -> tile<32x1xf16>
 // CHECK: %[[BCAST2:.*]] = broadcast %[[RESHAPE2]] : tile<32x1xf16> -> tile<32x8xf16>
 // CHECK: %[[CONVERT:.*]] = ftof %[[BCAST2]] : tile<32x8xf16> -> tile<32x8xf32>
 // CHECK: %[[RESULT:.*]] = divf %[[BCAST1]], %[[CONVERT]]
@@ -253,22 +253,36 @@ nv_tensor_ir.graph @test_reduce_broadcast(
 // TEST 8: Welford reduction
 // ============================================================================
 // CHECK-LABEL: @test_reduce_welford
-// CHECK: %[[REDUCE:.*]]:3 = reduce %{{.*}}, %{{.*}}, %{{.*}} dim=1 identities=[0.000000e+00 : f32, 0.000000e+00 : f32, 0.000000e+00 : f32]
+// CHECK-DAG: %[[MEAN_INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x64xf32>
+// CHECK-DAG: %[[M2_INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x64xf32>
+// CHECK-DAG: %[[WEIGHT_INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x64xf32>
+// CHECK: %[[REDUCE:.*]]:3 = reduce %[[MEAN_INPUT]], %[[M2_INPUT]], %[[WEIGHT_INPUT]] dim=1
+// CHECK-SAME: identities=[0.000000e+00 : f32, 0.000000e+00 : f32, 0.000000e+00 : f32] :
 // CHECK-SAME: tile<32x64xf32>, tile<32x64xf32>, tile<32x64xf32> -> tile<32xf32>, tile<32xf32>, tile<32xf32>
 // CHECK: %[[VAL_IN:[^:]*]]: tile<f32>, %[[ACC_IN:[^:]*]]: tile<f32>,
 // CHECK-SAME: %[[VAL_M2:[^:]*]]: tile<f32>, %[[ACC_M2:[^:]*]]: tile<f32>,
 // CHECK-SAME: %[[VAL_W:[^:]*]]: tile<f32>, %[[ACC_W:[^:]*]]: tile<f32>
-// CHECK:   %[[OP0:.*]] = subf %[[VAL_IN]], %[[ACC_IN]] : tile<f32>
-// CHECK:   %[[OP1:.*]] = addf %[[ACC_W]], %[[VAL_W]] : tile<f32>
-// CHECK:   %[[OP2:.*]] = divf %[[VAL_W]], %[[OP1]] : tile<f32>
-// CHECK:   %[[OP3:.*]] = mulf %[[OP0]], %[[OP2]] : tile<f32>
-// CHECK:   %[[OP4:.*]] = addf %[[OP3]], %[[ACC_IN]] : tile<f32>
-// CHECK:   %[[OP5:.*]] = addf %[[ACC_M2]], %[[VAL_M2]] : tile<f32>
-// CHECK:   %[[OP6:.*]] = mulf %[[OP0]], %[[OP0]] : tile<f32>
-// CHECK:   %[[OP7:.*]] = mulf %[[OP6]], %[[ACC_W]] : tile<f32>
-// CHECK:   %[[OP8:.*]] = mulf %[[OP7]], %[[OP2]] : tile<f32>
-// CHECK:   %[[OP9:.*]] = addf %[[OP8]], %[[OP5]] : tile<f32>
-// CHECK:   yield %[[OP4]], %[[OP9]], %[[OP1]] : tile<f32>, tile<f32>, tile<f32>
+// CHECK-DAG:   %[[ACC_EMPTY:.*]] = cmpf equal ordered %[[ACC_W]], %[[ZERO:[^ ]+]] : tile<f32> -> tile<i1>
+// CHECK-DAG:   %[[VAL_EMPTY:.*]] = cmpf equal ordered %[[VAL_W]], %[[ZERO]] : tile<f32> -> tile<i1>
+// CHECK-DAG:   %[[SAFE_ACC_MEAN:.*]] = select %[[ACC_EMPTY]], %[[VAL_IN]], %[[ACC_IN]] : tile<i1>, tile<f32>
+// CHECK-DAG:   %[[SAFE_VAL_MEAN:.*]] = select %[[VAL_EMPTY]], %[[ACC_IN]], %[[VAL_IN]] : tile<i1>, tile<f32>
+// CHECK-DAG:   %[[DELTA:.*]] = subf %[[SAFE_VAL_MEAN]], %[[SAFE_ACC_MEAN]] : tile<f32>
+// CHECK-DAG:   %[[WEIGHT_SUM:.*]] = addf %[[ACC_W]], %[[VAL_W]] : tile<f32>
+// CHECK:       %[[WEIGHT_SUM_ZERO:.*]] = cmpf equal ordered %[[WEIGHT_SUM]], %[[ZERO]] : tile<f32> -> tile<i1>
+// CHECK:       %[[SAFE_WEIGHT_SUM:.*]] = select %[[WEIGHT_SUM_ZERO]], %[[ONE:[^,]+]], %[[WEIGHT_SUM]] : tile<i1>, tile<f32>
+// CHECK:       %[[RHS_FRACTION:.*]] = divf %[[VAL_W]], %[[SAFE_WEIGHT_SUM]] rounding<full> : tile<f32>
+// CHECK-DAG:   %[[MEAN_UPDATE:.*]] = mulf %[[DELTA]], %[[RHS_FRACTION]] : tile<f32>
+// CHECK-DAG:   %[[M2_SUM:.*]] = addf %[[ACC_M2]], %[[VAL_M2]] : tile<f32>
+// CHECK-DAG:   %[[DELTA_SQUARED:.*]] = mulf %[[DELTA]], %[[DELTA]] : tile<f32>
+// CHECK-DAG:   %[[MEAN_CANDIDATE:.*]] = addf %[[MEAN_UPDATE]], %[[SAFE_ACC_MEAN]] : tile<f32>
+// CHECK-DAG:   %[[WEIGHTED_DELTA:.*]] = mulf %[[DELTA_SQUARED]], %[[ACC_W]] : tile<f32>
+// CHECK:       %[[M2_UPDATE:.*]] = mulf %[[WEIGHTED_DELTA]], %[[RHS_FRACTION]] : tile<f32>
+// CHECK:       %[[M2_CANDIDATE:.*]] = addf %[[M2_UPDATE]], %[[M2_SUM]] : tile<f32>
+// CHECK-DAG:   %[[MEAN_OR_ACC:.*]] = select %[[VAL_EMPTY]], %[[ACC_IN]], %[[MEAN_CANDIDATE]] : tile<i1>, tile<f32>
+// CHECK-DAG:   %[[COMBINED_MEAN:.*]] = select %[[ACC_EMPTY]], %[[VAL_IN]], %[[MEAN_OR_ACC]] : tile<i1>, tile<f32>
+// CHECK-DAG:   %[[M2_OR_ACC:.*]] = select %[[VAL_EMPTY]], %[[ACC_M2]], %[[M2_CANDIDATE]] : tile<i1>, tile<f32>
+// CHECK-DAG:   %[[COMBINED_M2:.*]] = select %[[ACC_EMPTY]], %[[VAL_M2]], %[[M2_OR_ACC]] : tile<i1>, tile<f32>
+// CHECK:       yield %[[COMBINED_MEAN]], %[[COMBINED_M2]], %[[WEIGHT_SUM]] : tile<f32>, tile<f32>, tile<f32>
 // CHECK: store_view_tko weak %[[REDUCE]]#0
 
 nv_tensor_ir.graph @test_reduce_welford(
@@ -279,18 +293,31 @@ nv_tensor_ir.graph @test_reduce_welford(
     attributes {tile_size = array<i32: 32>} {
   %reduce0, %reduce1, %reduce2 = reduce_ud(%arg0, %arg1, %arg2)
   <dimensions = [1], identity = [0.0 : f32, 0.0 : f32, 0.0 : f32]>
-  (%acc_in: f32, %acc_m2: f32, %acc_w: f32, %val_in: f32, %val_m2: f32, %val_w: f32) {
-    %0 = arith.subf %val_in, %acc_in : f32
-    %1 = arith.addf %acc_w, %val_w : f32
-    %2 = arith.divf %val_w, %1 : f32
-    %3 = arith.mulf %0, %2 : f32
-    %4 = arith.addf %acc_in, %3 : f32
-    %5 = arith.addf %acc_m2, %val_m2 : f32
-    %6 = arith.mulf %0, %0 : f32
-    %7 = arith.mulf %6, %acc_w : f32
-    %8 = arith.mulf %7, %2 : f32
-    %9 = arith.addf %5, %8 : f32
-    nv_tensor_ir.yield %4, %9, %1 : f32, f32, f32
+  (%mean_lhs: f32, %m2_lhs: f32, %weight_lhs: f32,
+   %mean_rhs: f32, %m2_rhs: f32, %weight_rhs: f32) {
+    %zero = arith.constant 0.0 : f32
+    %one = arith.constant 1.0 : f32
+    %lhs_is_empty = arith.cmpf oeq, %weight_lhs, %zero : f32
+    %rhs_is_empty = arith.cmpf oeq, %weight_rhs, %zero : f32
+    %safe_mean_lhs = arith.select %lhs_is_empty, %mean_rhs, %mean_lhs : f32
+    %safe_mean_rhs = arith.select %rhs_is_empty, %mean_lhs, %mean_rhs : f32
+    %delta = arith.subf %safe_mean_rhs, %safe_mean_lhs : f32
+    %weight_sum = arith.addf %weight_lhs, %weight_rhs : f32
+    %weight_sum_is_zero = arith.cmpf oeq, %weight_sum, %zero : f32
+    %safe_weight_sum = arith.select %weight_sum_is_zero, %one, %weight_sum : f32
+    %rhs_fraction = arith.divf %weight_rhs, %safe_weight_sum : f32
+    %mean_update = arith.mulf %delta, %rhs_fraction : f32
+    %mean_candidate = arith.addf %safe_mean_lhs, %mean_update : f32
+    %m2_sum = arith.addf %m2_lhs, %m2_rhs : f32
+    %delta_squared = arith.mulf %delta, %delta : f32
+    %weighted_delta = arith.mulf %delta_squared, %weight_lhs : f32
+    %m2_update = arith.mulf %weighted_delta, %rhs_fraction : f32
+    %m2_candidate = arith.addf %m2_sum, %m2_update : f32
+    %mean_or_lhs = arith.select %rhs_is_empty, %mean_lhs, %mean_candidate : f32
+    %combined_mean = arith.select %lhs_is_empty, %mean_rhs, %mean_or_lhs : f32
+    %m2_or_lhs = arith.select %rhs_is_empty, %m2_lhs, %m2_candidate : f32
+    %combined_m2 = arith.select %lhs_is_empty, %m2_rhs, %m2_or_lhs : f32
+    nv_tensor_ir.yield %combined_mean, %combined_m2, %weight_sum : f32, f32, f32
   } : tensor<128x64xf32>, tensor<128x64xf32>,  tensor<128x64xf32>
     -> tensor<128x1xf32>, tensor<128x1xf32>, tensor<128x1xf32>
   results %reduce0 : tensor<128x1xf32>

@@ -9,6 +9,12 @@ include "tensor_ir/Dialect/TensorEnums.td"
 include "tensor_ir/Dialect/TensorAttrInterfaces.td"
 include "mlir/IR/TensorEncoding.td"
 
+def TilePaddingAttr
+    : EnumAttr<TensorIR_Dialect, TilePadding, "tile_padding"> {
+  let summary = "Padding value for partially out-of-bounds tile loads";
+  let assemblyFormat = "`<` $value `>`";
+}
+
 def ReductionModeAttr : EnumAttr<TensorIR_Dialect, ReductionMode, "reduction_mode"> {
   let assemblyFormat = "`<` $value `>`";
 }

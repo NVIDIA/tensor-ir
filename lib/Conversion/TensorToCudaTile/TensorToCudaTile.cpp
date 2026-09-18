@@ -6,8 +6,11 @@
 #include "tensor_ir/Conversion/TensorToCudaTile/Options.h"
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTileInternal.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/MathExtras.h"
 
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
 
@@ -82,8 +85,6 @@ public:
                           static_cast<PersistenceMode>(persistence))
                    << "\n"
                    << "  sm_count: " << sm_count << "\n"
-                   << "  reduction_tile_size: "
-                   << static_cast<int64_t>(reduction_tile_size) << "\n"
                    << "  codegen_strategy: "
                    << static_cast<int>(static_cast<CudaTileCodegenStrategy>(
                           codegen_strategy))
@@ -97,63 +98,115 @@ public:
       return signalPassFailure();
     }
 
-    // Create the type converter (shared with the pre-flight feasibility check).
     MLIRContext *ctx = &getContext();
+    bool enableExperimentalCudaTileOps = false;
+
+    const bool useLayoutPropagation =
+        codegen_strategy == CudaTileCodegenStrategy::LayoutPropagation;
+    if (useLayoutPropagation) {
+      if (!getOperation().getOps<GraphOp>().empty()) {
+        getOperation()->emitError(
+            "layout-propagation conversion requires the outlined gpu.kernel "
+            "form; run tir-bufferize, tir-form-grid, "
+            "tir-tile-reductions, and outline-tensor-ir-kernel "
+            "first");
+        return signalPassFailure();
+      }
+      if (failed(rejectLayoutAnalysisAttributes())) {
+        return signalPassFailure();
+      }
+      for (func::FuncOp func : getOperation().getOps<func::FuncOp>()) {
+        if (func->hasAttr(gpu::GPUDialect::getKernelFuncAttrName())) {
+          func.emitError(
+              "outlined TensorIR kernels must be nested in a gpu.module");
+          return signalPassFailure();
+        }
+      }
+      const bool hasOutlinedKernels = llvm::any_of(
+          getOperation().getOps<gpu::GPUModuleOp>(),
+          [](gpu::GPUModuleOp gpuModule) {
+            return llvm::any_of(gpuModule.getOps<func::FuncOp>(),
+                                [](func::FuncOp func) {
+                                  return func->hasAttr(
+                                      gpu::GPUDialect::getKernelFuncAttrName());
+                                });
+          });
+      if (!hasOutlinedKernels) {
+        getOperation()->emitError(
+            "layout-propagation conversion requires at least one outlined "
+            "gpu.kernel function nested in a gpu.module");
+        return signalPassFailure();
+      }
+      if (num_ctas > 1) {
+        WalkResult persistence = getOperation().walk([&](scf::ForOp loop) {
+          if (!loop.getLowerBound().getDefiningOp<gpu::BlockIdOp>()) {
+            return WalkResult::advance();
+          }
+          loop.emitError(
+              "static persistent kernels are incompatible with CGA clusters "
+              "(num-ctas > 1)");
+          return WalkResult::interrupt();
+        });
+        if (persistence.wasInterrupted()) {
+          return signalPassFailure();
+        }
+      }
+      auto optimizationHints =
+          tensor_to_cuda_tile::createEntryOptimizationHints(
+              ctx, num_ctas, occupancy, num_warps);
+      if (failed(tensor_to_cuda_tile::convertOutlinedKernels(
+              getOperation(), optimizationHints, uniform_signature,
+              enableExperimentalCudaTileOps))) {
+        return signalPassFailure();
+      }
+
+      cuda_tile::ModuleOp newModuleOp = createModuleOp();
+      Block &body = newModuleOp.getBody().front();
+      getOperation().walk([&](cuda_tile::EntryOp entryOp) {
+        if (entryOp->getParentOp() != newModuleOp) {
+          entryOp->moveBefore(&body, body.end());
+        }
+      });
+      return;
+    }
+
+    bool hasOutlinedKernels =
+        getOperation()
+            .walk([&](func::FuncOp func) {
+              return func->hasAttr(gpu::GPUDialect::getKernelFuncAttrName())
+                         ? WalkResult::interrupt()
+                         : WalkResult::advance();
+            })
+            .wasInterrupted();
+    if (hasOutlinedKernels) {
+      getOperation()->emitError(
+          "affine-map conversion does not accept outlined gpu.kernel input");
+      return signalPassFailure();
+    }
+
     std::unique_ptr<TypeConverter> typeConverterPtr =
         createTensorToCudaTileTypeConverter(ctx);
     TypeConverter &typeConverter = *typeConverterPtr;
-
-    bool enableExperimentalCudaTileOps = false;
-
-    // Create the main conversion state object.
-    std::unique_ptr<tensor_to_cuda_tile::ConversionState> state;
     TensorToCudaTilePipelineOptions options;
     options.tileSize.assign(tile_size.begin(), tile_size.end());
     options.numCTAs = num_ctas;
     options.occupancy = occupancy;
     options.numWarps = num_warps;
     options.smCount = sm_count;
-    options.reductionTileSize = reduction_tile_size;
     options.uniformSignature = uniform_signature;
     options.persistence = persistence;
     options.codegenStrategy = codegen_strategy;
+    std::unique_ptr<tensor_to_cuda_tile::ConversionState> state =
+        tensor_to_cuda_tile::createAffineMapConversionState(ctx, typeConverter,
+                                                            options);
 
-    const bool useLayoutPropagation =
-        codegen_strategy == CudaTileCodegenStrategy::LayoutPropagation;
-    if (useLayoutPropagation) {
-      auto optimizationHints =
-          tensor_to_cuda_tile::createEntryOptimizationHints(
-              ctx, num_ctas, occupancy, num_warps);
-      state = tensor_to_cuda_tile::createLayoutPropagationConversionState(
-          ctx, typeConverter, optimizationHints, std::move(options),
-          enableExperimentalCudaTileOps);
-    } else {
-      state = tensor_to_cuda_tile::createAffineMapConversionState(
-          ctx, typeConverter, options);
-    }
-
-    // Preserve launch metadata for backends that run analysis and conversion
-    // as a single pipeline. Conversion erases the GraphOp that carries both the
-    // selected tile and normalized layout-propagation iteration space before
-    // runtime launch metadata can read them.
+    // Preserve the affine path's automatically resolved tile for backends that
+    // run analysis and conversion as a single pipeline.
     SmallVector<int32_t> resolvedTileSize;
-    SmallVector<int64_t> resolvedIterationSpaceShape;
-
     // Convert all graph operations.
     auto result = getOperation()->walk([&](GraphOp graphOp) {
       LLVM_DEBUG(llvm::dbgs() << "Converting graph operation: "
                               << graphOp.getName() << "\n");
-      if (useLayoutPropagation && resolvedIterationSpaceShape.empty()) {
-        Operation *terminator = graphOp.getBody()->getTerminator();
-        if (terminator) {
-          if (auto iterationSpace =
-                  terminator->getAttrOfType<LayoutSourceAttrInterface>(
-                      TensorIRDialect::getIterationSpaceAttrName())) {
-            auto shape = iterationSpace.getShape();
-            resolvedIterationSpaceShape.assign(shape.begin(), shape.end());
-          }
-        }
-      }
       if (failed(state->start(graphOp))) {
         return WalkResult::interrupt();
       }
@@ -176,12 +229,6 @@ public:
           DenseI32ArrayAttr::get(&getContext(), resolvedTileSize));
     }
 
-    if (!resolvedIterationSpaceShape.empty()) {
-      getOperation()->setAttr(
-          mlir::nv_tensor_ir::kResolvedIterationSpaceShapeAttrName,
-          DenseI64ArrayAttr::get(&getContext(), resolvedIterationSpaceShape));
-    }
-
     // Create the CUDA Tile module and move converted functions into it.
     cuda_tile::ModuleOp newModuleOp = createModuleOp();
     Block &body = newModuleOp.getBody().front();
@@ -196,6 +243,38 @@ public:
   }
 
 private:
+  /// Reject transient layout-analysis state at the explicit conversion
+  /// boundary. Grid formation consumes these attributes and replaces them with
+  /// verified TensorIR view types and SSA coordinates.
+  LogicalResult rejectLayoutAnalysisAttributes() {
+    SmallVector<StringRef> names{
+        TensorIRDialect::getLayoutAttrName(),
+        TensorIRDialect::getIterSpaceMapAttrName(),
+        TensorIRDialect::getIterSpaceIdAttrName(),
+        TensorIRDialect::getIterSpaceIdsAttrName(),
+        TensorIRDialect::getIterSpaceDimDomainsAttrName(),
+        TensorIRDialect::getIterationSpaceAttrName(),
+        TensorIRDialect::getResultLayoutsAttrName(),
+        TensorIRDialect::getResultViewsAttrName(),
+        TensorIRDialect::getTileSizeAttrName(),
+        TensorIRDialect::getTileCandidatesAttrName()};
+    WalkResult result =
+        getOperation().walk([&](Operation *op) {
+          for (StringRef name : names) {
+            if (!op->hasAttr(name)) {
+              continue;
+            }
+            op->emitError()
+                << "layout-propagation conversion does not accept analysis "
+                   "attribute '"
+                << name << "'; run TensorIR tiled-program formation first";
+            return WalkResult::interrupt();
+          }
+          return WalkResult::advance();
+        });
+    return success(!result.wasInterrupted());
+  }
+
   /// Verify the correctness of the pass options.
   /// If any of the options are not supported, emit an error and return failure.
   LogicalResult validatePassOptions() {
@@ -216,15 +295,8 @@ private:
     if (num_warps < 1) {
       return emitError(loc) << "num_warps must be >= 1, got " << num_warps;
     }
-    if (codegen_strategy == CudaTileCodegenStrategy::LayoutPropagation &&
-        (reduction_tile_size < 1 ||
-         !llvm::isPowerOf2_64(static_cast<uint64_t>(reduction_tile_size)))) {
-      return emitError(loc)
-             << "reduction_tile_size must be a positive power of two, got "
-             << static_cast<int64_t>(reduction_tile_size);
-    }
-
-    if (persistence == PersistenceMode::Static) {
+    if (codegen_strategy == CudaTileCodegenStrategy::AffineMap &&
+        persistence == PersistenceMode::Static) {
       if (num_ctas > 1) {
         return emitError(loc)
                << "Static persistent kernels are incompatible with CGA "
@@ -253,6 +325,10 @@ private:
     }
     WalkResult result = op.walk([&](MatmulOp matmulOp) {
       if (!matmulOp.getAcc()) {
+        return WalkResult::advance();
+      }
+      if (auto func = matmulOp->getParentOfType<func::FuncOp>();
+          func && func->hasAttr(gpu::GPUDialect::getKernelFuncAttrName())) {
         return WalkResult::advance();
       }
       matmulOp.emitError(

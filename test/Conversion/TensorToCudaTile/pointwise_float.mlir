@@ -1,5 +1,5 @@
-// RUN: tensor_ir-opt -discover-iteration-space-info -convert-tensor-to-cuda-tile="codegen-strategy=affine_map" -split-input-file %s | FileCheck %s
-// RUN: tensor_ir-opt -layout-propagation-pipeline -split-input-file %s | FileCheck %s
+// RUN: tensor_ir-opt -discover-iteration-space-info -convert-tensor-to-cuda-tile="codegen-strategy=affine_map" -split-input-file %s | FileCheck %s --check-prefixes=CHECK,AFFINE
+// RUN: tensor_ir-opt -layout-propagation-pipeline -split-input-file %s | FileCheck %s --check-prefixes=CHECK,LAYOUT
 
 // Verify lowering of pointwise operations for a floating point type (F32).
 // Exp is additionally checked for f16/bf16 because those follow XLA's
@@ -17,9 +17,14 @@ nv_tensor_ir.graph @test_constant_op() -> tensor<128xf32> {
 
 // -----
 
+// Compile-time splats become shaped constants in both pipelines.
 // CHECK-LABEL: @test_splat_op
-// CHECK: %[[RESULT:.*]] = constant <f32: 0.000000e+00> : tile<{{[0-9]+}}xf32>
-// CHECK: store_view_tko weak %[[RESULT]]
+// AFFINE: %[[RESULT:.*]] = constant <f32: 0.000000e+00> : tile<{{[0-9]+}}xf32>
+// AFFINE: store_view_tko weak %[[RESULT]]
+// LAYOUT: %[[RESULT:.*]] = constant <f32: 0.000000e+00> : tile<{{[0-9]+}}xf32>
+// LAYOUT-NOT: reshape
+// LAYOUT-NOT: broadcast
+// LAYOUT: store_view_tko weak %[[RESULT]]
 nv_tensor_ir.graph @test_splat_op() -> tensor<128xf32> {
   %cst = constant 0.0 : f32
   %out = splat %cst : tensor<128xf32>

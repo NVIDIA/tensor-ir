@@ -6,6 +6,7 @@
 namespace mlir::test {
 
 void registerTestConvertOpBuilderPass();
+void registerTestSideEffectsPass();
 void registerTestTileAnalyzerPass();
 
 } // namespace mlir::test
@@ -14,6 +15,7 @@ namespace mlir::nv_tensor_ir::test {
 
 void registerAllPasses() {
   ::mlir::test::registerTestConvertOpBuilderPass();
+  ::mlir::test::registerTestSideEffectsPass();
   ::mlir::test::registerTestTileAnalyzerPass();
 }
 

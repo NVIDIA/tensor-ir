@@ -523,34 +523,61 @@ nv_tensor_ir.graph @reductionUDWelfordTestGraph(
   // CHECK: identity = [0.000000e+00 : f32, 0.000000e+00 : f32, 0.000000e+00 : f32]
   // CHECK: (%[[arg0:.*]]: f32, %[[arg1:.*]]: f32, %[[arg2:.*]]: f32, %[[arg3:.*]]: f32, %[[arg4:.*]]: f32, %[[arg5:.*]]: f32)
   // CHECK: {
-  // CHECK:   %[[sub:.*]] = arith.subf %[[arg3]], %[[arg0]] : f32
-  // CHECK:   %[[add1:.*]] = arith.addf %[[arg2]], %[[arg5]] : f32
-  // CHECK:   %[[div:.*]] = arith.divf %[[arg5]], %[[add1]] : f32
-  // CHECK:   %[[mul1:.*]] = arith.mulf %[[sub]], %[[div]] : f32
-  // CHECK:   %[[add2:.*]] = arith.addf %[[arg0]], %[[mul1]] : f32
-  // CHECK:   %[[add3:.*]] = arith.addf %[[arg1]], %[[arg4]] : f32
-  // CHECK:   %[[mul2:.*]] = arith.mulf %[[sub]], %[[sub]] : f32
-  // CHECK:   %[[mul3:.*]] = arith.mulf %[[mul2]], %[[arg2]] : f32
-  // CHECK:   %[[mul4:.*]] = arith.mulf %[[mul3]], %[[div]] : f32
-  // CHECK:   %[[add4:.*]] = arith.addf %[[add3]], %[[mul4]] : f32
-  // CHECK:   nv_tensor_ir.yield %[[mul1]], %[[mul4]], %[[sub]] : f32, f32, f32
+  // CHECK-DAG: %[[zero:.*]] = arith.constant 0.000000e+00 : f32
+  // CHECK-DAG: %[[one:.*]] = arith.constant 1.000000e+00 : f32
+  // CHECK-DAG: %[[lhs_empty:.*]] = arith.cmpf oeq, %[[arg2]], %[[zero]] : f32
+  // CHECK-DAG: %[[rhs_empty:.*]] = arith.cmpf oeq, %[[arg5]], %[[zero]] : f32
+  // CHECK-DAG: %[[safe_lhs:.*]] = arith.select %[[lhs_empty]], %[[arg3]], %[[arg0]] : f32
+  // CHECK-DAG: %[[safe_rhs:.*]] = arith.select %[[rhs_empty]], %[[arg0]], %[[arg3]] : f32
+  // CHECK-DAG: %[[delta:.*]] = arith.subf %[[safe_rhs]], %[[safe_lhs]] : f32
+  // CHECK-DAG: %[[weight_sum:.*]] = arith.addf %[[arg2]], %[[arg5]] : f32
+  // CHECK:     %[[sum_zero:.*]] = arith.cmpf oeq, %[[weight_sum]], %[[zero]] : f32
+  // CHECK:     %[[safe_sum:.*]] = arith.select %[[sum_zero]], %[[one]], %[[weight_sum]] : f32
+  // CHECK:     %[[fraction:.*]] = arith.divf %[[arg5]], %[[safe_sum]] : f32
+  // CHECK-DAG: %[[mean_update:.*]] = arith.mulf %[[delta]], %[[fraction]] : f32
+  // CHECK-DAG: %[[m2_sum:.*]] = arith.addf %[[arg1]], %[[arg4]] : f32
+  // CHECK-DAG: %[[delta_squared:.*]] = arith.mulf %[[delta]], %[[delta]] : f32
+  // CHECK-DAG: %[[mean_candidate:.*]] = arith.addf %[[safe_lhs]], %[[mean_update]] : f32
+  // CHECK-DAG: %[[weighted_delta:.*]] = arith.mulf %[[delta_squared]], %[[arg2]] : f32
+  // CHECK:     %[[m2_update:.*]] = arith.mulf %[[weighted_delta]], %[[fraction]] : f32
+  // CHECK:     %[[m2_candidate:.*]] = arith.addf %[[m2_sum]], %[[m2_update]] : f32
+  // CHECK-DAG: %[[mean_or_lhs:.*]] = arith.select %[[rhs_empty]], %[[arg0]], %[[mean_candidate]] : f32
+  // CHECK-DAG: %[[combined_mean:.*]] = arith.select %[[lhs_empty]], %[[arg3]], %[[mean_or_lhs]] : f32
+  // CHECK-DAG: %[[m2_or_lhs:.*]] = arith.select %[[rhs_empty]], %[[arg1]], %[[m2_candidate]] : f32
+  // CHECK-DAG: %[[combined_m2:.*]] = arith.select %[[lhs_empty]], %[[arg4]], %[[m2_or_lhs]] : f32
+  // CHECK:     nv_tensor_ir.yield %[[combined_mean]], %[[combined_m2]], %[[weight_sum]] : f32, f32, f32
   // CHECK: }
   // CHECK: : tensor<8x32x64xf32>, tensor<8x32x64xf32>, tensor<8x32x64xf32> -> tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>
   %reduce:3 = reduce_ud(%input, %m2, %weight)<
     dimensions = [1],
     identity = [0.000000e+00 : f32, 0.000000e+00 : f32, 0.000000e+00 : f32]>
-   (%arg0: f32, %arg1: f32, %arg2: f32, %arg3: f32, %arg4: f32, %arg5: f32) {
-    %0 = arith.subf %arg3, %arg0 : f32
-    %1 = arith.addf %arg2, %arg5 : f32
-    %2 = arith.divf %arg5, %1 : f32
-    %3 = arith.mulf %0, %2 : f32
-    %4 = arith.addf %arg0, %3 : f32
-    %5 = arith.addf %arg1, %arg4 : f32
-    %6 = arith.mulf %0, %0 : f32
-    %7 = arith.mulf %6, %arg2 : f32
-    %8 = arith.mulf %7, %2 : f32
-    %9 = arith.addf %5, %8 : f32
-    nv_tensor_ir.yield %3, %8, %0 : f32, f32, f32
+   // Keep this body synchronized with the public example in TensorOps.td. The
+   // outer %m2 and %weight values make accidental SSA-name reuse fail to parse.
+   (%mean_lhs: f32, %m2_lhs: f32, %weight_lhs: f32,
+    %mean_rhs: f32, %m2_rhs: f32, %weight_rhs: f32) {
+    %zero = arith.constant 0.0 : f32
+    %one = arith.constant 1.0 : f32
+    %lhs_is_empty = arith.cmpf oeq, %weight_lhs, %zero : f32
+    %rhs_is_empty = arith.cmpf oeq, %weight_rhs, %zero : f32
+    %safe_mean_lhs = arith.select %lhs_is_empty, %mean_rhs, %mean_lhs : f32
+    %safe_mean_rhs = arith.select %rhs_is_empty, %mean_lhs, %mean_rhs : f32
+    %delta = arith.subf %safe_mean_rhs, %safe_mean_lhs : f32
+    %weight_sum = arith.addf %weight_lhs, %weight_rhs : f32
+    %weight_sum_is_zero = arith.cmpf oeq, %weight_sum, %zero : f32
+    %safe_weight_sum = arith.select %weight_sum_is_zero, %one, %weight_sum : f32
+    %rhs_fraction = arith.divf %weight_rhs, %safe_weight_sum : f32
+    %mean_update = arith.mulf %delta, %rhs_fraction : f32
+    %mean_candidate = arith.addf %safe_mean_lhs, %mean_update : f32
+    %m2_sum = arith.addf %m2_lhs, %m2_rhs : f32
+    %delta_squared = arith.mulf %delta, %delta : f32
+    %weighted_delta = arith.mulf %delta_squared, %weight_lhs : f32
+    %m2_update = arith.mulf %weighted_delta, %rhs_fraction : f32
+    %m2_candidate = arith.addf %m2_sum, %m2_update : f32
+    %mean_or_lhs = arith.select %rhs_is_empty, %mean_lhs, %mean_candidate : f32
+    %combined_mean = arith.select %lhs_is_empty, %mean_rhs, %mean_or_lhs : f32
+    %m2_or_lhs = arith.select %rhs_is_empty, %m2_lhs, %m2_candidate : f32
+    %combined_m2 = arith.select %lhs_is_empty, %m2_rhs, %m2_or_lhs : f32
+    nv_tensor_ir.yield %combined_mean, %combined_m2, %weight_sum : f32, f32, f32
   } : tensor<8x32x64xf32>, tensor<8x32x64xf32>, tensor<8x32x64xf32> -> tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>
   // CHECK: results %[[reduce]]#0, %[[reduce]]#1, %[[reduce]]#2 : tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>
   results %reduce#0, %reduce#1, %reduce#2 : tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>
@@ -569,34 +596,59 @@ nv_tensor_ir.graph @reductionUDWelfordTestGraphDynInput(
   // CHECK: identity = [0.000000e+00 : f32, 0.000000e+00 : f32, 0.000000e+00 : f32]
   // CHECK: (%[[arg0:.*]]: f32, %[[arg1:.*]]: f32, %[[arg2:.*]]: f32, %[[arg3:.*]]: f32, %[[arg4:.*]]: f32, %[[arg5:.*]]: f32)
   // CHECK: {
-  // CHECK:   %[[sub:.*]] = arith.subf %[[arg3]], %[[arg0]] : f32
-  // CHECK:   %[[add1:.*]] = arith.addf %[[arg2]], %[[arg5]] : f32
-  // CHECK:   %[[div:.*]] = arith.divf %[[arg5]], %[[add1]] : f32
-  // CHECK:   %[[mul1:.*]] = arith.mulf %[[sub]], %[[div]] : f32
-  // CHECK:   %[[add2:.*]] = arith.addf %[[arg0]], %[[mul1]] : f32
-  // CHECK:   %[[add3:.*]] = arith.addf %[[arg1]], %[[arg4]] : f32
-  // CHECK:   %[[mul2:.*]] = arith.mulf %[[sub]], %[[sub]] : f32
-  // CHECK:   %[[mul3:.*]] = arith.mulf %[[mul2]], %[[arg2]] : f32
-  // CHECK:   %[[mul4:.*]] = arith.mulf %[[mul3]], %[[div]] : f32
-  // CHECK:   %[[add4:.*]] = arith.addf %[[add3]], %[[mul4]] : f32
-  // CHECK:   nv_tensor_ir.yield %[[mul1]], %[[mul4]], %[[sub]] : f32, f32, f32
+  // CHECK-DAG: %[[zero:.*]] = arith.constant 0.000000e+00 : f32
+  // CHECK-DAG: %[[one:.*]] = arith.constant 1.000000e+00 : f32
+  // CHECK-DAG: %[[lhs_empty:.*]] = arith.cmpf oeq, %[[arg2]], %[[zero]] : f32
+  // CHECK-DAG: %[[rhs_empty:.*]] = arith.cmpf oeq, %[[arg5]], %[[zero]] : f32
+  // CHECK-DAG: %[[safe_lhs:.*]] = arith.select %[[lhs_empty]], %[[arg3]], %[[arg0]] : f32
+  // CHECK-DAG: %[[safe_rhs:.*]] = arith.select %[[rhs_empty]], %[[arg0]], %[[arg3]] : f32
+  // CHECK-DAG: %[[delta:.*]] = arith.subf %[[safe_rhs]], %[[safe_lhs]] : f32
+  // CHECK-DAG: %[[weight_sum:.*]] = arith.addf %[[arg2]], %[[arg5]] : f32
+  // CHECK:     %[[sum_zero:.*]] = arith.cmpf oeq, %[[weight_sum]], %[[zero]] : f32
+  // CHECK:     %[[safe_sum:.*]] = arith.select %[[sum_zero]], %[[one]], %[[weight_sum]] : f32
+  // CHECK:     %[[fraction:.*]] = arith.divf %[[arg5]], %[[safe_sum]] : f32
+  // CHECK-DAG: %[[mean_update:.*]] = arith.mulf %[[delta]], %[[fraction]] : f32
+  // CHECK-DAG: %[[m2_sum:.*]] = arith.addf %[[arg1]], %[[arg4]] : f32
+  // CHECK-DAG: %[[delta_squared:.*]] = arith.mulf %[[delta]], %[[delta]] : f32
+  // CHECK-DAG: %[[mean_candidate:.*]] = arith.addf %[[safe_lhs]], %[[mean_update]] : f32
+  // CHECK-DAG: %[[weighted_delta:.*]] = arith.mulf %[[delta_squared]], %[[arg2]] : f32
+  // CHECK:     %[[m2_update:.*]] = arith.mulf %[[weighted_delta]], %[[fraction]] : f32
+  // CHECK:     %[[m2_candidate:.*]] = arith.addf %[[m2_sum]], %[[m2_update]] : f32
+  // CHECK-DAG: %[[mean_or_lhs:.*]] = arith.select %[[rhs_empty]], %[[arg0]], %[[mean_candidate]] : f32
+  // CHECK-DAG: %[[combined_mean:.*]] = arith.select %[[lhs_empty]], %[[arg3]], %[[mean_or_lhs]] : f32
+  // CHECK-DAG: %[[m2_or_lhs:.*]] = arith.select %[[rhs_empty]], %[[arg1]], %[[m2_candidate]] : f32
+  // CHECK-DAG: %[[combined_m2:.*]] = arith.select %[[lhs_empty]], %[[arg4]], %[[m2_or_lhs]] : f32
+  // CHECK:     nv_tensor_ir.yield %[[combined_mean]], %[[combined_m2]], %[[weight_sum]] : f32, f32, f32
   // CHECK: }
   // CHECK: : tensor<8x?x64xf32>, tensor<8x?x64xf32>, tensor<8x?x64xf32> -> tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>
   %reduce:3 = reduce_ud(%input, %m2, %weight)<
     dimensions = [1],
     identity = [0.000000e+00 : f32, 0.000000e+00 : f32, 0.000000e+00 : f32]>
-   (%arg0: f32, %arg1: f32, %arg2: f32, %arg3: f32, %arg4: f32, %arg5: f32) {
-    %0 = arith.subf %arg3, %arg0 : f32
-    %1 = arith.addf %arg2, %arg5 : f32
-    %2 = arith.divf %arg5, %1 : f32
-    %3 = arith.mulf %0, %2 : f32
-    %4 = arith.addf %arg0, %3 : f32
-    %5 = arith.addf %arg1, %arg4 : f32
-    %6 = arith.mulf %0, %0 : f32
-    %7 = arith.mulf %6, %arg2 : f32
-    %8 = arith.mulf %7, %2 : f32
-    %9 = arith.addf %5, %8 : f32
-    nv_tensor_ir.yield %3, %8, %0 : f32, f32, f32
+   (%mean_lhs: f32, %m2_lhs: f32, %weight_lhs: f32,
+    %mean_rhs: f32, %m2_rhs: f32, %weight_rhs: f32) {
+    %zero = arith.constant 0.0 : f32
+    %one = arith.constant 1.0 : f32
+    %lhs_is_empty = arith.cmpf oeq, %weight_lhs, %zero : f32
+    %rhs_is_empty = arith.cmpf oeq, %weight_rhs, %zero : f32
+    %safe_mean_lhs = arith.select %lhs_is_empty, %mean_rhs, %mean_lhs : f32
+    %safe_mean_rhs = arith.select %rhs_is_empty, %mean_lhs, %mean_rhs : f32
+    %delta = arith.subf %safe_mean_rhs, %safe_mean_lhs : f32
+    %weight_sum = arith.addf %weight_lhs, %weight_rhs : f32
+    %weight_sum_is_zero = arith.cmpf oeq, %weight_sum, %zero : f32
+    %safe_weight_sum = arith.select %weight_sum_is_zero, %one, %weight_sum : f32
+    %rhs_fraction = arith.divf %weight_rhs, %safe_weight_sum : f32
+    %mean_update = arith.mulf %delta, %rhs_fraction : f32
+    %mean_candidate = arith.addf %safe_mean_lhs, %mean_update : f32
+    %m2_sum = arith.addf %m2_lhs, %m2_rhs : f32
+    %delta_squared = arith.mulf %delta, %delta : f32
+    %weighted_delta = arith.mulf %delta_squared, %weight_lhs : f32
+    %m2_update = arith.mulf %weighted_delta, %rhs_fraction : f32
+    %m2_candidate = arith.addf %m2_sum, %m2_update : f32
+    %mean_or_lhs = arith.select %rhs_is_empty, %mean_lhs, %mean_candidate : f32
+    %combined_mean = arith.select %lhs_is_empty, %mean_rhs, %mean_or_lhs : f32
+    %m2_or_lhs = arith.select %rhs_is_empty, %m2_lhs, %m2_candidate : f32
+    %combined_m2 = arith.select %lhs_is_empty, %m2_rhs, %m2_or_lhs : f32
+    nv_tensor_ir.yield %combined_mean, %combined_m2, %weight_sum : f32, f32, f32
   } : tensor<8x?x64xf32>, tensor<8x?x64xf32>, tensor<8x?x64xf32> -> tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>
   // CHECK: results %[[reduce]]#0, %[[reduce]]#1, %[[reduce]]#2 : tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>
   results %reduce#0, %reduce#1, %reduce#2 : tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>

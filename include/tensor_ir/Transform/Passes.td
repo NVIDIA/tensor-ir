@@ -144,4 +144,99 @@ def GraphSplittingPass : Pass<"graph-splitting", "nv_tensor_ir::GraphOp"> {
   }];
 }
 
+def BufferizePass : Pass<"tir-bufferize", "mlir::ModuleOp"> {
+  let summary = "Create destination-passing TensorIR buffer boundaries";
+  let description = [{
+    Replaces each TensorIR graph with a void function whose tensor inputs and
+    appended result destinations are strided memrefs. Direct TensorIR
+    loads/stores connect those physical buffers to the unchanged tensor
+    computation. The pass preserves layout and tile-selection metadata but
+    does not construct a grid or otherwise tile the computation.
+  }];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::func::FuncDialect",
+    "::mlir::memref::MemRefDialect",
+    "::mlir::nv_tensor_ir::TensorIRDialect",
+    "::mlir::ptr::PtrDialect"
+  ];
+}
+
+def FormGridPass : Pass<"tir-form-grid", "mlir::func::FuncOp"> {
+  let summary = "Tile a bufferized TensorIR function onto a GPU grid";
+  let description = [{
+    Consumes a function produced by `tir-bufferize` plus normalized
+    layout-propagation metadata and the selected tile shape. The function
+    signature and buffer setup remain unchanged. A rank-one `scf.forall`
+    mapped to `#gpu.block<x>` delinearizes the block coordinate, loads
+    fixed-shape tiles, computes the graph result, and stores it.
+
+    Layout-only reshape, transpose, broadcast, and slice operations are folded
+    into the explicit access metadata. Analysis-only layout, iteration-space,
+    result-view, and tile-selection attributes do not survive formation.
+  }];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::gpu::GPUDialect",
+    "::mlir::nv_tensor_ir::TensorIRDialect",
+    "::mlir::scf::SCFDialect"
+  ];
+}
+
+def TileReductionsPass : Pass<"tir-tile-reductions", "mlir::func::FuncOp"> {
+  let summary = "Materialize TensorIR contraction loops";
+  let description = [{
+    Rewrites coarse tile-shaped reductions and matrix products into explicit
+    `scf.for` nests. The loop induction variables become contracting
+    coordinates on TensorIR tile loads and tensor `iter_args` carry partial
+    accumulators. Contractions whose complete domain fits the selected
+    reduction tile remain loop-free.
+
+    Static persistence caps each flattened `scf.forall` grid at
+    `sm-count * occupancy` blocks and adds a grid-stride `scf.for` over the
+    logical tile IDs. Runtime-shaped grids compute the cap in SSA. Dynamic
+    persistence retains the non-persistent fallback.
+  }];
+  let options = [
+    Option<"reduction_tile_size", "reduction-tile-size", "int64_t", "128",
+           "Maximum number of contracting elements in one tile">,
+    Option<"persistence", "persistence", "std::string", "\"none\"",
+           "Persistence mode: none, static, or dynamic">,
+    Option<"sm_count", "sm-count", "int64_t", "0",
+           "Streaming multiprocessor count for static persistence">,
+    Option<"occupancy", "occupancy", "int64_t", "1",
+           "Persistent blocks per streaming multiprocessor">
+  ];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::nv_tensor_ir::TensorIRDialect",
+    "::mlir::scf::SCFDialect"
+  ];
+}
+
+def OutlineKernelPass : Pass<"outline-tensor-ir-kernel", "mlir::ModuleOp"> {
+  let summary = "Outline mapped TensorIR forall bodies as GPU device functions";
+  let description = [{
+    Outlines the body of each rank-one `scf.forall` mapped to
+    `#gpu.block<x>` into a destination-passing `func.func` marked `gpu.kernel`
+    inside a shared, collision-free `gpu.module`. The original host function is
+    retained or collision-safely renamed with a `_dispatch` suffix, and its
+    forall is replaced by a synchronous `gpu.launch_func` that forwards the
+    function arguments and preserves the grid's x dimension. The other grid
+    dimensions and all thread dimensions are unity placeholders; CudaTile
+    selects worker configuration later from entry-point optimization hints.
+
+    Pure, regionless shape, index, and TensorIR view setup captured by the
+    forall is cloned into the kernel. The forall induction variable and dynamic
+    grid bound become `gpu.block_id x` and `gpu.grid_dim x`; all other captures
+    must derive from wrapper arguments through pure setup operations.
+  }];
+  let dependentDialects = [
+    "::mlir::func::FuncDialect",
+    "::mlir::gpu::GPUDialect",
+    "::mlir::nv_tensor_ir::TensorIRDialect",
+    "::mlir::scf::SCFDialect"
+  ];
+}
+
 #endif // TENSOR_IR_TRANSFORM_PASSES

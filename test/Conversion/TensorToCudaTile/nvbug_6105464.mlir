@@ -8,10 +8,11 @@
 
 // CHECK-LABEL: entry @graph_jpzyTXor4mF8Q1ND
 // CHECK-SAME: (%[[INPTR:.*]]: tile<ptr<f16>>, %[[SCALAR:.*]]: tile<f32>, %[[OUTPTR:.*]]: tile<ptr<f16>>)
+// CHECK: %[[BID_X:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK: %[[ALIGNED_IN:.*]] = assume div_by<16>, %[[INPTR]] : tile<ptr<f16>>
 // CHECK: %[[TVIEW_IN:.*]] = make_tensor_view %[[ALIGNED_IN]], shape = [64], strides = [1] : tensor_view<64xf16, strides=[1]>
-// CHECK: %[[PVIEW_IN:.*]] = make_partition_view %[[TVIEW_IN]]
-// CHECK: %[[TILE_IN:.*]], %{{.*}} = load_view_tko weak %[[PVIEW_IN]]
+// CHECK: %[[PVIEW_IN:.*]] = make_partition_view %[[TVIEW_IN]] : partition_view<tile=(64), tensor_view<64xf16, strides=[1]>>
+// CHECK: %[[TILE_IN:.*]], %{{.*}} = load_view_tko weak %[[PVIEW_IN]][%[[BID_X]]] :{{.*}} -> tile<64xf16>, token
 // CHECK: %[[CONV_UP:.*]] = ftof %[[TILE_IN]]  : tile<64xf16> -> tile<64xf32>
 // CHECK: %[[RESHAPE:.*]] = reshape %[[SCALAR]] : tile<f32> -> tile<1xf32>
 // CHECK: %[[BCAST:.*]] = broadcast %[[RESHAPE]] : tile<1xf32> -> tile<64xf32>
@@ -19,8 +20,8 @@
 // CHECK: %[[CONV_DOWN:.*]] = ftof %[[ADD]]  : tile<64xf32> -> tile<64xf16>
 // CHECK: %[[ALIGNED_OUT:.*]] = assume div_by<16>, %[[OUTPTR]] : tile<ptr<f16>>
 // CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[ALIGNED_OUT]], shape = [64], strides = [1] : tensor_view<64xf16, strides=[1]>
-// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
-// CHECK: store_view_tko weak %[[CONV_DOWN]], %[[PVIEW_OUT]]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]] : partition_view<tile=(64), tensor_view<64xf16, strides=[1]>>
+// CHECK: store_view_tko weak %[[CONV_DOWN]], %[[PVIEW_OUT]][%[[BID_X]]]
 
 module {
   nv_tensor_ir.graph @graph_jpzyTXor4mF8Q1ND(
@@ -47,18 +48,19 @@ module {
 // CHECK-LABEL: entry @graph_SfjksTBQx5ehL6Cl
 // CHECK-SAME: (%[[INPTR0:.*]]: tile<ptr<f8E4M3FN>>, %[[SCALAR0:.*]]: tile<f32>, %[[INPTR1:.*]]: tile<ptr<f8E4M3FN>>, %[[SCALAR1:.*]]: tile<f32>, %[[OUTPTR:.*]]: tile<ptr<f8E4M3FN>>)
 // CHECK: %[[ONE:.*]] = constant <f32: 1.000000e+00> : tile<64xf32>
+// CHECK: %[[BID_X:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK: %[[ALIGNED_IN0:.*]] = assume div_by<16>, %[[INPTR0]] : tile<ptr<f8E4M3FN>>
 // CHECK: %[[TVIEW_IN0:.*]] = make_tensor_view %[[ALIGNED_IN0]], shape = [4096], strides = [1] : tensor_view<4096xf8E4M3FN, strides=[1]>
-// CHECK: %[[PVIEW_IN0:.*]] = make_partition_view %[[TVIEW_IN0]]
-// CHECK: %[[TILE_IN0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW_IN0]]
-// CHECK: %[[ALIGNED_IN1:.*]] = assume div_by<16>, %[[INPTR1]] : tile<ptr<f8E4M3FN>>
-// CHECK: %[[TVIEW_IN1:.*]] = make_tensor_view %[[ALIGNED_IN1]], shape = [4096], strides = [1] : tensor_view<4096xf8E4M3FN, strides=[1]>
-// CHECK: %[[PVIEW_IN1:.*]] = make_partition_view %[[TVIEW_IN1]]
-// CHECK: %[[TILE_IN1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW_IN1]]
+// CHECK: %[[PVIEW_IN0:.*]] = make_partition_view %[[TVIEW_IN0]] : partition_view<tile=(64), tensor_view<4096xf8E4M3FN, strides=[1]>>
+// CHECK: %[[TILE_IN0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW_IN0]][%[[BID_X]]] :{{.*}} -> tile<64xf8E4M3FN>, token
 // CHECK: %[[CONV0_UP:.*]] = ftof %[[TILE_IN0]]  : tile<64xf8E4M3FN> -> tile<64xf32>
 // CHECK: %[[RESHAPE0:.*]] = reshape %[[SCALAR0]] : tile<f32> -> tile<1xf32>
 // CHECK: %[[BCAST0:.*]] = broadcast %[[RESHAPE0]] : tile<1xf32> -> tile<64xf32>
 // CHECK: %[[MUL0:.*]] = mulf %[[CONV0_UP]], %[[BCAST0]]  : tile<64xf32>
+// CHECK: %[[ALIGNED_IN1:.*]] = assume div_by<16>, %[[INPTR1]] : tile<ptr<f8E4M3FN>>
+// CHECK: %[[TVIEW_IN1:.*]] = make_tensor_view %[[ALIGNED_IN1]], shape = [4096], strides = [1] : tensor_view<4096xf8E4M3FN, strides=[1]>
+// CHECK: %[[PVIEW_IN1:.*]] = make_partition_view %[[TVIEW_IN1]] : partition_view<tile=(64), tensor_view<4096xf8E4M3FN, strides=[1]>>
+// CHECK: %[[TILE_IN1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW_IN1]][%[[BID_X]]] :{{.*}} -> tile<64xf8E4M3FN>, token
 // CHECK: %[[CONV1_UP:.*]] = ftof %[[TILE_IN1]]  : tile<64xf8E4M3FN> -> tile<64xf32>
 // CHECK: %[[MUL1:.*]] = mulf %[[CONV1_UP]], %[[BCAST0]]  : tile<64xf32>
 // CHECK: %[[NEG:.*]] = negf %[[MUL1]] : tile<64xf32>
@@ -73,8 +75,8 @@ module {
 // CHECK: %[[CONV_DOWN:.*]] = ftof %[[SCALED]]  : tile<64xf32> -> tile<64xf8E4M3FN>
 // CHECK: %[[ALIGNED_OUT:.*]] = assume div_by<16>, %[[OUTPTR]] : tile<ptr<f8E4M3FN>>
 // CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[ALIGNED_OUT]], shape = [4096], strides = [1] : tensor_view<4096xf8E4M3FN, strides=[1]>
-// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
-// CHECK: store_view_tko weak %[[CONV_DOWN]], %[[PVIEW_OUT]]
+// CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]] : partition_view<tile=(64), tensor_view<4096xf8E4M3FN, strides=[1]>>
+// CHECK: store_view_tko weak %[[CONV_DOWN]], %[[PVIEW_OUT]][%[[BID_X]]]
 
 module {
   nv_tensor_ir.graph @graph_SfjksTBQx5ehL6Cl(

@@ -102,15 +102,18 @@ def TensorIR_GraphOp : TensorIR_Op<"graph",
 }
 
 def TensorIR_ResultsOp : TensorIR_Op<"results",
-  [Pure, HasParent<"GraphOp">, ReturnLike, Terminator]> {
+  [Pure, ParentOneOf<["GraphOp"]>, ReturnLike, Terminator]> {
   let summary = "Define the result values for a TensorIR Graph.";
   let description = [{
     The `results` operation capture the tensor results of the graph.
     The operation takes variable number of operands and produces no results.
   }];
-  let arguments = (ins Variadic<TensorIR_TensorType>:$results);
+  let arguments = (ins Variadic<TensorIR_GraphResultType>:$results);
+  let builders = [OpBuilder<(ins), [{ /* nothing to do */ }]>];
   let assemblyFormat = "$results attr-dict-with-keyword ( `:` type($results)^)? ";
 }
+
+include "tensor_ir/Dialect/CodegenOps.td"
 
 //===----------------------------------------------------------------------===//
 // Pointwise Operations
@@ -417,8 +420,31 @@ def TensorIR_ConvertOp : TensorIR_PointWiseOpBase<"convert",
   let summary = "Convert operation";
   let description = [{
     Performs an element-wise conversion from one element type to another on
-    `input` tensor, producing a `result` tensor. This function supports only implicit conversions
-    and does not support (de)quantization.
+    `input` tensor, producing a `result` tensor of the same shape. This
+    operation does not perform (de)quantization. If the input and result
+    element types are identical, the value is unchanged.
+
+    The following conversion semantics apply. `i1` is a boolean type, and its
+    rules take precedence over the integer rules:
+
+    * **To boolean (`i1`)**: `+0.0`, `-0.0`, and integer zero become false.
+      Every other value becomes true, including `NaN`, positive and negative
+      infinity, and every nonzero integer or finite floating-point value.
+    * **From boolean (`i1`)**: false becomes zero and true becomes one in the
+      result element type.
+    * **Floating-point to floating-point**: the result is the nearest value
+      representable by the result type, with ties rounded to even. Overflow
+      and special values follow the result type's floating-point semantics.
+    * **Floating-point to non-boolean integer**: the input is rounded toward
+      zero. The behavior is undefined if the input is `NaN` or infinity, or
+      if the rounded value is outside the result type's representable range.
+    * **Integer to floating-point**: the input is interpreted according to its
+      signedness and rounded to the nearest value representable by the result
+      type, with ties rounded to even.
+    * **Integer to integer**: widening sign-extends signed inputs and
+      zero-extends unsigned inputs. Narrowing discards the most significant
+      bits. Conversion between types of equal width preserves the bit pattern;
+      the result is interpreted according to the result type's signedness.
 
     Example:
     ```mlir
@@ -504,7 +530,24 @@ def TensorIR_ReduceUDOp : TensorIR_Op<"reduce_ud",
       is used in parallel algorithms to ensure correct parallel reduction. For
       example, the identities of `min` and `max` are `+inf` and `-inf`,
       respectively.
-    Need to define a region to implement reduction functionality additionally.
+
+    The body must implement an associative and commutative reduction functor.
+    Taken together, the entries in `$identity` must form a two-sided identity
+    for the tuple-valued functor. For `N` inputs, the body arguments are ordered
+    `[lhs_0, ..., lhs_N-1, rhs_0, ..., rhs_N-1]` and represent two
+    `N`-component tuples. Neither tuple has a privileged role: either may be an
+    input element tuple, the identity tuple, or a partial result produced by an
+    earlier application of the body. This includes an application with the
+    identity on both sides, which can arise when padding creates empty partial
+    reductions. These semantic requirements permit a parallel implementation
+    to reassociate the reduction and cannot in general be verified statically.
+
+    Pointwise transformations must be expressed before `reduce_ud`, leaving the
+    body to combine transformed values. For example, a sum of reciprocals is a
+    pointwise reciprocal followed by an addition reduction, not a body that
+    computes `accumulator + 1 / value`.
+
+    A region defines the reduction functionality:
     ```mlir
     %reduce = nv_tensor_ir.reduce_ud(%inputs)<
         dimensions = [1],
@@ -519,28 +562,45 @@ def TensorIR_ReduceUDOp : TensorIR_Op<"reduce_ud",
     along a reduction dimension.
     The operation takes three input tensors (input values, m2 values, and weights)
     and produces three output tensors (mean, m2, and weight) after reduction.
-    `%arg0`, `%arg1`, `%arg2` are the accumulated values of `%mean`,`%m2`,`%weight` respectively.
-    `%arg3`, `%arg4`, `%arg5` are the current values of `%mean`,`%m2`,`%weight` respectively.
+    `%mean_lhs`, `%m2_lhs`, `%weight_lhs` are one partial summary and
+    `%mean_rhs`, `%m2_rhs`, `%weight_rhs` are another partial summary.
     Each element in `$identity` is the identity value of `%mean`, `%m2`, and
-    `%weight`, respectively.
+    `%weight`, respectively. A zero-weight summary is empty. When either side is
+    empty, the body substitutes the nonempty mean before computing the delta to
+    keep the eagerly evaluated candidate arithmetic finite, then selects the
+    nonempty summary unchanged. A nonzero denominator handles two empty
+    summaries, which combine to the identity tuple.
     All inputs have the same shape. Each result has the same shape as its
     corresponding input except that reduced dimensions have extent 1.
     ```mlir
     %reduce0, %reduce1, %reduce2 = nv_tensor_ir.reduce_ud(%input, %m2, %weight)<
     dimensions = [1],
     identity = [0.000000e+00 : f32, 0.000000e+00 : f32, 0.000000e+00 : f32]>
-    (%arg0: f32, %arg1: f32, %arg2: f32, %arg3: f32, %arg4: f32, %arg5: f32) {
-      %0 = arith.subf %arg3, %arg0 : f32
-      %1 = arith.addf %arg2, %arg5 : f32
-      %2 = arith.divf %arg5, %1 : f32
-      %3 = arith.mulf %0, %2 : f32
-      %4 = arith.addf %arg0, %3 : f32
-      %5 = arith.addf %arg1, %arg4 : f32
-      %6 = arith.mulf %0, %0 : f32
-      %7 = arith.mulf %6, %arg2 : f32
-      %8 = arith.mulf %7, %2 : f32
-      %9 = arith.addf %5, %8 : f32
-      nv_tensor_ir.yield %4, %9, %1 : f32, f32, f32
+    (%mean_lhs: f32, %m2_lhs: f32, %weight_lhs: f32,
+     %mean_rhs: f32, %m2_rhs: f32, %weight_rhs: f32) {
+      %zero = arith.constant 0.0 : f32
+      %one = arith.constant 1.0 : f32
+      %lhs_is_empty = arith.cmpf oeq, %weight_lhs, %zero : f32
+      %rhs_is_empty = arith.cmpf oeq, %weight_rhs, %zero : f32
+      %safe_mean_lhs = arith.select %lhs_is_empty, %mean_rhs, %mean_lhs : f32
+      %safe_mean_rhs = arith.select %rhs_is_empty, %mean_lhs, %mean_rhs : f32
+      %delta = arith.subf %safe_mean_rhs, %safe_mean_lhs : f32
+      %weight_sum = arith.addf %weight_lhs, %weight_rhs : f32
+      %weight_sum_is_zero = arith.cmpf oeq, %weight_sum, %zero : f32
+      %safe_weight_sum = arith.select %weight_sum_is_zero, %one, %weight_sum : f32
+      %rhs_fraction = arith.divf %weight_rhs, %safe_weight_sum : f32
+      %mean_update = arith.mulf %delta, %rhs_fraction : f32
+      %mean_candidate = arith.addf %safe_mean_lhs, %mean_update : f32
+      %m2_sum = arith.addf %m2_lhs, %m2_rhs : f32
+      %delta_squared = arith.mulf %delta, %delta : f32
+      %weighted_delta = arith.mulf %delta_squared, %weight_lhs : f32
+      %m2_update = arith.mulf %weighted_delta, %rhs_fraction : f32
+      %m2_candidate = arith.addf %m2_sum, %m2_update : f32
+      %mean_or_lhs = arith.select %rhs_is_empty, %mean_lhs, %mean_candidate : f32
+      %combined_mean = arith.select %lhs_is_empty, %mean_rhs, %mean_or_lhs : f32
+      %m2_or_lhs = arith.select %rhs_is_empty, %m2_lhs, %m2_candidate : f32
+      %combined_m2 = arith.select %lhs_is_empty, %m2_rhs, %m2_or_lhs : f32
+      nv_tensor_ir.yield %combined_mean, %combined_m2, %weight_sum : f32, f32, f32
     } : tensor<8x32x64xf32>, tensor<8x32x64xf32>,
     tensor<8x32x64xf32> -> tensor<8x1x64xf32>,
     tensor<8x1x64xf32>, tensor<8x1x64xf32>

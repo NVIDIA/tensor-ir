@@ -8,6 +8,11 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/Extensions/InlinerExtension.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Ptr/IR/PtrDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/DialectRegistry.h"
 
 using namespace mlir;
@@ -17,6 +22,11 @@ void nv_tensor_ir::registerDialects(DialectRegistry &registry) {
   registry.insert<
     arith::ArithDialect,
     func::FuncDialect,
+    gpu::GPUDialect,
+    memref::MemRefDialect,
+    ptr::PtrDialect,
+    scf::SCFDialect,
+    tensor::TensorDialect,
     nv_tensor_ir::TensorIRDialect
   >();
   // clang-format on

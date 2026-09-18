@@ -4,6 +4,7 @@ add_tensor_ir_library(NVTensorIRAnalysis
   TileCandidateGenerator.cpp
 
   DEPENDS
+  NVTensorIRCompilerOptionsIncGen
 
   LINK_LIBS PUBLIC
   NVTensorIR::Dialect

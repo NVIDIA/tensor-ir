@@ -143,6 +143,20 @@ class Program:
         """Return the selected TileIR bytecode or cuBin artifact as ``bytes``."""
         return self._native_program.get_bytecode()
 
+    def serialize(self) -> bytes:
+        """Return this program's device binary and launch metadata as ``bytes``.
+
+        Unlike :meth:`get_bytecode`, which returns only the binary, the
+        result here also carries the launch metadata needed to rebuild an
+        equivalent program via :meth:`Program.deserialize`.
+        """
+        return self._native_program.serialize()
+
+    @staticmethod
+    def deserialize(data: bytes) -> "Program":
+        """Rebuild a program from bytes produced by :meth:`serialize`."""
+        return Program(_tensor_ir_module._Program.deserialize(data))
+
 
 _COMPILE_OPTION_NAMES = frozenset(
     {

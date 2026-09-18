@@ -629,6 +629,38 @@ def test_convert_op(profiling: bool) -> None:
     )
 
 
+def test_convert_float_special_values_to_bool(profiling: bool) -> None:
+    @tir.kernel
+    def convert_to_bool_kernel(value):
+        return tir.convert(value, dtype=tir.DataType.BOOL)
+
+    tiny = torch.finfo(torch.float32).tiny
+    value = torch.tensor(
+        [float("nan"), float("inf"), -float("inf"), 0.0, -0.0, 1.0, -1.0, tiny],
+        device="cuda",
+        dtype=torch.float32,
+    ).repeat(8, 1)
+    expected = torch.tensor(
+        [True, True, True, False, False, True, True, True],
+        device="cuda",
+        dtype=torch.bool,
+    ).repeat(8, 1)
+    output = torch.empty_like(value, dtype=torch.bool)
+
+    _compile_run_assert(
+        convert_to_bool_kernel,
+        value,
+        output=output,
+        name="convert_float_special_values_to_bool",
+        options=_layout_propagation_auto_options(),
+        mlir_probes=("= convert ", "-> tensor<8x8xi1>"),
+        rtol=0,
+        atol=0,
+        profile=profiling,
+    )
+    assert torch.equal(output, expected)
+
+
 def test_convert_supported_float_types_op(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     output = torch.empty_like(a)

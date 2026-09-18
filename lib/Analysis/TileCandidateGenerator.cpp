@@ -1056,7 +1056,7 @@ TileCandidateGenerator::generateCandidates(
 
   auto reserveExistingResourceCandidateAt = [&](int64_t maxElems,
                                                 int targetIndex,
-                                                std::string rationale) {
+                                                const std::string &rationale) {
     auto found = llvm::find_if(mergedCandidates, [&](const Candidate &c) {
       if (tileElements(c.tileShape) > maxElems) {
         return false;

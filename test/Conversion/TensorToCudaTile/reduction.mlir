@@ -4,7 +4,8 @@
 
 module {
 // CHECK-LABEL:   cuda_tile.module @cuda_tile_module {
-// CHECK:           entry @reduction_op_add(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>) {
+// CHECK:           entry @reduction_op_add(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>)
+// CHECK-SAME:      optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 // CHECK:             %[[TVIEW:.*]] = make_tensor_view %[[ARG0]], shape = [16, 32, 64], strides = [2048, 64, 1] : tensor_view<16x32x64xf32, strides=[2048,64,1]>
 // CHECK:             %[[TVIEW_0:.*]] = make_tensor_view %[[ARG1]], shape = [16, 1, 64], strides = [64, 64, 1] : tensor_view<16x1x64xf32, strides=[64,64,1]>
 // CHECK:             %[[BLOCK_X:.*]], %[[BLOCK_Y:.*]], %[[BLOCK_Z:.*]] = get_tile_block_id : tile<i32>
@@ -46,7 +47,8 @@ module {
 
 module {
 // CHECK-LABEL:   cuda_tile.module @cuda_tile_module {
-// CHECK:           entry @reduction_op_mul(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>) {
+// CHECK:           entry @reduction_op_mul(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>)
+// CHECK-SAME:      optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 // CHECK:             %[[TVIEW:.*]] = make_tensor_view %[[ARG0]], shape = [8, 32, 128], strides = [1, 8, 256] : tensor_view<8x32x128xf32, strides=[1,8,256]>
 // CHECK:             %[[TVIEW_0:.*]] = make_tensor_view %[[ARG1]], shape = [8, 1, 128], strides = [1, 1, 8] : tensor_view<8x1x128xf32, strides=[1,1,8]>
 // CHECK:             %[[BLOCK_X:.*]], %[[BLOCK_Y:.*]], %[[BLOCK_Z:.*]] = get_tile_block_id : tile<i32>
@@ -88,7 +90,8 @@ module {
 
 module {
 // CHECK-LABEL:   cuda_tile.module @cuda_tile_module {
-// CHECK:           entry @reduction_op_avg(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>) {
+// CHECK:           entry @reduction_op_avg(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>)
+// CHECK-SAME:      optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 // CHECK:             %[[TVIEW:.*]] = make_tensor_view %[[ARG0]], shape = [8, 32, 128], strides = [1, 8, 256] : tensor_view<8x32x128xf32, strides=[1,8,256]>
 // CHECK:             %[[TVIEW_0:.*]] = make_tensor_view %[[ARG1]], shape = [8, 1, 128], strides = [1, 1, 8] : tensor_view<8x1x128xf32, strides=[1,1,8]>
 // CHECK:             %[[BLOCK_X:.*]], %[[BLOCK_Y:.*]], %[[BLOCK_Z:.*]] = get_tile_block_id : tile<i32>
@@ -132,7 +135,8 @@ module {
 
 module {
 // CHECK-LABEL:   cuda_tile.module @cuda_tile_module {
-// CHECK:           entry @reduction_op_min(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>) {
+// CHECK:           entry @reduction_op_min(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>)
+// CHECK-SAME:      optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 // CHECK:             %[[TVIEW:.*]] = make_tensor_view %[[ARG0]], shape = [8, 32, 128], strides = [1, 8, 256] : tensor_view<8x32x128xf32, strides=[1,8,256]>
 // CHECK:             %[[TVIEW_0:.*]] = make_tensor_view %[[ARG1]], shape = [8, 1, 128], strides = [1, 1, 8] : tensor_view<8x1x128xf32, strides=[1,1,8]>
 // CHECK:             %[[BLOCK_X:.*]], %[[BLOCK_Y:.*]], %[[BLOCK_Z:.*]] = get_tile_block_id : tile<i32>
@@ -174,7 +178,8 @@ module {
 
 module {
 // CHECK-LABEL:   cuda_tile.module @cuda_tile_module {
-// CHECK:           entry @reduction_op_max(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>) {
+// CHECK:           entry @reduction_op_max(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>)
+// CHECK-SAME:      optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 // CHECK:             %[[TVIEW:.*]] = make_tensor_view %[[ARG0]], shape = [8, 32, 128], strides = [1, 8, 256] : tensor_view<8x32x128xf32, strides=[1,8,256]>
 // CHECK:             %[[TVIEW_0:.*]] = make_tensor_view %[[ARG1]], shape = [8, 1, 128], strides = [1, 1, 8] : tensor_view<8x1x128xf32, strides=[1,1,8]>
 // CHECK:             %[[BLOCK_X:.*]], %[[BLOCK_Y:.*]], %[[BLOCK_Z:.*]] = get_tile_block_id : tile<i32>
@@ -216,7 +221,8 @@ module {
 
 module {
 // CHECK-LABEL:   cuda_tile.module @cuda_tile_module {
-// CHECK:           entry @reduction_op_amax(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>) {
+// CHECK:           entry @reduction_op_amax(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>)
+// CHECK-SAME:      optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 // CHECK:             %[[TVIEW:.*]] = make_tensor_view %[[ARG0]], shape = [16, 32, 64], strides = [2048, 64, 1] : tensor_view<16x32x64xf32, strides=[2048,64,1]>
 // CHECK:             %[[TVIEW_0:.*]] = make_tensor_view %[[ARG1]], shape = [16, 1, 64], strides = [64, 64, 1] : tensor_view<16x1x64xf32, strides=[64,64,1]>
 // CHECK:             %[[BLOCK_X:.*]], %[[BLOCK_Y:.*]], %[[BLOCK_Z:.*]] = get_tile_block_id : tile<i32>
@@ -259,7 +265,8 @@ module {
 
 module {
 // CHECK-LABEL:   cuda_tile.module @cuda_tile_module {
-// CHECK:           entry @reduction_op_norm1(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>) {
+// CHECK:           entry @reduction_op_norm1(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>)
+// CHECK-SAME:      optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 // CHECK:             %[[TVIEW:.*]] = make_tensor_view %[[ARG0]], shape = [8, 32, 128], strides = [1, 8, 256] : tensor_view<8x32x128xf32, strides=[1,8,256]>
 // CHECK:             %[[TVIEW_0:.*]] = make_tensor_view %[[ARG1]], shape = [8, 1, 128], strides = [1, 1, 8] : tensor_view<8x1x128xf32, strides=[1,1,8]>
 // CHECK:             %[[BLOCK_X:.*]], %[[BLOCK_Y:.*]], %[[BLOCK_Z:.*]] = get_tile_block_id : tile<i32>
@@ -302,7 +309,8 @@ module {
 
 module {
 // CHECK-LABEL:   cuda_tile.module @cuda_tile_module {
-// CHECK:           entry @reduction_op_norm2(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>) {
+// CHECK:           entry @reduction_op_norm2(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>)
+// CHECK-SAME:      optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 // CHECK:             %[[TVIEW:.*]] = make_tensor_view %[[ARG0]], shape = [8, 32, 128], strides = [1, 8, 256] : tensor_view<8x32x128xf32, strides=[1,8,256]>
 // CHECK:             %[[TVIEW_0:.*]] = make_tensor_view %[[ARG1]], shape = [8, 1, 128], strides = [1, 1, 8] : tensor_view<8x1x128xf32, strides=[1,1,8]>
 // CHECK:             %[[BLOCK_X:.*]], %[[BLOCK_Y:.*]], %[[BLOCK_Z:.*]] = get_tile_block_id : tile<i32>
@@ -346,7 +354,8 @@ module {
 
 module {
 // CHECK-LABEL:   cuda_tile.module @cuda_tile_module {
-// CHECK:           entry @reduction_op_mul_no_zeros(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>) {
+// CHECK:           entry @reduction_op_mul_no_zeros(%[[ARG0:.*]]: tile<ptr<f32>>, %[[ARG1:.*]]: tile<ptr<f32>>)
+// CHECK-SAME:      optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 // CHECK:             %[[TVIEW:.*]] = make_tensor_view %[[ARG0]], shape = [8, 32, 128], strides = [1, 8, 256] : tensor_view<8x32x128xf32, strides=[1,8,256]>
 // CHECK:             %[[TVIEW_0:.*]] = make_tensor_view %[[ARG1]], shape = [8, 1, 128], strides = [1, 1, 8] : tensor_view<8x1x128xf32, strides=[1,1,8]>
 // CHECK:             %[[BLOCK_X:.*]], %[[BLOCK_Y:.*]], %[[BLOCK_Z:.*]] = get_tile_block_id : tile<i32>

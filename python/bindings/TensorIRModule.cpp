@@ -488,6 +488,27 @@ public:
     return nb::bytes(bytecode.data(), bytecode.size());
   }
 
+  nb::bytes serialize() const {
+    std::string bytes;
+    std::string error;
+    checkCAPIResult(mlirTensorIRProgramSerialize(program_, appendStringRef,
+                                                 &bytes, appendStringRef,
+                                                 &error),
+                    "mlirTensorIRProgramSerialize", error);
+    return nb::bytes(bytes.data(), bytes.size());
+  }
+
+  static std::unique_ptr<PyProgram> deserialize(nb::bytes bytes) {
+    MlirStringRef data = mlirStringRefCreate(bytes.c_str(), bytes.size());
+    std::string error;
+    MlirTensorIRProgram program =
+        mlirTensorIRProgramDeserialize(data, appendStringRef, &error);
+    if (!program.ptr) {
+      throwCAPIError("mlirTensorIRProgramDeserialize", error);
+    }
+    return std::make_unique<PyProgram>(program);
+  }
+
 private:
   MlirTensorIRProgram program_;
 };
@@ -577,6 +598,8 @@ NB_MODULE(_tensor_ir, m) {
       .def("launch", &PyProgram::launch, nb::arg("args"),
            nb::arg("workspace") = nb::none(), nb::arg("stream") = nb::none())
       .def("get_bytecode", &PyProgram::getBytecode)
+      .def("serialize", &PyProgram::serialize)
+      .def_static("deserialize", &PyProgram::deserialize, nb::arg("bytes"))
       .def_prop_ro("is_destroyed", &PyProgram::isDestroyed)
       .def_prop_ro("is_initialized", &PyProgram::isInitialized);
 

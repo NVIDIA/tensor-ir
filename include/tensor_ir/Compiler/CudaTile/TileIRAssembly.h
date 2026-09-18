@@ -16,12 +16,14 @@
 namespace mlir::nv_tensor_ir::backend::cuda_tile {
 
 /// Assemble the TileIR bytecode into a cubin by invoking 'tileiras'
-/// as a subprocess for the given target and bytecode version.
+/// as a subprocess for the given target. `bytecodeVersion` is used only for
+/// an optional pre-flight compatibility check; when absent, the bytecode's
+/// own version (self-described in its contents) determines compatibility.
 /// Returns std::nullopt when the assembler is unavailable or incompatible;
 /// assembler failures are returned.
-StatusOr<std::optional<llvm::SmallVector<char, 0>>>
-assembleTileIRToCubin(llvm::ArrayRef<char> bytecode, SmTarget target,
-                      mlir::cuda_tile::BytecodeVersion bytecodeVersion);
+StatusOr<std::optional<llvm::SmallVector<char, 0>>> assembleTileIRToCubin(
+    llvm::ArrayRef<char> bytecode, SmTarget target,
+    std::optional<mlir::cuda_tile::BytecodeVersion> bytecodeVersion);
 
 } // namespace mlir::nv_tensor_ir::backend::cuda_tile
 

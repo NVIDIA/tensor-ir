@@ -1,0 +1,98 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+namespace tensor_ir.rt.schema;
+
+struct BcVersion { major: uint8; minor: uint8; tag: uint16; }
+
+enum Persistence : uint8 {
+  None = 0,
+  Static = 1,
+}
+
+// Mirrors tensor_ir::rt::ElementType.
+enum ElementType : uint8 {
+  Bool = 0,
+  F16,
+  BF16,
+  F32,
+  F64,
+  F8E4M3FN,
+  F8E5M2,
+  SI8,
+  SI16,
+  SI32,
+  SI64,
+  UI8,
+  UI16,
+  UI32,
+  UI64,
+}
+
+table TensorArgDesc {
+  element_type: ElementType;
+  // Per-dim size/stride; a runtime-determined dim is marked with
+  // TensorArgDesc::kDynamic (not necessarily "static"). shape's length is
+  // the rank; strides, when present, must have the same length.
+  shape: [int64];
+  // Absent (not just empty) means no explicit strides were provided.
+  strides: [int64];
+}
+
+table ScalarArgDesc {
+  element_type: ElementType;
+}
+
+union ArgDesc { TensorArgDesc, ScalarArgDesc }
+
+struct GridDimensions { x: int32; y: int32; z: int32; }
+
+table LaunchMetadata {
+  func_name: string (required);
+  // Each arg contributes one or more flat kernel args when packed (a
+  // pointer plus any dynamic sizes/strides for tensors, one value for
+  // scalars); see TensorArgDesc::totalArgs().
+  args: [ArgDesc];
+  tile_sizes: [int32];
+  num_inputs: int32;
+  grid_shape_tensor_idx: int32;
+  grid_shape: [int64];
+  grid_shape_dim_mapping: [int32];
+  uniform_signature: bool;
+  persistence: Persistence;
+  sm_count: int32;
+  occupancy: int32;
+  static_grid: GridDimensions;  // absent -> runtime-computed grid
+}
+
+enum ArchPortability : uint8 { Portable = 0, FamilyPortable = 1, ArchConditional = 2 }
+
+struct SmTarget { compute_capability: int32; arch_portability: ArchPortability; }
+
+table Cubin {
+  bytes: [ubyte] (required);
+}
+
+table TileIRBytecode {
+  bytes: [ubyte] (required);
+  // Absent means the version is unknown (e.g. a bytecode file loaded from
+  // disk outside the normal compile path). A reader can't safely assemble
+  // this into a cubin without knowing the version.
+  version: BcVersion;
+}
+
+union Binary { Cubin, TileIRBytecode }
+
+table TensorIRArtifact {
+  // Readers reject any version they don't exactly match; there is no
+  // cross-version compatibility. Field additions alone don't need a version
+  // bump, but any change to what an existing field means does.
+  version: uint32;
+  kernel_name: string (required);
+  arch: SmTarget;
+  binary: Binary (required);
+  metadata: LaunchMetadata (required);
+}
+
+root_type TensorIRArtifact;
+file_identifier "TIRK";

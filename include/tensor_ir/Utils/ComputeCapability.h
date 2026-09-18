@@ -62,6 +62,11 @@ struct SmTarget {
   /// Parses a target string strictly, rejecting unsupported explicit suffixes.
   [[nodiscard]] static FailureOr<SmTarget> fromString(llvm::StringRef chip);
 
+  bool operator==(const SmTarget &other) const {
+    return computeCapability == other.computeCapability &&
+           portability == other.portability;
+  }
+
 private:
   ComputeCapability computeCapability;
   ArchPortability portability;

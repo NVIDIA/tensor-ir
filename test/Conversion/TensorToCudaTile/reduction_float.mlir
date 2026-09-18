@@ -131,12 +131,17 @@ nv_tensor_ir.graph @test_reduce_mul_no_zeros_small(
 // -----
 
 // CHECK-LABEL: @test_reduce_max_small
-// CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} padding_value = neg_inf{{.*}} -> tile<32x16xf32>
+// CHECK-SAME: (%[[IN:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
+// CHECK: %[[IN_VIEW:.*]] = make_tensor_view %[[IN]], shape = [64, 16], strides = [16, 1]
+// CHECK: %[[IN_PVIEW:.*]] = make_partition_view %[[IN_VIEW]] : partition_view<tile=(32x16), tensor_view<64x16xf32, strides=[16,1]>>
+// CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko weak %[[IN_PVIEW]]{{.*}} -> tile<32x16xf32>
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[0xFF800000 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = maxf %[[RHS]], %[[LHS]] propagate_nan
 // CHECK:   yield %[[RES]]
-// CHECK: store_view_tko weak %[[REDUCE]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [64], strides = [1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[REDUCE]], %[[OUT_PVIEW]]
 
 nv_tensor_ir.graph @test_reduce_max_small(
     %arg0: tensor<64x16xf32>
@@ -170,12 +175,17 @@ nv_tensor_ir.graph @test_reduce_amax_small(
 // -----
 
 // CHECK-LABEL: @test_reduce_min_small
-// CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} padding_value = pos_inf{{.*}} -> tile<32x16xf32>
+// CHECK-SAME: (%[[IN:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
+// CHECK: %[[IN_VIEW:.*]] = make_tensor_view %[[IN]], shape = [64, 16], strides = [16, 1]
+// CHECK: %[[IN_PVIEW:.*]] = make_partition_view %[[IN_VIEW]] : partition_view<tile=(32x16), tensor_view<64x16xf32, strides=[16,1]>>
+// CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko weak %[[IN_PVIEW]]{{.*}} -> tile<32x16xf32>
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[0x7F800000 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = minf %[[RHS]], %[[LHS]] propagate_nan
 // CHECK:   yield %[[RES]]
-// CHECK: store_view_tko weak %[[REDUCE]]
+// CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [64], strides = [1]
+// CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
+// CHECK: store_view_tko weak %[[REDUCE]], %[[OUT_PVIEW]]
 
 nv_tensor_ir.graph @test_reduce_min_small(
     %arg0: tensor<64x16xf32>
@@ -216,7 +226,7 @@ nv_tensor_ir.graph @test_reduce_add_large(
 // -----
 
 // CHECK-LABEL: @test_reduce_avg_large
-// CHECK-DAG: %[[C8192:.*]] = constant <f32: 8.192000e+03>
+// CHECK-DAG: %[[C8192:.*]] = constant <f32: 8.192000e+03> : tile<32x1xf32>
 // CHECK-DAG: %[[ACCUM:.*]] = constant <f32: 0.000000e+00>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x128xf32>
@@ -226,7 +236,9 @@ nv_tensor_ir.graph @test_reduce_add_large(
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = addf %[[RHS]], %[[LHS]]
 // CHECK:   yield %[[RES]]
-// CHECK: %[[RESULT:.*]] = divf %[[REDUCE]], %[[C8192]]
+// CHECK: %[[RESHAPED:.*]] = reshape %[[REDUCE]] : tile<32xf32> -> tile<32x1xf32>
+// CHECK: %[[DIVIDED:.*]] = divf %[[RESHAPED]], %[[C8192]] rounding<full> : tile<32x1xf32>
+// CHECK: %[[RESULT:.*]] = reshape %[[DIVIDED]] : tile<32x1xf32> -> tile<32xf32>
 // CHECK: store_view_tko weak %[[RESULT]]
 
 nv_tensor_ir.graph @test_reduce_avg_large(

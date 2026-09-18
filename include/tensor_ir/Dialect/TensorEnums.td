@@ -7,6 +7,20 @@
 include "mlir/IR/EnumAttr.td"
 include "tensor_ir/Dialect/TensorDialect.td"
 
+def TilePaddingZero : I32EnumAttrCase<"Zero", 0, "zero">;
+def TilePaddingNegZero : I32EnumAttrCase<"NegZero", 1, "neg_zero">;
+def TilePaddingNaN : I32EnumAttrCase<"NaN", 2, "nan">;
+def TilePaddingPosInf : I32EnumAttrCase<"PosInf", 3, "pos_inf">;
+def TilePaddingNegInf : I32EnumAttrCase<"NegInf", 4, "neg_inf">;
+
+def TilePadding : I32EnumAttr<
+    "TilePadding", "Padding value for a partially out-of-bounds tile load",
+    [TilePaddingZero, TilePaddingNegZero, TilePaddingNaN,
+     TilePaddingPosInf, TilePaddingNegInf]> {
+  let cppNamespace = TensorIR_Dialect.cppNamespace;
+  let genSpecializedAttr = 0;
+}
+
 //
 // Comparators
 //
@@ -124,7 +138,6 @@ def ArchPortabilityEnum : I32EnumAttr<
   let cppNamespace = TensorIR_Dialect.cppNamespace;
   let genSpecializedAttr = 0;
 }
-
 
 //===----------------------------------------------------------------------===//
 // Iteration Space Dimension Domain State

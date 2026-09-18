@@ -4,24 +4,18 @@
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTile.h"
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTileInternal.h"
 #include "tensor_ir/Dialect/TensorIR.h"
-#include "tensor_ir/Support/TCutegen.h"
 
 #include "llvm/ADT/StringRef.h"
 
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
 #include <type_traits>
 
-namespace tcg = mlir::nv_tensor_ir::tcutegen;
-
 //===----------------------------------------------------------------------===//
 // Tensor IR to CUDA Tile conversion emission helpers.
 //
 // This file contains clearly separated helper functions with no dependencies:
 // - `createConstant` is commonly used to build `cuda_tile::ConstantOp`.
-// - `applyLayout`, `emitLoad`, `emitStore` are used by `GraphOp` and
-//   `ResultsOp` conversion patterns for emitting tile loads and stores.
-// - `calculateIndex` is used to generate the index values for the main
-//   iteration space.
+// - optimization-hint helpers construct load/store and entry attributes.
 // - `ReductionEmissionHelper` generates the attributes and operations for
 //   `ReduceOp` lowering (initial value, prologue, reduction, epilogue).
 //===----------------------------------------------------------------------===//
@@ -97,201 +91,6 @@ cuda_tile::Signedness getSignedness(Type type) {
                                 : cuda_tile::Signedness::Unsigned;
 }
 
-//===----------------------------------------------------------------------===//
-// Load/store emission
-//===----------------------------------------------------------------------===//
-
-/// Update the tensor descriptor with the sizes/strides from the layout.
-/// If an offset is present, also update the tensor pointer.
-/// If an alignment is present, apply `cuda_tile::AssumeOp` to the pointer.
-TensorDescriptor applyLayout(OpBuilder &rewriter, const TensorDescriptor &desc,
-                             TensorSourceAttr tensorSource) {
-  TensorDescriptor result = desc;
-  Location loc = desc.pointer.getLoc();
-
-  // Build the array of dynamic values (if present).
-  SmallVector<Value> dynamicValues;
-  for (auto &size : desc.sizes) {
-    if (size.dynamicValue) {
-      dynamicValues.push_back(size.dynamicValue);
-    }
-  }
-  for (auto &stride : desc.strides) {
-    if (stride.dynamicValue) {
-      dynamicValues.push_back(stride.dynamicValue);
-    }
-  }
-
-  // Apply the dynamic offsets permutation (if present).
-  if (!tensorSource.getDynamicValueMapping().empty()) {
-    SmallVector<Value> permutedValues;
-    for (int idx : tensorSource.getDynamicValueMapping()) {
-      permutedValues.push_back(dynamicValues[idx]);
-    }
-    dynamicValues = std::move(permutedValues);
-  }
-
-  // Get the CuTe layout from the tensor source.
-  auto layout = tensorSource.getCuteLayout();
-  size_t rank = tcg::rank(layout);
-  auto dynamicIter = dynamicValues.begin();
-
-  // Update the dimension sizes.
-  result.sizes.clear();
-  for (size_t i = 0; i < rank; ++i) {
-    auto cgSize = tcg::get(layout.shape(), i);
-    auto cgStride = tcg::get(layout.stride(), i);
-    if (tcg::is_static(cgSize)) {
-      result.sizes.push_back({tcg::static_size(cgSize), nullptr});
-    } else if (tcg::is_static(cgStride) && cgStride.as_int() == 0) {
-      // A dynamic zero-stride dimension is a logical broadcast extent. The
-      // source tensor has one physical element along this dimension and does
-      // not carry the consumer's runtime extent in its descriptor.
-      result.sizes.push_back({1, nullptr});
-    } else {
-      assert(dynamicIter != dynamicValues.end() &&
-             "missing runtime value for dynamic layout size");
-      result.sizes.push_back({ShapedType::kDynamic, *dynamicIter++});
-    }
-  }
-
-  // Update the dimension strides.
-  result.strides.clear();
-  for (size_t i = 0; i < rank; ++i) {
-    auto cgStride = tcg::get(layout.stride(), i);
-    if (tcg::is_static(cgStride)) {
-      result.strides.push_back({tcg::static_size(cgStride), nullptr});
-    } else {
-      assert(dynamicIter != dynamicValues.end() &&
-             "missing runtime value for dynamic layout stride");
-      result.strides.push_back({ShapedType::kDynamic, *dynamicIter++});
-    }
-  }
-
-  // Apply the offset, if present.
-  if (tensorSource.getOffset() != 0) {
-    ShapedType offsetType = cuda_tile::TileType::get(
-        /*shape=*/llvm::ArrayRef<int64_t>{}, rewriter.getI64Type());
-    Value offsetValue =
-        createConstant(rewriter, loc, offsetType, tensorSource.getOffset());
-    result.pointer =
-        cuda_tile::OffsetOp::create(rewriter, loc, result.pointer, offsetValue);
-  }
-
-  // Get or infer the alignment and update the tensor pointer.
-  // Applying the alignment to the pointer enables the vectorized load/store
-  // operations in the CUDA Tile lowering.
-
-  Type ptrType = cast<ShapedType>(result.pointer.getType()).getElementType();
-  Type elemType = cast<cuda_tile::PointerType>(ptrType).getPointeeType();
-  int64_t elemSizeInBytes = std::max(1u, elemType.getIntOrFloatBitWidth() / 8);
-
-  // Use per-tensor alignment if explicitly set, otherwise use the default.
-  if (result.alignment <= 0) {
-    result.alignment = kDefaultPointerAlignment;
-  }
-
-  // Adjust the alignment if the offset is not aligned.
-  int64_t offsetInBytes = tensorSource.getOffset() * elemSizeInBytes;
-  if (offsetInBytes % result.alignment != 0) {
-    result.alignment = std::gcd(result.alignment, offsetInBytes);
-  }
-
-  // Apply the alignment, if needed.
-  if (result.alignment > elemSizeInBytes) {
-    auto divByAttr = cuda_tile::DivByAttr::get(
-        rewriter.getContext(), result.alignment, /*every=*/std::nullopt,
-        /*along=*/std::nullopt);
-    result.pointer =
-        cuda_tile::AssumeOp::create(rewriter, loc, result.pointer, divByAttr);
-  }
-
-  return result;
-}
-
-/// Create partition view for a tensor descriptor.
-Value createPartitionView(OpBuilder &rewriter, const TensorDescriptor &desc,
-                          ArrayRef<int64_t> tileShape,
-                          std::optional<cuda_tile::PaddingValue> paddingValue) {
-  // Get the element type from the descriptor.
-  Type ptrType = cast<ShapedType>(desc.pointer.getType()).getElementType();
-  Type elemType = cast<cuda_tile::PointerType>(ptrType).getPointeeType();
-
-  // Create static/dynamic vectors from the descriptor.
-  SmallVector<int64_t> staticSizes, staticStrides;
-  SmallVector<Value> dynamicSizes, dynamicStrides;
-  for (auto [size, stride] : llvm::zip_equal(desc.sizes, desc.strides)) {
-    staticSizes.push_back(size.staticValue);
-    if (size.dynamicValue) {
-      dynamicSizes.push_back(size.dynamicValue);
-    }
-    staticStrides.push_back(stride.staticValue);
-    if (stride.dynamicValue) {
-      dynamicStrides.push_back(stride.dynamicValue);
-    }
-  }
-
-  // Fix broadcasted dimensions. A zero stride marks a logical broadcast: the
-  // tensor holds a single physical element along that dimension, so the size
-  // is one and the stride is never used to compute an address.
-  //
-  // The stride value is still load-bearing for downstream analysis. Emitting
-  // one makes an outer dimension look unit-strided, so downstream axis
-  // analysis picks it as the contiguous axis (`axis_analysis_leading_dim = 0`,
-  // `axis_analysis_vec_size = 1`). That disqualifies the TMA copy atom and
-  // degrades the whole tile to scalar `ld.global`. Use the row-major pitch of
-  // the inner dimensions instead, which keeps the innermost dimension the
-  // contiguous one and matches the stride the affine-map path emits.
-  for (size_t i = 0, e = staticStrides.size(); i < e; ++i) {
-    if (desc.strides[i].staticValue != 0) {
-      continue;
-    }
-    assert(!desc.sizes[i].dynamicValue &&
-           "broadcasted dimension cannot be dynamic");
-    staticSizes[i] = 1;
-
-    // Smallest stride that clears every inner dimension. Falls back to one
-    // when an inner extent is dynamic, since no static pitch exists then.
-    int64_t pitch = 1;
-    for (size_t j = i + 1; j < e; ++j) {
-      if (staticSizes[j] == ShapedType::kDynamic ||
-          staticStrides[j] == ShapedType::kDynamic) {
-        pitch = 1;
-        break;
-      }
-      pitch = std::max(pitch, staticSizes[j] * staticStrides[j]);
-    }
-    staticStrides[i] = pitch;
-  }
-
-  // Create the tensor view.
-  auto tensorViewType = cuda_tile::TensorViewType::get(
-      rewriter.getContext(), elemType, staticSizes, staticStrides);
-  Value tensorView = cuda_tile::MakeTensorViewOp::create(
-      rewriter, desc.pointer.getLoc(), tensorViewType, desc.pointer,
-      dynamicSizes, dynamicStrides);
-
-  // Create partition view type components.
-  SmallVector<int32_t> tileSizes(tileShape.begin(), tileShape.end());
-  auto tileSizesAttr = DenseI32ArrayAttr::get(rewriter.getContext(), tileSizes);
-
-  SmallVector<int32_t> dimMap(tileShape.size());
-  std::iota(dimMap.begin(), dimMap.end(), 0);
-
-  cuda_tile::PaddingValueAttr paddingValueAttr;
-  if (paddingValue.has_value()) {
-    paddingValueAttr =
-        cuda_tile::PaddingValueAttr::get(rewriter.getContext(), *paddingValue);
-  }
-
-  // Create the partition view.
-  auto partitionViewType = cuda_tile::PartitionViewType::get(
-      rewriter.getContext(), tileSizesAttr, tensorViewType, dimMap,
-      paddingValueAttr);
-  return cuda_tile::MakePartitionViewOp::create(rewriter, tensorView.getLoc(),
-                                                partitionViewType, tensorView);
-}
-
 /// Create load/store optimization hints for non-default descriptor options.
 cuda_tile::OptimizationHintsAttr
 createLoadStoreOptimizationHints(MLIRContext *ctx, bool allowTma,
@@ -312,7 +111,7 @@ createLoadStoreOptimizationHints(MLIRContext *ctx, bool allowTma,
   return createOptimizationHints(ctx, hintAttrs);
 }
 
-/// Create entry-point optimization hints for non-default launch options.
+/// Create entry-point optimization hints with authoritative launch options.
 cuda_tile::OptimizationHintsAttr
 createEntryOptimizationHints(MLIRContext *ctx, int32_t numCTAs,
                              int32_t occupancy, int32_t numWarps) {
@@ -320,147 +119,15 @@ createEntryOptimizationHints(MLIRContext *ctx, int32_t numCTAs,
   Type intTy = IntegerType::get(ctx, 32);
   OptimizationHintNames hintNames = getOptimizationHintNames();
 
-  auto addIfNotDefault = [&](StringRef name, int32_t value,
-                             int32_t defaultValue) {
-    if (value != defaultValue) {
-      hintAttrs.push_back(NamedAttribute(name, IntegerAttr::get(intTy, value)));
-    }
+  auto addIntegerHint = [&](StringRef name, int32_t value) {
+    hintAttrs.push_back(NamedAttribute(name, IntegerAttr::get(intTy, value)));
   };
-  addIfNotDefault(hintNames.numCTAInCGA, numCTAs, 1);
-  addIfNotDefault(hintNames.occupancy, occupancy, 1);
-  addIfNotDefault(hintNames.numWorkerWarpsPerCTA, numWarps, 4);
+
+  addIntegerHint(hintNames.numCTAInCGA, numCTAs);
+  addIntegerHint(hintNames.numWorkerWarpsPerCTA, numWarps);
+  addIntegerHint(hintNames.occupancy, occupancy);
 
   return createOptimizationHints(ctx, hintAttrs);
-}
-
-/// Emit load operation (`cuda_tile::LoadViewTkoOp`).
-Value emitLoad(OpBuilder &rewriter, const TensorDescriptor &desc,
-               ShapedType tileType, ValueRange indexValues,
-               std::optional<cuda_tile::PaddingValue> paddingValue) {
-  Value partitionView =
-      createPartitionView(rewriter, desc, tileType.getShape(), paddingValue);
-  Type tokenType = cuda_tile::TokenType::get(rewriter.getContext());
-  auto optimizationHints = createLoadStoreOptimizationHints(
-      rewriter.getContext(), desc.allowTma, desc.cost);
-
-  auto loadOp = cuda_tile::LoadViewTkoOp::create(
-      rewriter, partitionView.getLoc(), tileType, tokenType,
-      cuda_tile::MemoryOrderingSemantics::WEAK, /*memory_scope=*/nullptr,
-      partitionView, indexValues, /*token=*/nullptr, optimizationHints);
-  return loadOp.getResult(0);
-}
-
-/// Emit store operation (`cuda_tile::StoreViewTkoOp`).
-void emitStore(OpBuilder &rewriter, const TensorDescriptor &desc, Value tile,
-               ValueRange indexValues) {
-  Value partitionView = createPartitionView(
-      rewriter, desc, cast<ShapedType>(tile.getType()).getShape());
-  Type tokenType = cuda_tile::TokenType::get(rewriter.getContext());
-  auto optimizationHints = createLoadStoreOptimizationHints(
-      rewriter.getContext(), desc.allowTma, desc.cost);
-
-  cuda_tile::StoreViewTkoOp::create(
-      rewriter, partitionView.getLoc(), tokenType,
-      cuda_tile::MemoryOrderingSemantics::WEAK, /*memory_scope=*/nullptr, tile,
-      partitionView, indexValues, /*token=*/nullptr, optimizationHints);
-}
-
-//===----------------------------------------------------------------------===//
-// Index calculation
-//===----------------------------------------------------------------------===//
-
-/// Calculate index values for an iteration space with static sizes.
-/// This should be more efficient than the dynamic version (less div/mod ops).
-SmallVector<Value> calculateStaticIndex(OpBuilder &rewriter, Value blockId,
-                                        ArrayRef<int64_t> iterationSpaceShape,
-                                        ArrayRef<int64_t> tileShape) {
-  SmallVector<Value> indexValues;
-  Location loc = blockId.getLoc();
-
-  // Use I32 type for load indices.
-  ShapedType indexType = cuda_tile::TileType::get(
-      /*shape=*/llvm::ArrayRef<int64_t>{}, rewriter.getI32Type());
-
-  // Find the last dimension that is tiled.
-  size_t rank = iterationSpaceShape.size();
-  size_t lastTiledDim = SIZE_MAX;
-  for (size_t i = 0; i < rank; i++) {
-    if (iterationSpaceShape[i] > tileShape[i]) {
-      lastTiledDim = i;
-    }
-  }
-
-  // Repeat splitting the block ID into left/right parts.
-  // "Left" part is the block ID modulo the number of blocks in the dimension,
-  // and the "right" part is the remaining number of blocks.
-  for (size_t i = 0; i < rank; i++) {
-    int64_t blockCountInDim =
-        llvm::divideCeil(iterationSpaceShape[i], tileShape[i]);
-    if (blockCountInDim != 1) {
-      if (i != lastTiledDim) {
-        // Calculate the index value and update the remainder.
-        Value cst = createConstant(rewriter, loc, indexType, blockCountInDim);
-        indexValues.push_back(cuda_tile::RemIOp::create(
-            rewriter, loc, blockId, cst, cuda_tile::Signedness::Unsigned));
-        blockId = cuda_tile::DivIOp::create(rewriter, loc, blockId, cst,
-                                            cuda_tile::Signedness::Unsigned);
-      } else {
-        // Last tiled dimension uses the remainder.
-        indexValues.push_back(blockId);
-      }
-    } else {
-      // Dimension is not tiled, use zero index.
-      indexValues.push_back(
-          createConstant(rewriter, loc, indexType, int64_t{0}));
-    }
-  }
-
-  return indexValues;
-}
-
-/// Calculate index values for an iteration space with dynamic sizes.
-SmallVector<Value> calculateDynamicIndex(OpBuilder &rewriter, Value blockId,
-                                         ValueRange dynamicSizes) {
-  SmallVector<Value> indexValues;
-  Location loc = blockId.getLoc();
-
-  // Repeat splitting the block ID into left/right parts.
-  // "Left" part is the block ID modulo the number of blocks in the dimension,
-  // and the "right" part is the remaining number of blocks.
-  for (size_t i = 0, lastDim = dynamicSizes.size() - 1; i < lastDim; i++) {
-    indexValues.push_back(
-        cuda_tile::RemIOp::create(rewriter, loc, blockId, dynamicSizes[i],
-                                  cuda_tile::Signedness::Unsigned));
-    blockId = cuda_tile::DivIOp::create(rewriter, loc, blockId, dynamicSizes[i],
-                                        cuda_tile::Signedness::Unsigned);
-  }
-
-  indexValues.push_back(blockId);
-  return indexValues;
-}
-
-/// Calculate index values for an iteration space.
-FailureOr<SmallVector<Value>> calculateIndex(OpBuilder &rewriter, Value blockId,
-                                             const TensorDescriptor &desc,
-                                             ArrayRef<int64_t> tileShape) {
-  // Use static index calculation, if possible.
-  bool isStatic =
-      llvm::all_of(desc.sizes, [](auto &size) { return !size.dynamicValue; });
-  if (isStatic) {
-    SmallVector<int64_t> tensorShape;
-    for (auto &size : desc.sizes) {
-      tensorShape.push_back(size.staticValue);
-    }
-    return calculateStaticIndex(rewriter, blockId, tensorShape, tileShape);
-  }
-
-  // Use `GetIndexSpaceShapeOp` to get the block sizes in the iteration space.
-  Value partitionView = createPartitionView(rewriter, desc, tileShape);
-  SmallVector<Type> indexTypes(tileShape.size(), blockId.getType());
-  auto getIndexSpaceShapeOp = cuda_tile::GetIndexSpaceShapeOp::create(
-      rewriter, partitionView.getLoc(), indexTypes, partitionView);
-  return calculateDynamicIndex(rewriter, blockId,
-                               getIndexSpaceShapeOp.getResults());
 }
 
 //===----------------------------------------------------------------------===//

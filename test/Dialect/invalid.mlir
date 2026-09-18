@@ -62,7 +62,7 @@ nv_tensor_ir.graph @reduceUDIdentityCount(
 nv_tensor_ir.graph @reduceUDBlockArgumentCount(
   %input: tensor<16x32xf32>
 ) -> tensor<16x1xf32> {
-  // expected-error@below{{expects body region to have exactly 2 arguments (prev_result_i, curr_operand_i), but got 1 arguments}}
+  // expected-error@below{{expects body region to have exactly 2 arguments (lhs_i, rhs_i), but got 1 arguments}}
   %reduce = reduce_ud(%input)<dimensions = [1], identity = [0.000000e+00 : f32]>
       (%acc: f32) {
     nv_tensor_ir.yield %acc : f32

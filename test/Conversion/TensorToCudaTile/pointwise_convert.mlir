@@ -1355,7 +1355,7 @@ nv_tensor_ir.graph @convert_i1_to_ui8(%arg0: tensor<4x8x16xi1>) -> tensor<4x8x16
 
 // CHECK-LABEL: @convert_f16_to_i1
 // CHECK: %[[ZERO:.*]] = constant <f16: 0.000000e+00> : tile<[[DIMS:.*]]xf16>
-// CHECK: cmpf not_equal ordered %{{.*}}, %[[ZERO]] : tile<[[DIMS]]xf16> -> tile<[[DIMS]]xi1>
+// CHECK: cmpf not_equal unordered %{{.*}}, %[[ZERO]] : tile<[[DIMS]]xf16> -> tile<[[DIMS]]xi1>
 nv_tensor_ir.graph @convert_f16_to_i1(%arg0: tensor<4x8x16xf16>) -> tensor<4x8x16xi1> {
     %convert = "nv_tensor_ir.convert"(%arg0) : (tensor<4x8x16xf16>) -> tensor<4x8x16xi1>
     results %convert : tensor<4x8x16xi1>
@@ -1365,7 +1365,7 @@ nv_tensor_ir.graph @convert_f16_to_i1(%arg0: tensor<4x8x16xf16>) -> tensor<4x8x1
 
 // CHECK-LABEL: @convert_bf16_to_i1
 // CHECK: %[[ZERO:.*]] = constant <bf16: 0.000000e+00> : tile<[[DIMS:.*]]xbf16>
-// CHECK: cmpf not_equal ordered %{{.*}}, %[[ZERO]] : tile<[[DIMS]]xbf16> -> tile<[[DIMS]]xi1>
+// CHECK: cmpf not_equal unordered %{{.*}}, %[[ZERO]] : tile<[[DIMS]]xbf16> -> tile<[[DIMS]]xi1>
 nv_tensor_ir.graph @convert_bf16_to_i1(%arg0: tensor<4x8x16xbf16>) -> tensor<4x8x16xi1> {
     %convert = "nv_tensor_ir.convert"(%arg0) : (tensor<4x8x16xbf16>) -> tensor<4x8x16xi1>
     results %convert : tensor<4x8x16xi1>
@@ -1375,7 +1375,7 @@ nv_tensor_ir.graph @convert_bf16_to_i1(%arg0: tensor<4x8x16xbf16>) -> tensor<4x8
 
 // CHECK-LABEL: @convert_f32_to_i1
 // CHECK: %[[ZERO:.*]] = constant <f32: 0.000000e+00> : tile<[[DIMS:.*]]xf32>
-// CHECK: cmpf not_equal ordered %{{.*}}, %[[ZERO]] : tile<[[DIMS]]xf32> -> tile<[[DIMS]]xi1>
+// CHECK: cmpf not_equal unordered %{{.*}}, %[[ZERO]] : tile<[[DIMS]]xf32> -> tile<[[DIMS]]xi1>
 nv_tensor_ir.graph @convert_f32_to_i1(%arg0: tensor<4x8x16xf32>) -> tensor<4x8x16xi1> {
     %convert = "nv_tensor_ir.convert"(%arg0) : (tensor<4x8x16xf32>) -> tensor<4x8x16xi1>
     results %convert : tensor<4x8x16xi1>
@@ -1385,7 +1385,7 @@ nv_tensor_ir.graph @convert_f32_to_i1(%arg0: tensor<4x8x16xf32>) -> tensor<4x8x1
 
 // CHECK-LABEL: @convert_f64_to_i1
 // CHECK: %[[ZERO:.*]] = constant <f64: 0.000000e+00> : tile<[[DIMS:.*]]xf64>
-// CHECK: cmpf not_equal ordered %{{.*}}, %[[ZERO]] : tile<[[DIMS]]xf64> -> tile<[[DIMS]]xi1>
+// CHECK: cmpf not_equal unordered %{{.*}}, %[[ZERO]] : tile<[[DIMS]]xf64> -> tile<[[DIMS]]xi1>
 nv_tensor_ir.graph @convert_f64_to_i1(%arg0: tensor<4x8x16xf64>) -> tensor<4x8x16xi1> {
     %convert = "nv_tensor_ir.convert"(%arg0) : (tensor<4x8x16xf64>) -> tensor<4x8x16xi1>
     results %convert : tensor<4x8x16xi1>

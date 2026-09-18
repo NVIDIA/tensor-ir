@@ -19,6 +19,18 @@ void buildGraphAnalysisPipeline(mlir::OpPassManager &pm,
 void buildTileSelectionPipeline(mlir::OpPassManager &pm,
                                 const TensorToCudaTilePipelineOptions &opts);
 
+/// Form the flattened grid and materialize contraction and persistence loops
+/// for layout-propagation lowering.
+void buildTensorIRTiledProgramFormationPipeline(
+    mlir::OpPassManager &pm, const TensorToCudaTilePipelineOptions &opts);
+
+/// Outline formed TensorIR forall bodies as destination-passing GPU kernels.
+void buildTensorIRKernelOutliningPipeline(mlir::OpPassManager &pm);
+
+/// Add all TensorIR tiled-program formation and outlining stages.
+void buildTensorIRTiledProgramPipeline(
+    mlir::OpPassManager &pm, const TensorToCudaTilePipelineOptions &opts);
+
 /// Add TensorIR-to-CudaTile conversion and cleanup passes without analysis.
 void buildTensorToCudaTileConversionOnlyPipeline(
     mlir::OpPassManager &pm, const TensorToCudaTilePipelineOptions &opts);

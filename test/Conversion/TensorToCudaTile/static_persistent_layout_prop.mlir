@@ -6,7 +6,7 @@
 // iteration space instead of normalizing contiguous row-major dims to 1D.
 module {
   // CHECK-LABEL: entry @add_layout_prop_static_persistent(
-  // CHECK-SAME: optimization_hints=<default = {occupancy = 2}>
+  // CHECK-SAME: optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 2}>
   // CHECK-DAG: %[[TOTAL:.*]] = constant <i32: 12800> : tile<i32>
   // CHECK-DAG: %[[GRID:.*]] = constant <i32: 296> : tile<i32>
   // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>

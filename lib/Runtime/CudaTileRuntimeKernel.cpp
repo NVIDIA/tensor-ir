@@ -3,6 +3,8 @@
 
 #include "tensor_ir/Runtime/CudaTile/CudaTileRuntimeKernel.h"
 
+#include "tensor_ir/Artifact/TensorIRArtifactCodec.h"
+#include "tensor_ir/Compiler/CudaTile/TileIRAssembly.h"
 #include "tensor_ir/Support/CudaApi.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -12,9 +14,76 @@
 
 namespace tensor_ir::rt {
 namespace cuda = ::mlir::nv_tensor_ir::cuda;
+using mlir::nv_tensor_ir::SmTarget;
 
 /// Inline buffer size for SmallVectors holding kernel arguments.
 static constexpr unsigned kMaxInlineKernelArgs = 128;
+
+StatusOr<IRuntimeKernelPtr>
+CudaTileRuntimeKernel::create(std::unique_ptr<TensorIRArtifact> artifact) {
+  std::unique_ptr<const TensorIRArtifact> owned = std::move(artifact);
+  const KernelArgLayout &layout = owned->argLayout;
+  std::optional<std::array<int32_t, 3>> staticGrid = owned->staticGrid;
+  std::optional<::mlir::cuda_tile::BytecodeVersion> bytecodeVersion;
+  if (const auto *tileir = std::get_if<TileIRBytecode>(&owned->binary)) {
+    bytecodeVersion = tileir->version;
+  }
+  SmTarget compiledTarget = owned->arch;
+
+  std::unique_ptr<CudaTileRuntimeKernel> kernel(
+      new CudaTileRuntimeKernel(std::move(owned)));
+
+  using Acc = RuntimeOperandAccessor;
+  if (layout.uniformSignature || layout.hasDynamicShapes()) {
+    kernel->setArgPacker(std::make_unique<FlatArgPacker<Acc>>(layout));
+  } else {
+    kernel->setArgPacker(std::make_unique<PointerOnlyArgPacker<Acc>>());
+  }
+  if (staticGrid) {
+    kernel->setGridComputer(
+        std::make_unique<StaticGridComputer<Acc>>(*staticGrid));
+  } else {
+    kernel->setGridComputer(
+        std::make_unique<TileBasedGridComputer<Acc>>(layout));
+  }
+
+  if (std::holds_alternative<TileIRBytecode>(kernel->artifact_->binary)) {
+    kernel->setTileIRFallbackAssembler(
+        [compiledTarget, bytecodeVersion](
+            llvm::ArrayRef<char> bytecode,
+            int deviceCc) -> StatusOr<llvm::SmallVector<char, 0>> {
+          using ::mlir::nv_tensor_ir::ArchPortability;
+          using ::mlir::nv_tensor_ir::backend::cuda_tile::assembleTileIRToCubin;
+          if (!compiledTarget.validateCodegenTargetCompatibility(deviceCc)) {
+            return Status::NotSupported(
+                "TileIR target is incompatible with the current CUDA "
+                "device");
+          }
+          ::mlir::FailureOr<SmTarget> deviceTarget =
+              SmTarget::fromCc(deviceCc, ArchPortability::arch_conditional);
+          if (::mlir::failed(deviceTarget)) {
+            return Status::NotSupported(
+                "unrecognized CUDA device compute capability");
+          }
+          TIR_ASSIGN_OR_RETURN(
+              auto cubin,
+              assembleTileIRToCubin(bytecode, *deviceTarget, bytecodeVersion));
+          if (!cubin) {
+            return Status::NotSupported("no compatible TileIR assembler");
+          }
+          return std::move(*cubin);
+        });
+  }
+
+  return IRuntimeKernelPtr(std::move(kernel));
+}
+
+StatusOr<IRuntimeKernelPtr>
+CudaTileRuntimeKernel::deserialize(llvm::MemoryBufferRef bytes) {
+  TIR_ASSIGN_OR_RETURN(std::unique_ptr<TensorIRArtifact> artifact,
+                       deserializeArtifact(bytes));
+  return CudaTileRuntimeKernel::create(std::move(artifact));
+}
 
 static StatusOr<int> getCurrentDeviceComputeCapability() {
   StatusOr<int> device = cuda::runtime::getDevice();
@@ -30,7 +99,8 @@ static StatusOr<int> getCurrentDeviceComputeCapability() {
 }
 
 Status CudaTileRuntimeKernel::initializeRuntimeState() const {
-  if (cubin_.empty()) {
+  llvm::ArrayRef<char> code = activeDeviceCode();
+  if (code.empty()) {
     return Status::NotSupported("No device code available");
   }
 
@@ -41,7 +111,7 @@ Status CudaTileRuntimeKernel::initializeRuntimeState() const {
     }
     lib_ = *library;
     StatusOr<CUkernel> kernel =
-        cuda::driver::getKernel(lib_, funcName_.c_str());
+        cuda::driver::getKernel(lib_, artifact_->funcName.c_str());
     if (!kernel.ok()) {
       (void)cuda::driver::unloadLibrary(lib_);
       lib_ = nullptr;
@@ -51,8 +121,11 @@ Status CudaTileRuntimeKernel::initializeRuntimeState() const {
     return Status::Ok();
   };
 
-  Status driverStatus = loadKernel(cubin_);
-  if (driverStatus.ok() || !bytecodeVersion_) {
+  const auto *tileir = std::get_if<TileIRBytecode>(&artifact_->binary);
+
+  Status driverStatus = loadKernel(code);
+  bool alreadyFellBack = !fallbackCubin_.empty();
+  if (driverStatus.ok() || alreadyFellBack || !tileir) {
     return driverStatus;
   }
 
@@ -62,7 +135,7 @@ Status CudaTileRuntimeKernel::initializeRuntimeState() const {
       return deviceComputeCapability.status();
     }
     StatusOr<llvm::SmallVector<char, 0>> fallback =
-        tileIRFallbackAssembler_(cubin_, *deviceComputeCapability);
+        tileIRFallbackAssembler_(code, *deviceComputeCapability);
     if (!fallback.ok()) {
       return fallback.status();
     }
@@ -70,15 +143,14 @@ Status CudaTileRuntimeKernel::initializeRuntimeState() const {
     if (!fallbackStatus.ok()) {
       return fallbackStatus;
     }
-    cubin_ = std::move(*fallback);
-    bytecodeVersion_ = std::nullopt;
+    fallbackCubin_ = std::move(*fallback);
     return Status::Ok();
   }
 
   StatusOr<int> driverVersion = cuda::driver::getVersion();
-  if (driverVersion.ok()) {
-    auto message = getBytecodeDriverCompatibilityMessage(*bytecodeVersion_,
-                                                         *driverVersion);
+  if (driverVersion.ok() && tileir->version) {
+    auto message =
+        getBytecodeDriverCompatibilityMessage(*tileir->version, *driverVersion);
     if (message) {
       return Status::NotSupported(driverStatus.message() + ". " + *message);
     }
@@ -113,14 +185,13 @@ Status CudaTileRuntimeKernel::launch(PackedArgs args, Workspace workspace,
                                      Stream stream) const {
   (void)workspace;
 
-  if (cubin_.empty()) {
+  if (activeDeviceCode().empty()) {
     return Status::NotSupported("No device code available");
   }
 
   if (!argPacker_ || !gridComputer_) {
     return Status::InvalidArgument(
-        "CudaTileRuntimeKernel: argPacker or gridComputer not set. "
-        "Call setArgPacker/setGridComputer after compilation.");
+        "CudaTileRuntimeKernel: argPacker or gridComputer not set");
   }
 
   // Wrap OSS PackedArgs in the generic accessor.
@@ -129,7 +200,7 @@ Status CudaTileRuntimeKernel::launch(PackedArgs args, Workspace workspace,
   // Pack arguments via strategy.
   int32_t numArgs = argPacker_->numKernelArgs(acc.size());
   llvm::SmallVector<int64_t, kMaxInlineKernelArgs> argValues(numArgs);
-  int32_t packed = argPacker_->packArgs(acc, argValues.data());
+  int32_t packed = argPacker_->packArgs(acc, argValues);
   if (packed < 0) {
     return Status::InvalidArgument(
         "Failed to pack kernel arguments: unsupported operand kind");

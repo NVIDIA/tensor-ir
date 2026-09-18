@@ -84,23 +84,8 @@ typedef enum MlirTensorIRArchPortability {
   MlirTensorIRArchPortabilityArchConditional = 2,
 } MlirTensorIRArchPortability;
 
-/// Selects the TensorIR-to-CUDA-Tile lowering strategy.
-typedef enum MlirTensorIRCudaTileCodegenStrategy {
-  /// Derive iteration-space maps using affine analysis.
-  MlirTensorIRCudaTileCodegenStrategyAffineMap = 0,
-  /// Derive access patterns using layout propagation.
-  MlirTensorIRCudaTileCodegenStrategyLayoutPropagation = 1,
-} MlirTensorIRCudaTileCodegenStrategy;
-
-/// Selects the requested CUDA Tile device artifact.
-typedef enum MlirTensorIRCudaTileArtifactKind {
-  /// Return TileIR bytecode for the deployment driver to JIT.
-  MlirTensorIRCudaTileArtifactKindTileIR = 0,
-  /// Request a cubin for an arch-conditional target. Internal builds use
-  /// libtileiras; OSS builds use a compatible `tileiras` from PATH. Return
-  /// TileIR bytecode when no compatible assembler is available.
-  MlirTensorIRCudaTileArtifactKindCubin = 1,
-} MlirTensorIRCudaTileArtifactKind;
+#define GEN_COMPILERINVOCATION_CAPI_DECLS
+#include "tensor_ir/Options/CompilerOptions.h.inc"
 
 /// Configures compilation of a TensorIR module for the CUDA Tile runtime.
 ///
@@ -170,6 +155,65 @@ typedef struct MlirTensorIRCudaTileCompileOptions {
   MlirTensorIRCudaTileArtifactKind artifactKind;
 
 } MlirTensorIRCudaTileCompileOptions;
+
+/// Validates cross-component option combinations.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRCompilerInvocationValidate(
+    MlirTensorIRCompilerInvocation invocation, MlirStringCallback errorCallback,
+    void *errorUserData);
+
+/// Sets the target the kernel is compiled for from the compute capability and
+/// portability pair callers choose it by.
+///
+/// The invocation stores the target as the single `kernel-target` spelling, so
+/// these accessors are the C mirror of that spelling's parse and print. Fails
+/// on a combination no target supports, leaving the invocation unchanged.
+MLIR_CAPI_EXPORTED MlirLogicalResult
+mlirTensorIRCompilerInvocationSetKernelTarget(
+    MlirTensorIRCompilerInvocation invocation, int32_t computeCapability,
+    MlirTensorIRArchPortability portability);
+
+/// Returns the compute capability of the target `invocation` names, or 0 if it
+/// names no valid target.
+MLIR_CAPI_EXPORTED int32_t
+mlirTensorIRCompilerInvocationGetKernelComputeCapability(
+    MlirTensorIRCompilerInvocation invocation);
+
+/// Returns the portability of the target `invocation` names, or
+/// `MlirTensorIRArchPortabilityFamilyPortable` if it names no valid target.
+MLIR_CAPI_EXPORTED MlirTensorIRArchPortability
+mlirTensorIRCompilerInvocationGetKernelArchPortability(
+    MlirTensorIRCompilerInvocation invocation);
+
+/// The CUDA Tile bytecode version to target. Unsupported versions are retained
+/// so that validation, cache-key calculation, and compilation reject the
+/// request instead of silently using the previous version. `tile-size` is the
+/// other CUDA Tile option the generated typed accessors cannot cover; these
+/// are its C API.
+MLIR_CAPI_EXPORTED void mlirTensorIRCompilerInvocationSetBytecodeVersion(
+    MlirTensorIRCompilerInvocation invocation,
+    MlirTensorIRBytecodeVersion version);
+
+/// Returns the configured bytecode version, including a complete numeric tuple
+/// for an unsupported version. Returns `{0, 0, 0}` for a null invocation or a
+/// malformed stored spelling.
+MLIR_CAPI_EXPORTED MlirTensorIRBytecodeVersion
+mlirTensorIRCompilerInvocationGetBytecodeVersion(
+    MlirTensorIRCompilerInvocation invocation);
+
+/// Sets the per-dimension kernel tile sizes to the `numSizes` extents `sizes`
+/// points at. `sizes` may be NULL when `numSizes` is zero.
+MLIR_CAPI_EXPORTED void mlirTensorIRCompilerInvocationSetTileSizes(
+    MlirTensorIRCompilerInvocation invocation, const int32_t *sizes,
+    size_t numSizes);
+
+/// Returns the per-dimension kernel tile sizes and writes their count to
+/// `numSizes`, which must not be NULL.
+///
+/// The returned array borrows storage `invocation` keeps owning: it is valid
+/// until the tile sizes are set again or the invocation is destroyed. Returns
+/// NULL when no tile size is set.
+MLIR_CAPI_EXPORTED const int32_t *mlirTensorIRCompilerInvocationGetTileSizes(
+    MlirTensorIRCompilerInvocation invocation, size_t *numSizes);
 
 //===----------------------------------------------------------------------===//
 // Runtime argument API.
@@ -371,6 +415,16 @@ MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramGetBytecode(
     MlirTensorIRProgram program, MlirStringCallback bytecodeCallback,
     void *bytecodeUserData, MlirStringCallback errorCallback,
     void *errorUserData);
+
+/// Sends the serialized artifact bytes for `program` to `bytesCallback`:
+/// the compiled binary plus its full launch metadata, as an opaque blob.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramSerialize(
+    MlirTensorIRProgram program, MlirStringCallback bytesCallback,
+    void *bytesUserData, MlirStringCallback errorCallback, void *errorUserData);
+
+/// Rebuilds a program from bytes produced by `mlirTensorIRProgramSerialize`.
+MLIR_CAPI_EXPORTED MlirTensorIRProgram mlirTensorIRProgramDeserialize(
+    MlirStringRef bytes, MlirStringCallback errorCallback, void *errorUserData);
 
 // NOLINTEND(modernize-use-using)
 

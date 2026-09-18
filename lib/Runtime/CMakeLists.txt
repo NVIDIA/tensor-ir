@@ -6,6 +6,9 @@ add_library(NVTensorIRRuntime STATIC
 
 tensor_ir_register_library(NVTensorIRRuntime)
 
+# KernelArgLayout stores PersistenceMode from the generated Options header.
+add_dependencies(NVTensorIRRuntime NVTensorIRCompilerOptionsIncGen)
+
 target_include_directories(NVTensorIRRuntime
   PUBLIC
     $<BUILD_INTERFACE:${TENSOR_IR_SOURCE_DIR}/include>
@@ -16,8 +19,10 @@ target_include_directories(NVTensorIRRuntime
 target_link_libraries(NVTensorIRRuntime
   PUBLIC
     NVTensorIR::CudaApi
+    NVTensorIR::Artifact
   PRIVATE
     CudaTileDialect
     CudaTileBytecodeWriter
     LLVMSupport
+    NVTensorIRTileIRAssembly
 )

@@ -4,25 +4,13 @@
 #ifndef TENSOR_IR_COMPILER_COMPILEOPTIONS_H
 #define TENSOR_IR_COMPILER_COMPILEOPTIONS_H
 
+#include "tensor_ir/Options/OptionsEnums.h"
 #include "tensor_ir/Support/Status.h"
 #include "tensor_ir/Utils/ComputeCapability.h"
-
-#include "llvm/ADT/StringRef.h"
 
 #include <string>
 
 namespace mlir::nv_tensor_ir {
-
-//===----------------------------------------------------------------------===//
-// Backend Selection
-//===----------------------------------------------------------------------===//
-
-enum class CompilerBackend {
-  Auto, // Auto-select based on graph analysis
-  CudaTile,
-};
-
-llvm::StringRef stringifyCompilerBackend(CompilerBackend backend);
 
 //===----------------------------------------------------------------------===//
 // Compilation Options

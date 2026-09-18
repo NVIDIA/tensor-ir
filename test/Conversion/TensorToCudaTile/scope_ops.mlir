@@ -10,7 +10,8 @@ module @moduloX {
 
 // CHECK-LABEL: module @moduloX {
 //  CHECK-NEXT:   cuda_tile.module @cuda_tile_moduloX {
-//  CHECK-NEXT:     entry @test_module_name() {
+//  CHECK-NEXT:     entry @test_module_name()
+//  CHECK-SAME:     optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 //  CHECK-NEXT:       return
 //  CHECK-NEXT:     }
 //  CHECK-NEXT:   }
@@ -26,7 +27,8 @@ module {
 
 //        CHECK: module {
 //  CHECK-LABEL:   cuda_tile.module @cuda_tile_module {
-//   CHECK-NEXT:     entry @test_module_no_name() {
+//   CHECK-NEXT:     entry @test_module_no_name()
+//   CHECK-SAME:     optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 1}> {
 //   CHECK-NEXT:       return
 //   CHECK-NEXT:     }
 //   CHECK-NEXT:   }

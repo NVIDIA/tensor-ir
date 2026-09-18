@@ -28,6 +28,8 @@ def TensorIR_Dialect : Dialect {
   }];
 
   let extraClassDeclaration = [{
+    void registerTypes();
+
     static StringRef getAlignmentAttrName() {
       return "nv_tensor_ir.alignment";
     }
@@ -36,12 +38,17 @@ def TensorIR_Dialect : Dialect {
       return "nv_tensor_ir.stride";
     }
 
+
     static StringRef getCostAttrName() {
       return "nv_tensor_ir.cost";
     }
 
     static StringRef getAllowTMAAttrName() {
       return "nv_tensor_ir.allow_tma";
+    }
+
+    static StringRef getBufferizedProgramAttrName() {
+      return "nv_tensor_ir.bufferized_program";
     }
 
     static StringRef getIterSpaceMapAttrName() {
@@ -95,8 +102,14 @@ def TensorIR_Dialect : Dialect {
 
   // Add this line when we define attributes in this dialect.
   let useDefaultAttributePrinterParser = 1;
+  // OSS has no dialect-defined types, so TableGen emits no type parser/printer
+  // bodies. Only declare the overrides when their type definitions are present.
   let hasRegionArgAttrVerify = 1;
   let hasRegionResultAttrVerify = 1;
+  let dependentDialects = [
+    "::mlir::gpu::GPUDialect",
+    "::mlir::ptr::PtrDialect"
+  ];
 }
 
 #endif // TENSOR_IR_DIALECT

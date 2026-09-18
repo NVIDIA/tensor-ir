@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from nv_tensor_ir import dsl as tir
+from nv_tensor_ir.runtime import Program
 from dsl_reference import evaluate_trace_reference
 from dsl_test_utils import (
     _assert_compile_error,
@@ -264,6 +265,26 @@ def test_add_kernel_ground_truth(profiling: bool) -> None:
     compiled = tir.compile(add_kernel, a, b, output=output, name="add_ground_truth")
     _require_runtime_launch()
     _run_kernel(compiled, a, b, output=output, profile=profiling)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output, a + b, rtol=1e-3, atol=1e-3)
+
+
+def test_serialize_deserialize_round_trip(tmp_path) -> None:
+    a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
+    b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
+    output = torch.empty_like(a)
+
+    compiled = tir.compile(add_kernel, a, b, output=output, name="serialize_smoke")
+    _require_runtime_launch()
+
+    # Mirror the intended cross-process usage: the compile-time process
+    # persists the serialized program to disk, and a separate runtime
+    # process reloads and launches it without recompiling.
+    program_path = tmp_path / "serialize_smoke.tirprogram"
+    program_path.write_bytes(compiled.program.serialize())
+    reloaded_program = Program.deserialize(program_path.read_bytes())
+
+    reloaded_program.launch(a, b, output)
     torch.cuda.synchronize()
     torch.testing.assert_close(output, a + b, rtol=1e-3, atol=1e-3)
 

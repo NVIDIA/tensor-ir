@@ -3532,27 +3532,20 @@ public:
                            : conversionState.getInsertPointForOp(op);
     rewriter.restoreInsertionPoint(insertPoint);
 
-    // Compute the tile shape for ops without tensor inputs.
-    if (isa<ConstantOp, SplatOp>(op)) {
-      // Get the tile shape from the iteration space map.
-      tileShape = getTileSizesForIterSpaceMap(
-          conversionState.getOutputIterSpaceMapForOperation(op),
-          conversionState.kernelInfo.tileSizes);
+    // Get the result tile shape from the operation's iteration space map.
+    tileShape = getTileSizesForIterSpaceMap(
+        conversionState.getOutputIterSpaceMapForOperation(op),
+        conversionState.kernelInfo.tileSizes);
 
-      if (auto tensorType = dyn_cast<ShapedType>(op->getResult(0).getType())) {
-        // Adjust tile sizes based on tensor shape - if a dimension is 1 in
-        // the tensor shape, use tile size 1. This handles reduced dimensions
-        // correctly.
-        auto tensorShape = tensorType.getShape();
-        for (size_t i = 0; i < tileShape.size() && i < tensorShape.size();
-             ++i) {
-          if (tensorShape[i] == 1) {
-            tileShape[i] = 1;
-          }
+    if (auto tensorType = dyn_cast<ShapedType>(op->getResult(0).getType())) {
+      // Adjust tile sizes based on tensor shape - if a dimension is 1 in the
+      // tensor shape, use tile size 1. This handles reduced dimensions.
+      auto tensorShape = tensorType.getShape();
+      for (size_t i = 0; i < tileShape.size() && i < tensorShape.size(); ++i) {
+        if (tensorShape[i] == 1) {
+          tileShape[i] = 1;
         }
       }
-    } else {
-      tileShape.clear();
     }
     return success();
   }
