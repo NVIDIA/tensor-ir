@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+@LIT_SITE_CFG_IN_HEADER@
+
+import sys
+
+config.llvm_tools_dir = lit_config.substitute("@LLVM_TOOLS_DIR@")
+config.llvm_build_mode = lit_config.substitute("@LLVM_BUILD_MODE@")
+config.tensor_ir_obj_root = "@TENSOR_IR_BINARY_DIR@"
+
+config.cuda_toolkit_path = "@LLVM_SOLID_COMPILER_NEXT_DIR@"
+
+# Let the main config do the real work.
+lit_config.load_config(config, "@TENSOR_IR_SOURCE_DIR@/test/Unit/lit.cfg.py")

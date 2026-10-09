@@ -14,6 +14,12 @@ if(TENSOR_IR_INCLUDE_TESTS)
     ${CMAKE_CURRENT_SOURCE_DIR}/lit.cfg.py
   )
 
+  configure_lit_site_cfg(
+    ${CMAKE_CURRENT_SOURCE_DIR}/Unit/lit.site.cfg.py.in
+    ${CMAKE_CURRENT_BINARY_DIR}/Unit/lit.site.cfg.py
+    MAIN_CONFIG
+    ${CMAKE_CURRENT_SOURCE_DIR}/Unit/lit.cfg.py
+    )
 
   set(MLIR_TEST_DEPENDS
     FileCheck
@@ -22,6 +28,7 @@ if(TENSOR_IR_INCLUDE_TESTS)
     tensor_ir-compiler
     tensor_ir-opt
     tensor_ir-tblgen
+    TensorIRUnitTests
   )
 
 

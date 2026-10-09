@@ -41,7 +41,7 @@ public:
     MLIR_RETURN_IF_ERROR(validateConstantOpLowerable(op));
 
     // Handle scalar constants (e.g. "constant 0.0 : f32").
-    if (!isa<TensorType>(op.getType())) {
+    if (!isa<RankedTensorType>(op.getType())) {
       auto tileType =
           cast<ShapedType>(getTypeConverter()->convertType(op.getType()));
       auto literal = dyn_cast_or_null<DenseTypedElementsAttr>(
@@ -206,8 +206,9 @@ public:
             op, "expected one converted value per operand");
       }
       Value value = converted.front();
-      operands.push_back(
-          isa<TensorType>(source.getType()) ? state.getTile(value) : value);
+      operands.push_back(isa<RankedTensorType>(source.getType())
+                             ? state.getTile(value)
+                             : value);
     }
 
     auto convertedType = cast<cuda_tile::TileType>(
@@ -412,7 +413,7 @@ LogicalResult validatePointwiseOpLowerable(Operation *op) {
 LogicalResult validateConstantOpLowerable(ConstantOp op) {
   // Scalar constants are handled by the pattern's scalar literal path; their
   // legality depends on the converted tile type, so defer to the pattern.
-  if (!isa<TensorType>(op.getType())) {
+  if (!isa<RankedTensorType>(op.getType())) {
     return success();
   }
   // Tensor-typed constants must be splats; any other dense literal is

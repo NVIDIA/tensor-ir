@@ -749,6 +749,39 @@ def test_compile_accepts_tensor_specs() -> None:
     )
 
 
+@pytest.mark.parametrize("dynamic_shape", [False, True])
+@pytest.mark.parametrize("alignment", [None, 16])
+def test_tensor_spec_alignment_in_compiled_mlir(
+    alignment: int | None, dynamic_shape: bool
+) -> None:
+    a = tir.TensorSpec((8, 8), dtype=tir.DataType.F32, alignment=alignment)
+    b = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
+    output = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
+    options = tir.CompileOptions()
+    if dynamic_shape:
+        options.tile_sizes = [8, 8]
+        options.codegen_strategy = tir.CodegenStrategy.AffineMap
+
+    compiled = tir.compile(
+        add_kernel,
+        a,
+        b,
+        output=output,
+        dynamic_shape=dynamic_shape,
+        options=options,
+        name="add_with_input_alignment",
+    )
+
+    mlir = _module_text(compiled)
+    if alignment is None:
+        assert "nv_tensor_ir.alignment" not in mlir
+    else:
+        tensor_type = "tensor<?x?xf32>" if dynamic_shape else "tensor<8x8xf32>"
+        assert f"{tensor_type} {{nv_tensor_ir.alignment = {alignment} : i64" in mlir
+        # Only the annotated input gets alignment, not the other input or output.
+        assert mlir.count("nv_tensor_ir.alignment") == 1
+
+
 def test_compile_accepts_numpy_dlpack_metadata(profiling: bool) -> None:
     np = pytest.importorskip("numpy")
 

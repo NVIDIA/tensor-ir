@@ -3,7 +3,6 @@
 
 add_mlir_tool(tensor_ir-compiler
   tensor_ir-compiler.cpp
-  test_options.cpp
   PARTIAL_SOURCES_INTENDED
 )
 
@@ -22,7 +21,10 @@ endforeach()
 target_link_libraries(tensor_ir-compiler
   PRIVATE
     NVTensorIR::Compiler
+    NVTensorIR::Runtime
     NVTensorIR::Reference
+    NVTensorIR::CompilerCLOptions
+    NVTensorIR::Support
 )
 
 mlir_check_all_link_libraries(tensor_ir-compiler)

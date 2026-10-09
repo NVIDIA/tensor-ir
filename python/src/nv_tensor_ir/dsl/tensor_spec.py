@@ -15,6 +15,9 @@ class TensorSpec:
     ``TensorSpec`` lets users compile from metadata without allocating a
     framework tensor. ``shape`` and ``stride`` are element counts, not bytes.
     If ``stride`` is omitted, a contiguous row-major stride is inferred.
+    ``stride_divisibility`` specifies optional per-dimension stride divisors
+    in elements; ``alignment`` specifies pointer alignment in bytes. Both are
+    forwarded to the concrete trace metadata without backend-specific inference.
 
     Example:
         ``tir.TensorSpec((8, 8), dtype=tir.DataType.F32)``
@@ -24,6 +27,8 @@ class TensorSpec:
     _: KW_ONLY
     dtype: DataType
     stride: tuple[int, ...] | None = None
+    stride_divisibility: tuple[int | None, ...] | None = None
+    alignment: int | None = None
 
     def __post_init__(self) -> None:
         parsed_shape = _shape_tuple(self.shape)

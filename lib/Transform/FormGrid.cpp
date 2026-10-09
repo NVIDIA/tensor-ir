@@ -11,10 +11,12 @@
 //    covering the total number of tiles in the flattened iteration space.
 // 2. Delinearization: Converts the 1D block index into multi-dimensional tile
 //    coordinates using column-major ordering.
-// 3. Tile materialization: Recursively traces backwards from each boundary StoreOp
-//    to produce fixed-size tile values:
-//    - Retargets untiled whole-tensor LoadOps to tiled LoadOps with concrete
-//      offsets, sizes, strides, alignments, and tile slice coordinates.
+// 3. Tile materialization: Recursively traces backward from each boundary
+//    bufferization.materialize_in_destination to produce fixed-size tile
+//    values:
+//    - Replaces bufferization.to_tensor inputs with tiled LoadOps having
+//      concrete offsets, sizes, strides, alignments, and tile slice
+//      coordinates.
 //    - Folds layout-modifying operations (ReshapeOp, TransposeOp, BroadcastOp,
 //      SliceOp) directly into access descriptors, eliminating them from the
 //      tiled computation DAG.
@@ -25,9 +27,9 @@
 //    - Tiles PointwiseOps by cloning them with concrete tile result types.
 //    - Prepares coarse tiles for ReduceOps and MatmulOps, attaching formation
 //      metadata for the downstream TileReductionsPass.
-// 4. Cleanup: Erases the original untiled operations and strips analysis-only
-//    attributes (layouts, iteration spaces, tile sizes) so downstream passes
-//    operate on explicit SSA values and types.
+// 4. Cleanup: Erases the bufferization bridges and dead untiled computation,
+//    and strips analysis-only attributes (layouts, iteration spaces, tile
+//    sizes) so downstream passes operate on explicit SSA values and types.
 
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Support/TCutegen.h"
@@ -35,12 +37,17 @@
 #include "tensor_ir/Utils/Utils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Ptr/IR/PtrOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Transforms/RegionUtils.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopedHashTable.h"
@@ -59,14 +66,15 @@ namespace {
 
 namespace tcg = mlir::nv_tensor_ir::tcutegen;
 
-/// Physical buffer pointer and descriptor metadata extracted from an untiled
-/// boundary LoadOp or StoreOp.
+/// Physical buffer and descriptor metadata for a boundary memref argument.
 ///
-/// Holds both the mixed static/dynamic attributes and SSA values from the
-/// boundary operation, along with a flattened list of dynamic descriptor values
-/// used by mapDynamicValues to resolve dynamic layout extents and strides.
+/// Holds mixed static/dynamic buffer metadata and a flattened list of dynamic
+/// descriptor values used by mapDynamicValues to resolve dynamic layout extents
+/// and strides.
 struct BoundaryAccess {
-  /// Base pointer to the underlying memory allocation.
+  /// Memref function argument bound to the boundary tensor.
+  Value buffer;
+  /// Base pointer to the buffer memory.
   Value base;
   /// Mixed static (IntegerAttr) and dynamic (SSA Value) buffer dimension sizes.
   SmallVector<OpFoldResult> sizes;
@@ -79,7 +87,7 @@ struct BoundaryAccess {
   /// Flattened sequence of dynamic sizes followed by dynamic strides, indexed
   /// by the dynamic-value mapping of a TensorSourceAttr.
   SmallVector<Value> dynamicValues;
-  /// Element type of the stored or loaded tensor.
+  /// Element type of the buffer.
   Type elementType;
 };
 
@@ -255,21 +263,78 @@ struct AccessMetadata {
   IntegerAttr alignment;
 };
 
-/// Extract descriptor metadata from a boundary LoadOp or StoreOp.
+/// Extracts descriptor metadata from a boundary memref function argument.
 ///
-/// Flattens the operation's dynamic sizes and strides into a single dynamicValues
-/// vector so they can be indexed by TensorSourceAttr's dynamic-value mapping.
-template <typename OpTy>
-static BoundaryAccess getBoundaryAccess(OpTy op) {
-  SmallVector<Value> dynamicValues(op.getSizes());
-  llvm::append_range(dynamicValues, op.getStrides());
-  return {op.getBase(),
-          op.getMixedSizes(),
-          op.getMixedStrides(),
-          op.getMixedOffset(),
-          op.getAlignmentAttr(),
-          std::move(dynamicValues),
-          op.getTile().getType().getElementType()};
+/// Static metadata is derived from the memref type. Emits
+/// `memref.extract_strided_metadata` for dynamic metadata when needed and
+/// `ptr.to_ptr` for the base pointer. Dynamic sizes and strides are flattened
+/// into `dynamicValues` for indexing by `TensorSourceAttr`'s dynamic-value
+/// mapping.
+static FailureOr<BoundaryAccess> getBoundaryAccess(OpBuilder &builder,
+                                                   func::FuncOp function,
+                                                   Value buffer,
+                                                   Operation *diagnosticOp) {
+  auto argument = dyn_cast<BlockArgument>(buffer);
+  auto type = dyn_cast<MemRefType>(buffer.getType());
+  if (!argument || argument.getOwner() != &function.getBody().front() ||
+      !type) {
+    return diagnosticOp->emitError(
+        "bufferized TensorIR boundary must be a memref function argument");
+  }
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (failed(type.getStridesAndOffset(strides, offset))) {
+    return diagnosticOp->emitError()
+           << "bufferized TensorIR boundary must be strided, but got " << type;
+  }
+  auto memorySpace =
+      dyn_cast_if_present<ptr::MemorySpaceAttrInterface>(type.getMemorySpace());
+  if (!memorySpace) {
+    return diagnosticOp->emitError()
+           << "bufferized TensorIR boundary must be in a pointer memory "
+              "space, but got "
+           << type;
+  }
+
+  memref::ExtractStridedMetadataOp metadata;
+  if (!type.hasStaticShape() || ShapedType::isDynamic(offset) ||
+      llvm::any_of(strides, ShapedType::isDynamic)) {
+    metadata = memref::ExtractStridedMetadataOp::create(
+        builder, diagnosticOp->getLoc(), buffer);
+  }
+  auto pointerType = ptr::PtrType::get(builder.getContext(), memorySpace);
+  BoundaryAccess access;
+  access.buffer = buffer;
+  access.base = ptr::ToPtrOp::create(builder, diagnosticOp->getLoc(),
+                                     pointerType, buffer);
+  access.elementType = type.getElementType();
+  for (auto [dimension, size] : llvm::enumerate(type.getShape())) {
+    if (!ShapedType::isDynamic(size)) {
+      access.sizes.push_back(builder.getIndexAttr(size));
+      continue;
+    }
+    access.sizes.push_back(metadata.getSizes()[dimension]);
+    access.dynamicValues.push_back(metadata.getSizes()[dimension]);
+  }
+  for (auto [dimension, stride] : llvm::enumerate(strides)) {
+    if (!ShapedType::isDynamic(stride)) {
+      access.strides.push_back(builder.getIndexAttr(stride));
+      continue;
+    }
+    access.strides.push_back(metadata.getStrides()[dimension]);
+    access.dynamicValues.push_back(metadata.getStrides()[dimension]);
+  }
+  access.offset = ShapedType::isDynamic(offset)
+                      ? OpFoldResult(metadata.getOffset())
+                      : OpFoldResult(builder.getIndexAttr(offset));
+
+  auto alignment = function.getArgAttrOfType<IntegerAttr>(
+      argument.getArgNumber(), TensorIRDialect::getAlignmentAttrName());
+  int64_t elementBytes =
+      std::max(1u, type.getElementType().getIntOrFloatBitWidth() / 8);
+  access.alignment =
+      builder.getI64IntegerAttr(alignment ? alignment.getInt() : elementBytes);
+  return access;
 }
 
 /// Decoded logical view of a tensor after resolving its CuTe layout against the
@@ -782,16 +847,21 @@ private:
   SmallVector<Entry> entries;
 };
 
-/// Recursively traces the untiled TensorIR computation backwards from a result
-/// store and materializes fixed-size tile operations inside the GPU block grid.
+/// Recursively traces the untiled TensorIR computation backward from results
+/// and materializes fixed-size tile operations inside the GPU block grid.
 ///
-/// Traversal is backward-recursive: starting from StoreOp tile operands, each
+/// Traversal is backward-recursive: starting from the output sources, each
 /// operation requests its inputs at specific tile coordinates and shapes.
 /// This ensures operations inside control-flow branches (e.g. ConcatenateOp)
 /// are materialized strictly inside their respective branches rather than
 /// speculated before them.
 class TileMaterializer {
 public:
+  /// Maps each boundary bufferization.to_tensor result to its buffer metadata.
+  explicit TileMaterializer(
+      const llvm::DenseMap<Value, BoundaryAccess> &inputAccesses)
+      : inputAccesses(inputAccesses) {}
+
   /// Recursively materialize a tile of `value` conforming to `expectedLayout`
   /// at the given `coordinates` with shape `tileShape`.
   FailureOr<Value> materialize(Value value,
@@ -799,12 +869,12 @@ public:
                                ArrayRef<Value> coordinates,
                                ArrayRef<int64_t> tileShape,
                                OpBuilder &builder) {
-    if (!isa<TensorType>(value.getType())) {
+    if (!isa<RankedTensorType>(value.getType())) {
       return materializeScalar(value, builder);
     }
 
-    if (auto load = value.getDefiningOp<LoadOp>()) {
-      return loadSource(load, expectedLayout, coordinates, tileShape, builder);
+    if (auto input = value.getDefiningOp<bufferization::ToTensorOp>()) {
+      return loadSource(input, expectedLayout, coordinates, tileShape, builder);
     }
     if (auto argument = dyn_cast<BlockArgument>(value)) {
       return emitError(argument.getLoc())
@@ -865,7 +935,7 @@ public:
 
     IRMapping mapping;
     for (auto [index, operand] : llvm::enumerate(op->getOperands())) {
-      if (!isa<TensorType>(operand.getType())) {
+      if (!isa<RankedTensorType>(operand.getType())) {
         MLIR_ASSIGN_OR_RETURN(Value scalar,
                               materializeScalar(operand, builder));
         mapping.map(operand, scalar);
@@ -887,7 +957,8 @@ public:
         return constant.emitError(
             "grid formation requires tensor constants to be splats");
       }
-      Type elementType = cast<TensorType>(constant.getType()).getElementType();
+      Type elementType =
+          cast<RankedTensorType>(constant.getType()).getElementType();
       auto resultType = RankedTensorType::get(tileShape, elementType);
       DenseElementsAttr constantValue =
           elementType.isFloat()
@@ -906,7 +977,7 @@ public:
     removeAnalysisAttrs(clone);
     for (auto [original, result] :
          llvm::zip(op->getResults(), clone->getResults())) {
-      if (auto tensorType = dyn_cast<TensorType>(original.getType())) {
+      if (auto tensorType = dyn_cast<RankedTensorType>(original.getType())) {
         result.setType(
             RankedTensorType::get(tileShape, tensorType.getElementType()));
       }
@@ -1044,14 +1115,14 @@ private:
 
     IRMapping mapping;
     for (Value operand : op->getOperands()) {
-      if (isa<TensorType>(operand.getType())) {
+      if (isa<RankedTensorType>(operand.getType())) {
         return op->emitError("scalar setup cannot depend on a tensor operand");
       }
       MLIR_ASSIGN_OR_RETURN(Value scalar, materializeScalar(operand, builder));
       mapping.map(operand, scalar);
     }
     if (llvm::any_of(op->getResultTypes(),
-                     [](Type type) { return isa<TensorType>(type); })) {
+                     [](Type type) { return isa<RankedTensorType>(type); })) {
       return op->emitError("scalar setup produced a tensor result");
     }
     Operation *clone = builder.clone(*op, mapping);
@@ -1069,37 +1140,42 @@ private:
     return result;
   }
 
-  /// Retarget an untiled boundary LoadOp to a tiled LoadOp.
+  /// Replaces an untiled boundary input with a tiled LoadOp.
   ///
   /// Decodes the logical layout descriptor, constructs AccessMetadata with
   /// adjusted offset and alignment, clamps coordinates to 0 for broadcast
   /// dimensions (stride == 0), and emits a fixed-shape tiled LoadOp.
-  FailureOr<Value> loadSource(LoadOp load,
+  FailureOr<Value> loadSource(bufferization::ToTensorOp input,
                               LayoutSourceAttrInterface expectedLayout,
                               ArrayRef<Value> coordinates,
                               ArrayRef<int64_t> tileShape, OpBuilder &builder) {
     TensorSourceAttr source = getSingleTensorSource(expectedLayout);
     if (!source) {
-      return load.emitError("input access does not have one concrete source "
-                            "layout");
+      return input.emitError("input access does not have one concrete source "
+                             "layout");
     }
-    if (Value found = loadedValues.lookup(load.getResult(), source, coordinates,
-                                          tileShape)) {
+    if (Value found = loadedValues.lookup(input.getResult(), source,
+                                          coordinates, tileShape)) {
       return found;
     }
     if (source.getShape().size() != tileShape.size()) {
-      return load.emitError()
+      return input.emitError()
              << "iteration-space source rank " << source.getShape().size()
              << " does not match tile rank " << tileShape.size();
     }
 
-    Location loc = load.getLoc();
-    BoundaryAccess access = getBoundaryAccess(load);
+    Location loc = input.getLoc();
+    auto it = inputAccesses.find(input.getResult());
+    if (it == inputAccesses.end()) {
+      return input.emitError("input is not a boundary of the bufferized "
+                             "TensorIR function");
+    }
+    const BoundaryAccess &access = it->second;
     MLIR_ASSIGN_OR_RETURN(LogicalDescriptor descriptor,
-                          decodeLogicalDescriptor(source, access, load));
+                          decodeLogicalDescriptor(source, access, input));
     MLIR_ASSIGN_OR_RETURN(
         AccessMetadata metadata,
-        createAccessMetadata(builder, load, source, access, descriptor));
+        createAccessMetadata(builder, input, source, access, descriptor));
     SmallVector<OpFoldResult> sourceCoordinates =
         getAsOpFoldResult(coordinates);
     auto sourceLayout = source.getCuteLayout();
@@ -1110,13 +1186,12 @@ private:
         sourceCoordinates[dimension] = builder.getIndexAttr(0);
       }
     }
-    auto resultType =
-        RankedTensorType::get(tileShape, load.getType().getElementType());
+    auto resultType = RankedTensorType::get(tileShape, access.elementType);
     Value result = LoadOp::create(
         builder, loc, resultType, access.base, metadata.offset, metadata.sizes,
         metadata.strides, sourceCoordinates, metadata.alignment,
         /*padding=*/TilePaddingAttr{});
-    loadedValues.insert(load.getResult(), source, coordinates, tileShape,
+    loadedValues.insert(input.getResult(), source, coordinates, tileShape,
                         result);
     return result;
   }
@@ -1193,7 +1268,7 @@ private:
           arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ult,
                                 branchCoordinates[dimension], bound);
       auto resultType = RankedTensorType::get(
-          tileShape, cast<TensorType>(concat.getType()).getElementType());
+          tileShape, cast<RankedTensorType>(concat.getType()).getElementType());
       auto ifOp = scf::IfOp::create(builder, loc, TypeRange{resultType},
                                     beforeBoundary, /*withElseRegion=*/true);
       {
@@ -1275,7 +1350,8 @@ private:
 
     for (auto [original, cloned] :
          llvm::zip(op->getResults(), clone->getResults())) {
-      Type elementType = cast<TensorType>(original.getType()).getElementType();
+      Type elementType =
+          cast<RankedTensorType>(original.getType()).getElementType();
       cloned.setType(RankedTensorType::get(plan.rawResultShape, elementType));
       Value result = cloned;
       if (plan.rawResultShape != plan.unbroadcastShape) {
@@ -1407,6 +1483,7 @@ private:
     llvm::ScopedHashTableScope<Value, Value> scalars;
   };
 
+  const llvm::DenseMap<Value, BoundaryAccess> &inputAccesses;
   llvm::ScopedHashTable<Value, Value> computedScalars;
   llvm::ScopedHashTableScope<Value, Value> scalarScope{computedScalars};
   TileCache computedValues;
@@ -1418,42 +1495,36 @@ private:
 /// Execution proceeds in six phases:
 /// 1. Validation: Verify the function has bufferized_program attribute, a single
 ///    entry block, valid outputs, iteration space, and tile size.
-/// 2. Output view decoding: Resolve logical views and decode descriptors for
-///    all boundary StoreOps. Collect dynamic extents if any dimension is dynamic.
+/// 2. Boundary decoding: Read metadata for each boundary buffer, resolve
+///    logical output views, and decode their descriptors. Collect dynamic
+///    extents when any dimension is dynamic.
 /// 3. Grid sizing: Compute tile counts per dimension (ceil(extent / tile)) and
 ///    flatten into a 1D totalTiles count with static overflow checking.
 /// 4. Launch construction: Emit a 1D scf.forall mapped to #gpu.block<x> at the
 ///    end of the entry block.
 /// 5. Body materialization: Inside the forall body, delinearize the linear block
-///    ID into multi-dimensional coordinates, run TileMaterializer backwards
-///    from each StoreOp, and emit tiled StoreOps.
-/// 6. Cleanup: Erase original untiled operations in reverse topological order
+///    ID into multi-dimensional coordinates, run TileMaterializer backward
+///    from each output, and emit tiled StoreOps.
+/// 6. Cleanup: Erase the bufferization bridges and dead untiled computation,
 ///    and remove compiler analysis attributes.
 static LogicalResult formGrid(func::FuncOp function) {
   if (!function->hasAttr(TensorIRDialect::getBufferizedProgramAttrName())) {
     return success();
   }
 
-  // === Phase 1: Validate function structure, boundary stores, and layout attributes ===
+  // === Phase 1: Validate function structure, boundary outputs, and layout attributes ===
   if (function.isExternal() || !function.getBody().hasOneBlock()) {
     return function.emitError(
         "bufferized TensorIR program must define one entry block");
   }
   Block &entry = function.getBody().front();
-  SmallVector<StoreOp> outputs;
-  SmallVector<Operation *> untiledOps;
-  for (Operation &op : entry) {
-    if (auto store = dyn_cast<StoreOp>(op)) {
-      outputs.push_back(store);
-    }
-    if (op.getName().getDialectNamespace() ==
-        TensorIRDialect::getDialectNamespace()) {
-      untiledOps.push_back(&op);
-    }
-  }
+  SmallVector<bufferization::ToTensorOp> inputs(
+      entry.getOps<bufferization::ToTensorOp>());
+  SmallVector<bufferization::MaterializeInDestinationOp> outputs(
+      entry.getOps<bufferization::MaterializeInDestinationOp>());
   if (outputs.empty()) {
-    return function.emitError(
-        "grid formation requires at least one TensorIR store");
+    return function.emitError("grid formation requires at least one "
+                              "bufferization.materialize_in_destination");
   }
 
   auto rootLayout = function->getAttrOfType<LayoutSourceAttrInterface>(
@@ -1515,14 +1586,31 @@ static LogicalResult formGrid(func::FuncOp function) {
     resultLayouts.push_back(rootLayout);
   }
 
-  // === Phase 2: Resolve logical views and decode descriptors for output stores ===
+  // === Phase 2: Read boundary metadata and decode output descriptors ===
+  llvm::DenseMap<Value, BoundaryAccess> inputAccesses;
+  for (bufferization::ToTensorOp input : inputs) {
+    OpBuilder builder(input);
+    MLIR_ASSIGN_OR_RETURN(
+        BoundaryAccess access,
+        getBoundaryAccess(builder, function, input.getBuffer(), input));
+    inputAccesses.try_emplace(input.getResult(), std::move(access));
+  }
+
   SmallVector<BoundaryAccess> outputAccesses;
   SmallVector<TensorSourceAttr> outputViews;
   SmallVector<LogicalDescriptor> outputDescriptors;
   outputAccesses.reserve(outputs.size());
   outputViews.reserve(outputs.size());
   for (auto [index, output] : llvm::enumerate(outputs)) {
-    outputAccesses.push_back(getBoundaryAccess(output));
+    if (output->getNumResults() != 0) {
+      return output.emitError(
+          "bufferized TensorIR outputs must materialize into a memref");
+    }
+    OpBuilder builder(output);
+    MLIR_ASSIGN_OR_RETURN(
+        BoundaryAccess access,
+        getBoundaryAccess(builder, function, output.getDest(), output));
+    outputAccesses.push_back(std::move(access));
     MLIR_ASSIGN_OR_RETURN(TensorSourceAttr view,
                           getOutputView(function, outputAccesses.back(), index,
                                         rootShape, resultViews));
@@ -1545,10 +1633,9 @@ static LogicalResult formGrid(func::FuncOp function) {
   }
 
   // === Phase 3: Compute tile counts per dimension and flattened grid size ===
-  // Buffer metadata for later results may be materialized after an earlier
-  // store. Build the grid at the terminator so every boundary pointer and
-  // dynamic descriptor value dominates the tiled body. The untiled TensorIR
-  // computation is erased once materialization succeeds.
+  // Build the grid before the terminator so that metadata extracted at every
+  // bridge dominates the tiled body. The untiled TensorIR computation is
+  // erased once materialization succeeds.
   OpBuilder entryBuilder(function.getBody().front().getTerminator());
   SmallVector<OpFoldResult> tileCounts;
   tileCounts.reserve(rootShape.size());
@@ -1611,12 +1698,13 @@ static LogicalResult formGrid(func::FuncOp function) {
         // Delinearize 1D block ID to multi-dimensional tile coordinates.
         SmallVector<Value> coordinates =
             delinearize(builder, loc, bodyArguments.front(), tileCounts);
-        TileMaterializer materializer;
+        TileMaterializer materializer(inputAccesses);
 
-        // Recursively materialize tiled compute graph backwards from each store.
+        // Recursively materialize the tiled compute graph backward from each
+        // output.
         for (auto [index, output] : llvm::enumerate(outputs)) {
           FailureOr<Value> tiledResult =
-              materializer.materialize(output.getTile(), resultLayouts[index],
+              materializer.materialize(output.getSource(), resultLayouts[index],
                                        coordinates, tileShape, builder);
           if (failed(tiledResult)) {
             bodyStatus = failure();
@@ -1641,9 +1729,12 @@ static LogicalResult formGrid(func::FuncOp function) {
   }
 
   // === Phase 5: Clean up untiled operations and strip analysis attributes ===
-  for (Operation *op : llvm::reverse(untiledOps)) {
-    op->erase();
+  for (bufferization::MaterializeInDestinationOp output : outputs) {
+    output->erase();
   }
+  IRRewriter rewriter(function.getContext());
+  eliminateTriviallyDeadOps(rewriter, function.getBody(),
+                            /*includeNestedRegions=*/false);
   removeAnalysisAttrs(function);
   function->removeAttr(TensorIRDialect::getBufferizedProgramAttrName());
   return success();

@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <cassert>
 #include <optional>
-#include <string>
 
 namespace mlir::nv_tensor_ir::backend::cuda_tile {
 

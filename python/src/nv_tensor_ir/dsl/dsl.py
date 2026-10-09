@@ -272,6 +272,8 @@ def _tensor_info_from_value(value: object, name: str) -> TensorInfo:
         dtype=spec.dtype,
         shape=spec.shape,
         stride=spec.stride,
+        stride_divisibility=spec.stride_divisibility,
+        alignment=spec.alignment,
     )
 
 

@@ -36,8 +36,8 @@ struct TestTileAnalyzerPass
 
       // Find a reduction operation to analyze
       graphOp.walk([&](ReduceOp reduceOp) {
-        auto inputType = llvm::dyn_cast<nv_tensor_ir::TensorType>(
-            reduceOp.getInput().getType());
+        auto inputType =
+            llvm::dyn_cast<RankedTensorType>(reduceOp.getInput().getType());
         if (!inputType || !inputType.hasStaticShape()) {
           return;
         }

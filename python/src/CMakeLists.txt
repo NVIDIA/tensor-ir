@@ -14,10 +14,12 @@ declare_mlir_python_sources(TensorIRPythonPublicSources
     runtime.py
   SOURCES_GLOB
     dsl/*.py
+    tuner/*.py
 )
 
 set(_tensor_ir_python_dialect_dependencies
   "${TENSOR_IR_SOURCE_DIR}/include/tensor_ir/Dialect/TensorOps.td"
+  "${TENSOR_IR_SOURCE_DIR}/include/tensor_ir/Dialect/TensorOpsBase.td"
   "${TENSOR_IR_SOURCE_DIR}/include/tensor_ir/Dialect/TensorAttrs.td"
   "${TENSOR_IR_SOURCE_DIR}/include/tensor_ir/Dialect/TensorTypes.td"
 )
@@ -39,4 +41,3 @@ declare_mlir_dialect_python_bindings(
   DEPENDS
     ${_tensor_ir_python_dialect_dependencies}
 )
-

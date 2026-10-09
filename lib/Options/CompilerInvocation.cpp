@@ -3,10 +3,8 @@
 
 #include "tensor_ir/Options/Options.h"
 
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/xxhash.h"
 
 namespace mlir::nv_tensor_ir {
 
@@ -81,6 +79,16 @@ Status CompilerInvocation::validate() const {
   }
 
   return Status::Ok();
+}
+
+std::string CompilerInvocation::getCudaToolkitPath() const {
+  if (!codegen.cudaToolkitPath.empty()) {
+    return codegen.cudaToolkitPath;
+  }
+  if (char const *cudaRoot = std::getenv("CUDA_ROOT")) {
+    return cudaRoot;
+  }
+  return "";
 }
 
 } // namespace mlir::nv_tensor_ir

@@ -7,8 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef TENSOR_IR_DIALECT_TENSOR_ATTR_INTERFACES_TD
-#define TENSOR_IR_DIALECT_TENSOR_ATTR_INTERFACES_TD
+#ifndef TENSORIR_DIALECT_TENSORATTRINTERFACES_TD
+#define TENSORIR_DIALECT_TENSORATTRINTERFACES_TD
 
 include "mlir/IR/OpBase.td"
 
@@ -80,4 +80,4 @@ def LayoutSourceAttrInterface : AttrInterface<"LayoutSourceAttrInterface"> {
   ];
 }
 
-#endif // TENSOR_IR_DIALECT_TENSOR_ATTR_INTERFACES_TD
+#endif // TENSORIR_DIALECT_TENSORATTRINTERFACES_TD

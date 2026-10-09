@@ -2,36 +2,35 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "tensor_ir/Compiler/CudaTile/Pipelines.h"
-#include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTile.h"
-#include "tensor_ir/Dialect/TensorIR.h"
+#include "tensor_ir/Options/Options.h"
 #include "tensor_ir/Registration/Registration.h"
-#include "tensor_ir/Transform/Passes.h"
+#include "tensor_ir/Support/TIROverrideOptions.h"
 
-#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Pass/PassOptions.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
-#include "mlir/Transforms/Passes.h"
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/ErrorHandling.h"
 
 #ifdef TENSOR_IR_INCLUDE_TESTS
 #include "../test/lib/Registration/RegisterPasses.h"
 #endif
-
 using namespace llvm;
 using namespace mlir;
 
 namespace {
-struct TensorToCudaTilePipelineCLOptions
-    : public PassPipelineOptions<TensorToCudaTilePipelineCLOptions> {
+
+struct TestTensorToCudaTileOptions
+    : public PassPipelineOptions<TestTensorToCudaTileOptions> {
   PassOptions::ListOption<int32_t> tileSize{
       *this, "tile-size", llvm::cl::desc("A list of integers for tile size"),
       llvm::cl::list_init<int32_t>({})};
   PassOptions::Option<int64_t> reductionTileSize{
       *this, "reduction-tile-size",
-      llvm::cl::desc("Tile size for contracting dimensions"),
-      llvm::cl::init(nv_tensor_ir::kDefaultReductionTileSize)};
+      llvm::cl::desc(
+          "Tile size for contracting dimensions in layout propagation"),
+      llvm::cl::init(nv_tensor_ir::CudaTileOptions().reductionTileSize)};
   PassOptions::Option<nv_tensor_ir::PersistenceMode> persistence{
       *this, "persistence", llvm::cl::desc("Kernel persistence mode."),
       llvm::cl::init(nv_tensor_ir::PersistenceMode::None),
@@ -48,22 +47,53 @@ struct TensorToCudaTilePipelineCLOptions
       llvm::cl::desc("Target occupancy for persistent kernels."),
       llvm::cl::init(1)};
 };
-} // namespace
 
-static void buildTensorToCudaTileConversionPassPipeline(
-    OpPassManager &pm, const TensorToCudaTilePipelineCLOptions &opts) {
-  nv_tensor_ir::TensorToCudaTilePipelineOptions options;
-  options.tileSize.assign(opts.tileSize.begin(), opts.tileSize.end());
-  options.reductionTileSize = opts.reductionTileSize;
-  options.persistence = opts.persistence;
-  options.smCount = opts.smCount;
-  options.occupancy = opts.occupancy;
-  options.codegenStrategy =
+nv_tensor_ir::CompilerInvocation
+getCudaTileConversionOptions(const TestTensorToCudaTileOptions &opts) {
+  nv_tensor_ir::CompilerInvocation options;
+  options.codegen.tileSize.assign(opts.tileSize.begin(), opts.tileSize.end());
+  options.cudaTile.reductionTileSize = opts.reductionTileSize;
+  options.cudaTile.persistenceMode = opts.persistence;
+  options.cudaTile.smCount = opts.smCount;
+  options.cudaTile.occupancy = opts.occupancy;
+  options.cudaTile.codegenStrategy =
       nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation;
-  nv_tensor_ir::buildTensorToCudaTileConversionPipeline(pm, options);
+  return options;
 }
 
-static void registerToolPipelines() {
+nv_tensor_ir::Status buildTensorToCudaTileConversionPassPipeline(
+    OpPassManager &pm, const TestTensorToCudaTileOptions &opts) {
+  nv_tensor_ir::CompilerInvocation options = getCudaTileConversionOptions(opts);
+  return nv_tensor_ir::buildTensorToCudaTileConversionPipeline(pm, options);
+}
+
+template <typename Options>
+void registerCheckedPipeline(StringRef name, StringRef description,
+                             nv_tensor_ir::Status (*builder)(OpPassManager &,
+                                                             const Options &)) {
+  registerPassPipeline(
+      name, description,
+      [builder](OpPassManager &pm, StringRef text,
+                llvm::function_ref<LogicalResult(const Twine &)> errorHandler) {
+        Options options;
+        if (failed(options.parseFromString(text))) {
+          return failure();
+        }
+        auto status = builder(pm, options);
+        if (!status.ok()) {
+          return errorHandler(status.message());
+        }
+        return success();
+      },
+      [](llvm::function_ref<void(const mlir::detail::PassOptions &)> handler) {
+        handler(Options());
+      });
+}
+
+} // namespace
+
+namespace mlir::nv_tensor_ir::test {
+void registerTestLoweringPipelines() {
 
   // Layout propagation pipeline
   // Pass ordering is critical and must be preserved:
@@ -78,27 +108,28 @@ static void registerToolPipelines() {
   // 7. TileReductionsPass: Materializes contraction/persistence loops
   // 8. OutlineKernelPass: Outlines the mapped forall body
   // 9. TensorToCudaTileConversion: Converts the explicit program to CudaTile
-  PassPipelineRegistration<TensorToCudaTilePipelineCLOptions>(
+  registerCheckedPipeline<TestTensorToCudaTileOptions>(
       "layout-propagation-pipeline",
       "Pipeline to convert TensorIR to CudaTile using layout propagation",
       buildTensorToCudaTileConversionPassPipeline);
-
-  mlir::nv_tensor_ir::registerTensorToCudaTileConversionPasses();
 }
+} // namespace mlir::nv_tensor_ir::test
 
 int main(int argc, char **argv) {
   DialectRegistry registry;
   mlir::nv_tensor_ir::registerDialects(registry);
-
-  registerToolPipelines();
-
+  mlir::nv_tensor_ir::registerPasses();
+  nv_tensor_ir::test::registerTestLoweringPipelines();
 #ifdef TENSOR_IR_INCLUDE_TESTS
   mlir::nv_tensor_ir::test::registerAllPasses();
 #endif
 
-  mlir::nv_tensor_ir::registerNVTensorIRTransformPasses();
-  mlir::registerTransformsPasses();
-
-  return mlir::asMainReturnCode(mlir::MlirOptMain(
-      argc, argv, "Tensor IR optimizer test driver\n", registry));
+  const std::string helpHeader =
+      mlir::registerCLIOptions("Tensor IR optimizer test driver\n", registry);
+  mlir::nv_tensor_ir::TIRCommandLineOverride overriddenArgv(argc, argv);
+  auto [inputFilename, outputFilename] = mlir::parseCLIOptions(
+      overriddenArgv.argc(), overriddenArgv.argv(), helpHeader);
+  return mlir::asMainReturnCode(
+      mlir::MlirOptMain(overriddenArgv.argc(), overriddenArgv.argv(),
+                        inputFilename, outputFilename, registry));
 }

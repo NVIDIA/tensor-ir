@@ -34,7 +34,7 @@ SmallVector<int64_t> detail::getFlatTensorShape(const tcutegen::Shape &shape) {
   return result;
 }
 
-tcutegen::Shape getShapeRef(TensorType tensorType) {
+tcutegen::Shape getShapeRef(RankedTensorType tensorType) {
   tcutegen::Shape shape;
   for (int64_t dim : tensorType.getShape()) {
     if (ShapedType::isDynamic(dim)) {
@@ -53,7 +53,7 @@ static LogicalResult verifyTensorSignatureAttribute(Operation *op, Type type,
                                                     bool isInput) {
   StringRef attrName = attr.getName().strref();
   StringRef displayName = attrName.rsplit('.').second;
-  auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(type);
+  auto tensorType = dyn_cast<RankedTensorType>(type);
 
   auto requireTensorType = [&]() -> LogicalResult {
     if (tensorType) {
@@ -65,7 +65,8 @@ static LogicalResult verifyTensorSignatureAttribute(Operation *op, Type type,
   };
 
   if (attrName == TensorIRDialect::getAlignmentAttrName()) {
-    if (failed(requireTensorType())) {
+    // Memref arguments in bufferized functions also carry alignment attributes.
+    if (!isa<MemRefType>(type) && failed(requireTensorType())) {
       return failure();
     }
     auto alignment = dyn_cast<IntegerAttr>(attr.getValue());

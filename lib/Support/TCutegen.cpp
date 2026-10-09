@@ -70,22 +70,10 @@ std::optional<int64_t> consumeLeadingInteger(llvm::StringRef &str) {
   return parseInteger(valueStr);
 }
 
-RecursiveDimValues makeRecursiveValues(ArrayRef<DimValue> values) {
-  RecursiveDimValues recursiveValues;
-  recursiveValues.reserve(values.size());
-  for (DimValue value : values) {
-    recursiveValues.emplace_back(value);
-  }
-  return recursiveValues;
-}
-
 RecursiveDimValue makeRecursiveValue(RecursiveDimValues values) {
-  std::vector<RecursiveDimValue> nestedValues;
-  nestedValues.reserve(values.size());
-  for (RecursiveDimValue &value : values) {
-    nestedValues.push_back(std::move(value));
-  }
-  return RecursiveDimValue(std::move(nestedValues));
+  return RecursiveDimValue(
+      std::vector<RecursiveDimValue>(std::make_move_iterator(values.begin()),
+                                     std::make_move_iterator(values.end())));
 }
 
 std::string valueToString(const RecursiveDimValue &value);
@@ -471,25 +459,6 @@ std::optional<RecursiveDimValues> takeValues(ArrayRef<RecursiveDimValue> values,
   return result;
 }
 
-bool hasValidCoordValues(const RecursiveDimValue &value) {
-  if (detail::has_error(value)) {
-    return false;
-  }
-  if (value.isLeaf()) {
-    const DimValue &coord = value.getLeaf();
-    return !coord.isStatic() || coord.as_int() >= 0;
-  }
-  return llvm::all_of(value.getValues(), [](const RecursiveDimValue &nested) {
-    return hasValidCoordValues(nested);
-  });
-}
-
-bool hasValidCoordValues(ArrayRef<RecursiveDimValue> values) {
-  return llvm::all_of(values, [](const RecursiveDimValue &value) {
-    return hasValidCoordValues(value);
-  });
-}
-
 DimValue computeLayoutOffset(const RecursiveDimValue &coord,
                              const RecursiveDimValue &stride) {
   if (detail::has_error(coord) || detail::has_error(stride)) {
@@ -585,8 +554,6 @@ RecursiveDimValue::RecursiveDimValue(std::vector<RecursiveDimValue> values)
 RecursiveDimValue::RecursiveDimValue(CgErrorT)
     : leaf(true), value(DimValue(CgErrorT{})), has_error_(true) {}
 
-bool RecursiveDimValue::isLeaf() const { return leaf; }
-
 const DimValue &RecursiveDimValue::getLeaf() const {
   assert(isLeaf() && "expected a scalar dimension value");
   return value;
@@ -600,8 +567,6 @@ llvm::ArrayRef<RecursiveDimValue> RecursiveDimValue::getValues() const {
 std::string RecursiveDimValue::toString() const {
   return has_error(*this) ? "error_t" : valueToString(*this);
 }
-
-size_t RecursiveDimValue::rank() const { return isLeaf() ? 1 : values.size(); }
 
 bool RecursiveDimValue::isStatic() const {
   if (has_error(*this)) {
@@ -859,472 +824,202 @@ mlir::Diagnostic &operator<<(mlir::Diagnostic &diag,
 
 } // namespace detail
 
-// NOLINTNEXTLINE(performance-unnecessary-value-param)
-Shape::Shape(SmallVector<detail::DimValue> values)
-    : Shape(makeRecursiveValues(values)) {}
+template <SequenceKind K>
+DimSequence<K>::DimSequence() : has_error_(K == SequenceKind::Coord) {}
 
-Shape::Shape() = default;
-
-Shape::Shape(detail::RecursiveDimValues values) : values(std::move(values)) {
-  has_error_ = !hasValidShapeDimensions(this->values);
+template <SequenceKind K>
+DimSequence<K>::DimSequence(detail::RecursiveDimValues values)
+    : values(std::move(values)) {
+  has_error_ = !validDimensions();
 }
 
-Shape::Shape(detail::RecursiveDimValue value) : scalarRoot(value.isLeaf()) {
-  has_error_ = !hasValidShapeDimensions(value);
+template <SequenceKind K>
+DimSequence<K>::DimSequence(detail::RecursiveDimValue value)
+    : scalarRoot(value.isLeaf()) {
   if (scalarRoot) {
     values.push_back(std::move(value));
-    return;
+  } else {
+    values.assign(value.getValues().begin(), value.getValues().end());
   }
-
-  llvm::ArrayRef<detail::RecursiveDimValue> nestedValues = value.getValues();
-  values.assign(nestedValues.begin(), nestedValues.end());
+  has_error_ = !validDimensions();
 }
 
-Shape::Shape(llvm::ArrayRef<int64_t> values)
-    : Shape([&]() {
-        SmallVector<detail::DimValue> dimValues;
-        dimValues.reserve(values.size());
-        for (int64_t value : values) {
-          dimValues.push_back(value == mlir::ShapedType::kDynamic
-                                  ? detail::DimValue::getDynamic(1)
-                                  : detail::DimValue::getStatic(value));
-        }
-        return makeRecursiveValues(dimValues);
-      }()) {}
+template <SequenceKind K>
+DimSequence<K>::DimSequence(llvm::ArrayRef<int64_t> dims) {
+  for (int64_t dim : dims) {
+    values.emplace_back(dim == mlir::ShapedType::kDynamic
+                            ? DimValue::getDynamic(1)
+                            : DimValue::getStatic(dim));
+  }
+  has_error_ = !validDimensions();
+}
 
-Shape::Shape(int64_t value)
-    : Shape(detail::RecursiveDimValue(detail::DimValue::getStatic(value))) {}
+template <SequenceKind K>
+DimSequence<K>::DimSequence(int64_t value)
+    : DimSequence(RecursiveDimValue(DimValue::getStatic(value))) {}
 
-Shape::Shape(CgErrorT)
-    : values({detail::RecursiveDimValue(CgErrorT{})}), scalarRoot(true),
+template <SequenceKind K>
+DimSequence<K>::DimSequence(CgErrorT)
+    : values({RecursiveDimValue(CgErrorT{})}), scalarRoot(true),
       has_error_(true) {}
 
-std::string Shape::toString() const {
-  if (has_error(*this)) {
-    return "error_t";
+template <SequenceKind K>
+bool DimSequence<K>::validDimensions() const {
+  if constexpr (K == SequenceKind::Shape) {
+    return hasValidShapeDimensions(values);
   }
-  return scalarRoot ? values.front().toString() : valuesToString(values);
+  return llvm::none_of(values,
+                       [](const auto &v) { return detail::has_error(v); });
 }
 
-size_t Shape::rank() const { return values.size(); }
-
-std::int64_t Shape::as_int() const {
-  if (has_error(*this)) {
-    llvm::report_fatal_error("cannot convert error shape to integer");
-  }
-  if (!scalarRoot) {
-    llvm::report_fatal_error("cannot convert non-scalar shape to integer");
-  }
-  return values.front().as_int();
+template <SequenceKind K>
+bool DimSequence<K>::hasError() const {
+  return has_error_ || llvm::any_of(values, [](const auto &v) {
+           return detail::has_error(v);
+         });
 }
 
-void Shape::append(int64_t value) {
-  scalarRoot = false;
-  values.emplace_back(detail::DimValue::getStatic(value));
-  has_error_ = !hasValidShapeDimensions(values);
+template <SequenceKind K>
+RecursiveDimValue DimSequence<K>::asRecursiveValue() && {
+  return scalarRoot ? std::move(values.front())
+                    : makeRecursiveValue(std::move(values));
 }
 
-void Shape::append(Shape value) {
-  bool valueHasError = has_error(value);
-  scalarRoot = false;
-  values.push_back(value.scalarRoot
-                       ? std::move(value.values.front())
-                       : makeRecursiveValue(std::move(value.values)));
-  has_error_ = valueHasError || !hasValidShapeDimensions(values);
+template <SequenceKind K>
+std::string DimSequence<K>::toString() const {
+  return hasError()   ? "error_t"
+         : scalarRoot ? values.front().toString()
+                      : valuesToString(values);
 }
 
-void Shape::appendDynamic(int64_t divisibility, int32_t width) {
-  scalarRoot = false;
-  values.emplace_back(detail::DimValue::getDynamic(divisibility, width));
-  has_error_ = !hasValidShapeDimensions(values);
-}
-
-int64_t Shape::getDivisibility() const {
-  if (has_error(*this)) {
-    llvm::report_fatal_error("cannot query error shape divisibility");
-  }
-  if (!scalarRoot) {
-    llvm::report_fatal_error("cannot query non-scalar shape divisibility");
-  }
-  return values.front().getDivisibility();
-}
-
-const detail::RecursiveDimValue &Shape::get(size_t index) const {
-  return values[index];
-}
-
-const detail::RecursiveDimValue &Shape::operator[](size_t index) const {
-  return values[index];
-}
-
-void Shape::set(size_t index, Shape value) {
-  if (scalarRoot) {
-    if (index != 0) {
-      has_error_ = true;
-      return;
-    }
-    *this = std::move(value);
-    return;
-  }
-
-  if (index >= values.size()) {
-    has_error_ = true;
-    return;
-  }
-  has_error_ |= has_error(value);
-  values[index] = value.scalarRoot
-                      ? std::move(value.values.front())
-                      : makeRecursiveValue(std::move(value.values));
-}
-
-Shape::iterator Shape::begin() { return iterator(*this, 0); }
-
-Shape::iterator Shape::end() { return iterator(*this, rank()); }
-
-Shape::const_iterator Shape::begin() const { return const_iterator(*this, 0); }
-
-Shape::const_iterator Shape::end() const {
-  return const_iterator(*this, rank());
-}
-
-Shape::const_iterator Shape::cbegin() const { return begin(); }
-
-Shape::const_iterator Shape::cend() const { return end(); }
-
-bool operator==(const Shape &lhs, const Shape &rhs) {
-  if (has_error(lhs) || has_error(rhs)) {
-    return has_error(lhs) == has_error(rhs);
-  }
-  return lhs.scalarRoot == rhs.scalarRoot && lhs.values == rhs.values;
-}
-
-bool operator!=(const Shape &lhs, const Shape &rhs) { return !(lhs == rhs); }
-
-bool operator==(const Shape &lhs, int64_t rhs) {
-  if (has_error(lhs)) {
-    return false;
-  }
-  return lhs.scalarRoot && lhs.values.front() == rhs;
-}
-
-bool operator!=(const Shape &lhs, int64_t rhs) { return !(lhs == rhs); }
-
-bool operator==(int64_t lhs, const Shape &rhs) { return rhs == lhs; }
-
-bool operator!=(int64_t lhs, const Shape &rhs) { return !(lhs == rhs); }
-
-std::optional<Shape> Shape::fromString(mlir::StringRef str) {
-  std::optional<detail::RecursiveDimValue> value = parseValue(str);
-  if (!value || !hasValidShapeDimensions(*value)) {
-    return std::nullopt;
-  }
-  return Shape(std::move(*value));
-}
-
-// NOLINTNEXTLINE(performance-unnecessary-value-param)
-Stride::Stride(SmallVector<detail::DimValue> values)
-    : Stride(makeRecursiveValues(values)) {}
-
-Stride::Stride() = default;
-
-Stride::Stride(detail::RecursiveDimValues values) : values(std::move(values)) {
-  has_error_ =
-      llvm::any_of(this->values, [](const detail::RecursiveDimValue &v) {
-        return detail::has_error(v);
-      });
-}
-
-Stride::Stride(detail::RecursiveDimValue value) : scalarRoot(value.isLeaf()) {
-  has_error_ = detail::has_error(value);
-  if (scalarRoot) {
-    values.push_back(std::move(value));
-    return;
-  }
-
-  llvm::ArrayRef<detail::RecursiveDimValue> nestedValues = value.getValues();
-  values.assign(nestedValues.begin(), nestedValues.end());
-}
-
-Stride::Stride(int64_t value)
-    : Stride(detail::RecursiveDimValue(detail::DimValue::getStatic(value))) {}
-
-Stride::Stride(CgErrorT)
-    : values({detail::RecursiveDimValue(CgErrorT{})}), scalarRoot(true),
-      has_error_(true) {}
-
-std::string Stride::toString() const {
-  if (has_error(*this)) {
-    return "error_t";
-  }
-  return scalarRoot ? values.front().toString() : valuesToString(values);
-}
-
-size_t Stride::rank() const { return values.size(); }
-
-std::int64_t Stride::as_int() const {
-  if (has_error(*this)) {
-    llvm::report_fatal_error("cannot convert error stride to integer");
-  }
-  if (!scalarRoot) {
-    llvm::report_fatal_error("cannot convert non-scalar stride to integer");
-  }
-  return values.front().as_int();
-}
-
-void Stride::append(int64_t value) {
-  scalarRoot = false;
-  values.emplace_back(detail::DimValue::getStatic(value));
-  has_error_ = llvm::any_of(values, [](const detail::RecursiveDimValue &value) {
-    return detail::has_error(value);
-  });
-}
-
-void Stride::append(Stride value) {
-  bool valueHasError = has_error(value);
-  scalarRoot = false;
-  values.push_back(value.scalarRoot
-                       ? std::move(value.values.front())
-                       : makeRecursiveValue(std::move(value.values)));
-  has_error_ = valueHasError ||
-               llvm::any_of(values, [](const detail::RecursiveDimValue &value) {
-                 return detail::has_error(value);
-               });
-}
-
-void Stride::appendDynamic(int64_t divisibility, int32_t width) {
-  scalarRoot = false;
-  values.emplace_back(detail::DimValue::getDynamic(divisibility, width));
-  has_error_ = llvm::any_of(values, [](const detail::RecursiveDimValue &value) {
-    return detail::has_error(value);
-  });
-}
-
-int64_t Stride::getDivisibility() const {
-  if (has_error(*this)) {
-    llvm::report_fatal_error("cannot query error stride divisibility");
-  }
-  if (!scalarRoot) {
-    llvm::report_fatal_error("cannot query non-scalar stride divisibility");
-  }
-  return values.front().getDivisibility();
-}
-
-const detail::RecursiveDimValue &Stride::get(size_t index) const {
-  return values[index];
-}
-
-const detail::RecursiveDimValue &Stride::operator[](size_t index) const {
-  return values[index];
-}
-
-void Stride::set(size_t index, Stride value) {
-  if (scalarRoot) {
-    if (index != 0) {
-      has_error_ = true;
-      return;
-    }
-    *this = std::move(value);
-    return;
-  }
-
-  if (index >= values.size()) {
-    has_error_ = true;
-    return;
-  }
-  has_error_ |= has_error(value);
-  values[index] = value.scalarRoot
-                      ? std::move(value.values.front())
-                      : makeRecursiveValue(std::move(value.values));
-}
-
-Stride::iterator Stride::begin() { return iterator(*this, 0); }
-
-Stride::iterator Stride::end() { return iterator(*this, rank()); }
-
-Stride::const_iterator Stride::begin() const {
-  return const_iterator(*this, 0);
-}
-
-Stride::const_iterator Stride::end() const {
-  return const_iterator(*this, rank());
-}
-
-Stride::const_iterator Stride::cbegin() const { return begin(); }
-
-Stride::const_iterator Stride::cend() const { return end(); }
-
-bool operator==(const Stride &lhs, const Stride &rhs) {
-  if (has_error(lhs) || has_error(rhs)) {
-    return has_error(lhs) == has_error(rhs);
-  }
-  return lhs.scalarRoot == rhs.scalarRoot && lhs.values == rhs.values;
-}
-
-bool operator!=(const Stride &lhs, const Stride &rhs) { return !(lhs == rhs); }
-
-bool operator==(const Stride &lhs, int64_t rhs) {
-  if (has_error(lhs)) {
-    return false;
-  }
-  return lhs.scalarRoot && lhs.values.front() == rhs;
-}
-
-bool operator!=(const Stride &lhs, int64_t rhs) { return !(lhs == rhs); }
-
-bool operator==(int64_t lhs, const Stride &rhs) { return rhs == lhs; }
-
-bool operator!=(int64_t lhs, const Stride &rhs) { return !(lhs == rhs); }
-
-std::optional<Stride> Stride::fromString(mlir::StringRef str) {
-  std::optional<detail::RecursiveDimValue> value = parseValue(str);
+template <SequenceKind K>
+std::optional<DimSequence<K>> DimSequence<K>::fromString(mlir::StringRef str) {
+  auto value = parseValue(str);
   if (!value) {
     return std::nullopt;
   }
-  return Stride(std::move(*value));
+  DimSequence result(std::move(*value));
+  return result.hasError() ? std::nullopt : std::optional<DimSequence>(result);
 }
 
-Stride Stride::getDefault(const Shape &shape) {
-  if (has_error(shape)) {
+template <SequenceKind K>
+const RecursiveDimValue &
+DimSequence<K>::requireScalar(const char *action) const {
+  if (hasError() || !scalarRoot) {
+    const char *name = K == SequenceKind::Shape    ? "shape"
+                       : K == SequenceKind::Stride ? "stride"
+                                                   : "coordinate";
+    llvm::report_fatal_error(
+        llvm::Twine("cannot ") + action +
+        (hasError() ? " error " : " non-scalar ") + name +
+        (std::string(action) == "convert" ? " to integer" : " divisibility"));
+  }
+  return values.front();
+}
+
+template <SequenceKind K>
+int64_t DimSequence<K>::as_int() const {
+  return requireScalar("convert").as_int();
+}
+
+template <SequenceKind K>
+int64_t DimSequence<K>::getDivisibility() const {
+  return requireScalar("query").getDivisibility();
+}
+
+template <SequenceKind K>
+void DimSequence<K>::append(int64_t value) {
+  append(DimSequence(value));
+}
+
+template <SequenceKind K>
+void DimSequence<K>::appendDynamic(int64_t divisibility, int32_t width) {
+  append(DimSequence(
+      RecursiveDimValue(DimValue::getDynamic(divisibility, width))));
+}
+
+template <SequenceKind K>
+void DimSequence<K>::append(DimSequence value) {
+  scalarRoot = false;
+  bool valueHasError = value.hasError();
+  values.push_back(std::move(value).asRecursiveValue());
+  has_error_ = valueHasError || !validDimensions();
+}
+
+template <SequenceKind K>
+void DimSequence<K>::set(size_t index, DimSequence value) {
+  if (index >= values.size()) {
+    has_error_ = true;
+  } else if (scalarRoot) {
+    *this = std::move(value);
+  } else {
+    bool valueHasError = value.hasError();
+    values[index] = std::move(value).asRecursiveValue();
+    has_error_ = valueHasError || !validDimensions();
+  }
+}
+
+template <SequenceKind K>
+bool DimSequence<K>::isStatic() const {
+  return !hasError() &&
+         llvm::all_of(values, [](const auto &v) { return v.isStatic(); });
+}
+
+template <SequenceKind K>
+size_t DimSequence<K>::getDepth() const {
+  return hasError()   ? 0
+         : scalarRoot ? tcutegen::getDepth(values.front())
+                      : tcutegen::getDepth(ArrayRef<RecursiveDimValue>(values));
+}
+
+template <SequenceKind K>
+int64_t DimSequence<K>::staticSize() const {
+  return product(makeRecursiveValue(values)).as_int();
+}
+
+template <SequenceKind K>
+DimSequence<K> DimSequence<K>::flattened() const {
+  return hasError() || scalarRoot ? *this
+                                  : DimSequence(flattenRecursiveValues(values));
+}
+
+template <SequenceKind K>
+DimSequence<K> DimSequence<K>::reversed() const {
+  return hasError() || scalarRoot ? *this
+                                  : DimSequence(detail::RecursiveDimValues(
+                                        values.rbegin(), values.rend()));
+}
+
+template <SequenceKind K>
+DimSequence<K> DimSequence<K>::taken(int begin, int end) const {
+  auto selected = takeValues(values, begin, end);
+  return hasError() || !selected ? DimSequence(CgErrorT{})
+                                 : DimSequence(std::move(*selected));
+}
+
+template <SequenceKind K>
+Stride DimSequence<K>::getDefault(const Shape &shape) {
+  if (shape.hasError()) {
     return Stride(CgErrorT{});
   }
-  if (shape.scalarRoot) {
-    return Stride(
-        getDefaultStride(shape.values.front(), detail::DimValue::getStatic(1)));
-  }
-
-  detail::RecursiveDimValues values;
-  values.reserve(shape.values.size());
-
-  detail::DimValue runningStride = detail::DimValue::getStatic(1);
-  for (const detail::RecursiveDimValue &dim : llvm::reverse(shape.values)) {
-    values.push_back(getDefaultStride(dim, runningStride));
-    runningStride = multiply(runningStride, product(dim));
-  }
-  std::reverse(values.begin(), values.end());
-
-  return Stride(std::move(values));
+  RecursiveDimValue root =
+      shape.isScalar()
+          ? shape.get(0)
+          : makeRecursiveValue(detail::RecursiveDimValues(shape.getValues()));
+  return Stride(getDefaultStride(root, DimValue::getStatic(1)));
 }
 
-Coord::Coord() { has_error_ = true; }
-
-Coord::Coord(detail::RecursiveDimValues values) : values(std::move(values)) {
-  if (this->values.empty()) {
-    has_error_ = true;
-    return;
-  }
-  has_error_ = !hasValidCoordValues(this->values);
-}
-
-Coord::Coord(detail::RecursiveDimValue value) : scalarRoot(value.isLeaf()) {
-  has_error_ = !hasValidCoordValues(value);
-  if (scalarRoot) {
-    values.push_back(std::move(value));
-    return;
-  }
-
-  llvm::ArrayRef<detail::RecursiveDimValue> nestedValues = value.getValues();
-  values.assign(nestedValues.begin(), nestedValues.end());
-}
-
-Coord::Coord(int64_t value)
-    : Coord(detail::RecursiveDimValue(detail::DimValue::getStatic(value))) {}
-
-Coord::Coord(CgErrorT)
-    : values({detail::RecursiveDimValue(CgErrorT{})}), scalarRoot(true),
-      has_error_(true) {}
-
-std::string Coord::toString() const {
-  if (has_error(*this)) {
-    return "error_t";
-  }
-  return scalarRoot ? values.front().toString() : valuesToString(values);
-}
-
-std::optional<Coord> Coord::fromString(mlir::StringRef str) {
-  std::optional<detail::RecursiveDimValue> value = parseValue(str);
-  if (!value || !hasValidCoordValues(*value)) {
-    return std::nullopt;
-  }
-  return Coord(std::move(*value));
-}
-
-size_t Coord::rank() const { return values.size(); }
-
-std::int64_t Coord::as_int() const {
-  if (has_error(*this)) {
-    llvm::report_fatal_error("cannot convert error coordinate to integer");
-  }
-  if (!scalarRoot) {
-    llvm::report_fatal_error("cannot convert non-scalar coordinate to integer");
-  }
-  return values.front().as_int();
-}
-
-void Coord::append(int64_t value) {
-  scalarRoot = false;
-  values.emplace_back(detail::DimValue::getStatic(value));
-  has_error_ = !hasValidCoordValues(values);
-}
-
-void Coord::append(Coord value) {
-  bool valueHasError = has_error(value);
-  scalarRoot = false;
-  values.push_back(value.scalarRoot
-                       ? std::move(value.values.front())
-                       : makeRecursiveValue(std::move(value.values)));
-  has_error_ = valueHasError || !hasValidCoordValues(values);
-}
-
-const detail::RecursiveDimValue &Coord::get(size_t index) const {
-  return values[index];
-}
-
-const detail::RecursiveDimValue &Coord::operator[](size_t index) const {
-  return values[index];
-}
-
-Coord::const_iterator Coord::begin() const { return const_iterator(*this, 0); }
-
-Coord::const_iterator Coord::end() const {
-  return const_iterator(*this, rank());
-}
-
-Coord::const_iterator Coord::cbegin() const { return begin(); }
-
-Coord::const_iterator Coord::cend() const { return end(); }
-
-bool operator==(const Coord &lhs, const Coord &rhs) {
-  if (has_error(lhs) || has_error(rhs)) {
-    return has_error(lhs) == has_error(rhs);
-  }
-  return lhs.scalarRoot == rhs.scalarRoot && lhs.values == rhs.values;
-}
-
-bool operator!=(const Coord &lhs, const Coord &rhs) { return !(lhs == rhs); }
+template class DimSequence<SequenceKind::Shape>;
+template class DimSequence<SequenceKind::Stride>;
+template class DimSequence<SequenceKind::Coord>;
 
 Layout::Layout() = default;
 
-Layout::Layout(Shape shape)
-    : shapeValue(std::move(shape)),
-      strideValue(Stride::getDefault(this->shapeValue)),
-      has_error_(::mlir::nv_tensor_ir::tcutegen::has_error(shapeValue) ||
-                 ::mlir::nv_tensor_ir::tcutegen::has_error(strideValue)) {}
+Layout::Layout(Shape shape) : Layout(shape, Stride::getDefault(shape)) {}
 
 Layout::Layout(Shape shape, Stride stride)
     : shapeValue(std::move(shape)), strideValue(std::move(stride)) {
-  has_error_ = ::mlir::nv_tensor_ir::tcutegen::has_error(this->shapeValue) ||
-               ::mlir::nv_tensor_ir::tcutegen::has_error(this->strideValue);
-  if (has_error_) {
-    return;
-  }
-  if (rank(this->shapeValue) != rank(this->strideValue)) {
-    has_error_ = true;
-    return;
-  }
-  if (this->shapeValue.scalarRoot != this->strideValue.scalarRoot ||
-      !areCongruent(this->shapeValue.values, this->strideValue.values)) {
-    has_error_ = true;
-  }
+  has_error_ = !is_congruent(this->shapeValue, this->strideValue);
 }
 
 Layout::Layout(int64_t shape, int64_t stride)
@@ -1341,24 +1036,20 @@ std::string Layout::toString() const {
   return shapeValue.toString() + ":" + strideValue.toString();
 }
 
-const Shape &Layout::shape() const { return shapeValue; }
-
-const Stride &Layout::stride() const { return strideValue; }
-
 detail::DimValue Layout::operator()(const Coord &coord) const {
   if (::mlir::nv_tensor_ir::tcutegen::has_error(*this) ||
       ::mlir::nv_tensor_ir::tcutegen::has_error(coord)) {
     return detail::DimValue(CgErrorT{});
   }
-  if (shapeValue.scalarRoot != coord.scalarRoot ||
-      !areCongruent(coord.values, shapeValue.values)) {
+  if (shapeValue.isScalar() != coord.isScalar() ||
+      !areCongruent(coord.getValues(), shapeValue.getValues())) {
     return detail::DimValue(CgErrorT{});
   }
-  if (coord.scalarRoot) {
-    return computeLayoutOffset(coord.values.front(),
-                               strideValue.values.front());
+  if (coord.isScalar()) {
+    return computeLayoutOffset(coord.getValues().front(),
+                               strideValue.getValues().front());
   }
-  return computeLayoutOffset(coord.values, strideValue.values);
+  return computeLayoutOffset(coord.getValues(), strideValue.getValues());
 }
 
 Layout Layout::get(size_t index) const {
@@ -1372,16 +1063,7 @@ Layout Layout::get(size_t index) const {
 void Layout::append(Layout other) {
   shapeValue.append(std::move(other.shapeValue));
   strideValue.append(std::move(other.strideValue));
-  has_error_ = ::mlir::nv_tensor_ir::tcutegen::has_error(shapeValue) ||
-               ::mlir::nv_tensor_ir::tcutegen::has_error(strideValue);
-  if (has_error_) {
-    return;
-  }
-  if (rank(shapeValue) != rank(strideValue) ||
-      shapeValue.scalarRoot != strideValue.scalarRoot ||
-      !areCongruent(shapeValue.values, strideValue.values)) {
-    has_error_ = true;
-  }
+  has_error_ = !is_congruent(shapeValue, strideValue);
 }
 
 Layout::const_iterator Layout::begin() const {
@@ -1391,12 +1073,6 @@ Layout::const_iterator Layout::begin() const {
 Layout::const_iterator Layout::end() const {
   return const_iterator(*this, rank(shape()));
 }
-
-Layout::const_iterator Layout::cbegin() const { return begin(); }
-
-Layout::const_iterator Layout::cend() const { return end(); }
-
-bool Layout::has_error() const { return has_error_; }
 
 bool operator==(const Layout &lhs, const Layout &rhs) {
   if (has_error(lhs) || has_error(rhs)) {
@@ -1416,106 +1092,24 @@ std::optional<Layout> Layout::fromString(mlir::StringRef str) {
   auto [shapeStr, strideStr] = *pieces;
   std::optional<Shape> shape = Shape::fromString(shapeStr);
   std::optional<Stride> stride = Stride::fromString(strideStr);
-  if (!shape || !stride) {
-    return std::nullopt;
-  }
-  if (shape->rank() != stride->rank()) {
-    return std::nullopt;
-  }
-  if (shape->scalarRoot != stride->scalarRoot ||
-      !areCongruent(shape->values, stride->values)) {
+  if (!shape || !stride || !is_congruent(*shape, *stride)) {
     return std::nullopt;
   }
   return Layout(std::move(*shape), std::move(*stride));
 }
 
-size_t rank(const Shape &shape) { return shape.rank(); }
-
-size_t rank(const Stride &stride) { return stride.rank(); }
-
 size_t rank(const Layout &layout) { return rank(layout.shape()); }
 
-size_t rank(const Coord &coord) { return coord.rank(); }
-
 size_t rank(const detail::RecursiveDimValue &value) { return value.rank(); }
-
-bool has_error(const Shape &shape) {
-  return shape.has_error_ ||
-         llvm::any_of(shape.values, [](const detail::RecursiveDimValue &dim) {
-           return detail::has_error(dim);
-         });
-}
-
-bool has_error(const Stride &stride) {
-  return stride.has_error_ ||
-         llvm::any_of(stride.values, [](const detail::RecursiveDimValue &dim) {
-           return detail::has_error(dim);
-         });
-}
 
 bool has_error(const Layout &layout) {
   return layout.has_error_ || has_error(layout.shape()) ||
          has_error(layout.stride());
 }
 
-bool has_error(const Coord &coord) {
-  return coord.has_error_ ||
-         llvm::any_of(coord.values, [](const detail::RecursiveDimValue &dim) {
-           return detail::has_error(dim);
-         });
-}
-
-size_t depth(const Shape &shape) {
-  if (has_error(shape)) {
-    return 0;
-  }
-  if (shape.scalarRoot) {
-    return getDepth(shape.values.front());
-  }
-  return getDepth(ArrayRef<detail::RecursiveDimValue>(shape.values));
-}
-
-size_t depth(const Stride &stride) {
-  if (has_error(stride)) {
-    return 0;
-  }
-  if (stride.scalarRoot) {
-    return getDepth(stride.values.front());
-  }
-  return getDepth(ArrayRef<detail::RecursiveDimValue>(stride.values));
-}
-
 size_t depth(const Layout &layout) { return depth(layout.shape()); }
 
-size_t depth(const Coord &coord) {
-  if (has_error(coord)) {
-    return 0;
-  }
-  if (coord.scalarRoot) {
-    return getDepth(coord.values.front());
-  }
-  return getDepth(ArrayRef<detail::RecursiveDimValue>(coord.values));
-}
-
 size_t depth(const detail::RecursiveDimValue &value) { return getDepth(value); }
-
-bool is_static(const Shape &shape) {
-  if (has_error(shape)) {
-    return false;
-  }
-  return llvm::all_of(shape.values, [](const detail::RecursiveDimValue &dim) {
-    return dim.isStatic();
-  });
-}
-
-bool is_static(const Stride &stride) {
-  if (has_error(stride)) {
-    return false;
-  }
-  return llvm::all_of(stride.values, [](const detail::RecursiveDimValue &dim) {
-    return dim.isStatic();
-  });
-}
 
 bool is_static(const Layout &layout) {
   if (has_error(layout)) {
@@ -1524,31 +1118,13 @@ bool is_static(const Layout &layout) {
   return is_static(layout.shape()) && is_static(layout.stride());
 }
 
-bool is_static(const Coord &coord) {
-  if (has_error(coord)) {
-    return false;
-  }
-  return llvm::all_of(coord.values, [](const detail::RecursiveDimValue &dim) {
-    return dim.isStatic();
-  });
-}
-
 bool is_static(const DimValue &dim) { return dim.isStatic(); }
 
 bool is_static(const detail::RecursiveDimValue &value) {
-  if (detail::has_error(value)) {
-    return false;
-  }
   return value.isStatic();
 }
 
 int64_t get_divisibility(const DimValue &dim) { return dim.getDivisibility(); }
-
-int64_t get_divisibility(const Shape &shape) { return shape.getDivisibility(); }
-
-int64_t get_divisibility(const Stride &stride) {
-  return stride.getDivisibility();
-}
 
 int64_t get_divisibility(const detail::RecursiveDimValue &value) {
   return value.getDivisibility();
@@ -1558,34 +1134,6 @@ int64_t static_size(const detail::RecursiveDimValue &value) {
   return product(value).as_int();
 }
 
-int64_t static_size(const Shape &shape) {
-  detail::DimValue result = detail::DimValue::getStatic(1);
-  for (size_t i = 0, e = rank(shape); i < e; ++i) {
-    result =
-        multiply(result, detail::DimValue::getStatic(static_size(shape, i)));
-  }
-  return result.as_int();
-}
-
-int64_t static_size(const Shape &shape, size_t index) {
-  assert(index < rank(shape));
-  return static_size(shape[index]);
-}
-
-int64_t static_size(const Stride &stride) {
-  detail::DimValue result = detail::DimValue::getStatic(1);
-  for (size_t i = 0, e = rank(stride); i < e; ++i) {
-    result =
-        multiply(result, detail::DimValue::getStatic(static_size(stride, i)));
-  }
-  return result.as_int();
-}
-
-int64_t static_size(const Stride &stride, size_t index) {
-  assert(index < rank(stride));
-  return static_size(stride[index]);
-}
-
 int64_t static_size(const Layout &layout) {
   return static_size(layout.shape());
 }
@@ -1593,20 +1141,6 @@ int64_t static_size(const Layout &layout) {
 int64_t static_size(const Layout &layout, size_t index) {
   assert(index < rank(layout));
   return static_size(layout.shape(), index);
-}
-
-Shape flatten(const Shape &shape) {
-  if (has_error(shape) || shape.scalarRoot) {
-    return shape;
-  }
-  return Shape(flattenRecursiveValues(shape.values));
-}
-
-Stride flatten(const Stride &stride) {
-  if (has_error(stride) || stride.scalarRoot) {
-    return stride;
-  }
-  return Stride(flattenRecursiveValues(stride.values));
 }
 
 Layout flatten(const Layout &layout) {
@@ -1621,8 +1155,8 @@ Layout coalesce(const Layout &layout) {
     return Layout(CgErrorT{});
   }
   Layout flatLayout = flatten(layout);
-  detail::RecursiveDimValues flatShape = flatLayout.shape().values;
-  detail::RecursiveDimValues flatStride = flatLayout.stride().values;
+  detail::RecursiveDimValues flatShape(flatLayout.shape().getValues());
+  detail::RecursiveDimValues flatStride(flatLayout.stride().getValues());
   if (!coalesceFlat(flatShape, flatStride)) {
     return Layout(CgErrorT{});
   }
@@ -1658,47 +1192,11 @@ Layout make_layout(std::vector<Layout> lys) {
     return Layout(CgErrorT{});
   }
 
-  detail::RecursiveDimValues shapeValues;
-  detail::RecursiveDimValues strideValues;
-  shapeValues.reserve(lys.size());
-  strideValues.reserve(lys.size());
-  for (const Layout &layout : lys) {
-    const Shape &shape = layout.shape();
-    const Stride &stride = layout.stride();
-    shapeValues.push_back(shape.scalarRoot ? shape.values.front()
-                                           : makeRecursiveValue(shape.values));
-    strideValues.push_back(stride.scalarRoot
-                               ? stride.values.front()
-                               : makeRecursiveValue(stride.values));
+  Layout result;
+  for (Layout &layout : lys) {
+    result.append(std::move(layout));
   }
-
-  return Layout(Shape(std::move(shapeValues)), Stride(std::move(strideValues)));
-}
-
-Shape reverse(const Shape &shape) {
-  if (has_error(shape) || shape.scalarRoot) {
-    return shape;
-  }
-
-  detail::RecursiveDimValues values;
-  values.reserve(shape.values.size());
-  for (const detail::RecursiveDimValue &value : llvm::reverse(shape.values)) {
-    values.push_back(value);
-  }
-  return Shape(std::move(values));
-}
-
-Stride reverse(const Stride &stride) {
-  if (has_error(stride) || stride.scalarRoot) {
-    return stride;
-  }
-
-  detail::RecursiveDimValues values;
-  values.reserve(stride.values.size());
-  for (const detail::RecursiveDimValue &value : llvm::reverse(stride.values)) {
-    values.push_back(value);
-  }
-  return Stride(std::move(values));
+  return result;
 }
 
 Layout reverse(const Layout &layout) {
@@ -1706,32 +1204,6 @@ Layout reverse(const Layout &layout) {
     return Layout(CgErrorT{});
   }
   return Layout(reverse(layout.shape()), reverse(layout.stride()));
-}
-
-Shape take(int begin, int end, const Shape &shape) {
-  if (has_error(shape)) {
-    return Shape(CgErrorT{});
-  }
-
-  std::optional<detail::RecursiveDimValues> values =
-      takeValues(shape.values, begin, end);
-  if (!values) {
-    return Shape(CgErrorT{});
-  }
-  return Shape(std::move(*values));
-}
-
-Stride take(int begin, int end, const Stride &stride) {
-  if (has_error(stride)) {
-    return Stride(CgErrorT{});
-  }
-
-  std::optional<detail::RecursiveDimValues> values =
-      takeValues(stride.values, begin, end);
-  if (!values) {
-    return Stride(CgErrorT{});
-  }
-  return Stride(std::move(*values));
 }
 
 Layout take(int begin, int end, const Layout &layout) {
@@ -1743,17 +1215,18 @@ Layout take(int begin, int end, const Layout &layout) {
 }
 
 Coord idx2crd(int64_t index, const Shape &shape) {
-  if (has_error(shape) || index < 0) {
+  if (has_error(shape) || index < 0 || shape.getValues().empty()) {
     return Coord(CgErrorT{});
   }
-  if (shape.scalarRoot) {
+  if (shape.isScalar()) {
     return Coord(index);
   }
 
   int64_t stride = 1;
   detail::RecursiveDimValues coordValues;
-  coordValues.reserve(shape.values.size());
-  for (const detail::RecursiveDimValue &dim : llvm::reverse(shape.values)) {
+  coordValues.reserve(shape.getValues().size());
+  for (const detail::RecursiveDimValue &dim :
+       llvm::reverse(shape.getValues())) {
     coordValues.push_back(idx2crdValue(index, dim, stride));
     if (detail::has_error(coordValues.back())) {
       return Coord(CgErrorT{});

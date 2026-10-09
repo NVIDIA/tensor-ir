@@ -501,10 +501,10 @@ void ComponentEmitter::emitCLAssignment(const OptionInfo &opt) {
 }
 static void emitPrintOption(raw_ostream &os, const OptionInfo &opt,
                             StringRef member, bool first) {
-  os << formatv("    os << \"{0}{1}=\";\n", first ? "" : " ", opt.argName);
+  os << formatv("  os << \"{0}{1}=\";\n", first ? "" : " ", opt.argName);
   if (opt.kind == OptionInfo::Kind::Enum) {
     const EnumInfo &enumInfo = *opt.enumInfo;
-    os << formatv("    os << {0}::{1}({2});\n", enumInfo.getCppNamespace(),
+    os << formatv("  os << {0}::{1}({2});\n", enumInfo.getCppNamespace(),
                   enumInfo.getSymbolToStringFnName(), member);
     return;
   }
@@ -524,20 +524,7 @@ static void emitInvocationComponents(ArrayRef<const ComponentInfo *> comps,
   }
   os << "\n  [[nodiscard]] llvm::LogicalResult "
         "parseFromString(llvm::StringRef str);\n"
-        "  void print(llvm::raw_ostream &os) const {\n"
-        "    // Keep the schema order stable: this is also the canonical hash "
-        "input.\n";
-  bool first = true;
-  for (const ComponentInfo *comp : comps) {
-    for (const OptionInfo &opt : comp->options) {
-      emitPrintOption(
-          os, opt,
-          (Twine("this->") + comp->invocationMember + "." + opt.varName).str(),
-          first);
-      first = false;
-    }
-  }
-  os << "  }\n"
+        "  void print(llvm::raw_ostream &os) const;\n"
         "  [[nodiscard]] std::string toString() const {\n"
         "    std::string s;\n"
         "    llvm::raw_string_ostream os(s);\n"
@@ -565,6 +552,65 @@ static void emitInvocationComponents(ArrayRef<const ComponentInfo *> comps,
         "  friend bool operator!=(const CompilerInvocationComponents &a,\n"
         "                         const CompilerInvocationComponents &b) {\n"
         "    return !(a == b);\n  }\n};\n";
+}
+static void emitInvocationPrintDef(ArrayRef<const ComponentInfo *> comps,
+                                   raw_ostream &os) {
+  static constexpr StringLiteral kPrintDef = R"cpp(
+void mlir::nv_tensor_ir::CompilerInvocationComponents::print(
+    llvm::raw_ostream &os) const {
+  // Keep the schema order stable: this is also the canonical hash input.
+)cpp";
+  os << kPrintDef;
+  bool first = true;
+  for (const ComponentInfo *comp : comps) {
+    for (const OptionInfo &opt : comp->options) {
+      emitPrintOption(
+          os, opt,
+          (Twine("this->") + comp->invocationMember + "." + opt.varName).str(),
+          first);
+      first = false;
+    }
+  }
+  os << "}\n\n";
+}
+static void emitInvocationCLDeclarations(raw_ostream &os) {
+  static constexpr StringLiteral kDeclarations = R"cpp(
+/// Registers all compiler invocation command-line options.
+void registerCompilerInvocationCLOptions();
+
+/// Returns the command-line option categories for the invocation.
+llvm::ArrayRef<const llvm::cl::OptionCategory *>
+getCompilerInvocationCLOptionCategories();
+
+/// Applies command-line option values to \p opts.
+void applyCompilerInvocationOptionsFromCL(
+    CompilerInvocationComponents &opts);
+)cpp";
+  os << kDeclarations;
+}
+static void emitInvocationCLBindings(ArrayRef<const ComponentInfo *> comps,
+                                     raw_ostream &os) {
+  os << "void mlir::nv_tensor_ir::registerCompilerInvocationCLOptions() {\n";
+  for (const ComponentInfo *comp : comps) {
+    os << formatv("  {0}();\n", comp->clRegisterFnName());
+  }
+  os << "}\n\n"
+        "llvm::ArrayRef<const llvm::cl::OptionCategory *>\n"
+        "mlir::nv_tensor_ir::getCompilerInvocationCLOptionCategories() {\n"
+        "  static const llvm::cl::OptionCategory *categories[] = {\n";
+  for (const ComponentInfo *comp : comps) {
+    os << formatv("      &{0}(),\n", comp->clCategoryFnName());
+  }
+  os << "  };\n"
+        "  return categories;\n"
+        "}\n\n"
+        "void mlir::nv_tensor_ir::applyCompilerInvocationOptionsFromCL(\n"
+        "    CompilerInvocationComponents &opts) {\n";
+  for (const ComponentInfo *comp : comps) {
+    os << formatv("  apply{0}OptionsFromCL(opts.{1});\n", comp->name,
+                  comp->invocationMember);
+  }
+  os << "}\n";
 }
 static void emitInvocationParserDef(ArrayRef<const ComponentInfo *> comps,
                                     raw_ostream &os) {
@@ -741,6 +787,8 @@ static bool emitComponentOptions(const RecordKeeper &records, raw_ostream &os) {
                     comp.structName(), comp.clGetterFnName());
     }
     emitInvocationComponents(*invocationComps, os);
+    os << "\n";
+    emitInvocationCLDeclarations(os);
   }
   {
     IfDefEmitter guard(os, "GEN_OPTIONS_PARSER", /*LateUndef=*/true);
@@ -750,6 +798,7 @@ static bool emitComponentOptions(const RecordKeeper &records, raw_ostream &os) {
       emitter.emitParserDefs();
       emitter.emitValidateImpl();
     }
+    emitInvocationPrintDef(*invocationComps, os);
     emitInvocationParserDef(*invocationComps, os);
   }
   {
@@ -759,6 +808,7 @@ static bool emitComponentOptions(const RecordKeeper &records, raw_ostream &os) {
       ComponentEmitter emitter(comp, os);
       emitter.emitCLBindings();
     }
+    emitInvocationCLBindings(*invocationComps, os);
   }
   {
     IfDefEmitter guard(os, "GEN_COMPILERINVOCATION_CAPI_DECLS",

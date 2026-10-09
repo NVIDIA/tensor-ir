@@ -346,18 +346,17 @@ nv_tensor_ir.graph @MatmulAccumulatorTestGraph(
 
 // -----
 
-// A unit batch dimension broadcasts to a dynamic peer without making the
-// result batch dimension static.
-// CHECK-LABEL: nv_tensor_ir.graph @MatmulDynamicUnitBatchBroadcastTestGraph
-nv_tensor_ir.graph @MatmulDynamicUnitBatchBroadcastTestGraph(
+// A static batch dimension refines a dynamic peer.
+// CHECK-LABEL: nv_tensor_ir.graph @MatmulMergedBatchTestGraph
+nv_tensor_ir.graph @MatmulMergedBatchTestGraph(
   %A: tensor<?x16x32xf32>,
-  %B: tensor<1x32x48xf32>
-) -> tensor<?x16x48xf32> {
-  // CHECK: matmul(%{{.*}}, %{{.*}}) : (tensor<?x16x32xf32>, tensor<1x32x48xf32>) -> tensor<?x16x48xf32>
+  %B: tensor<4x32x48xf32>
+) -> tensor<4x16x48xf32> {
+  // CHECK: matmul(%{{.*}}, %{{.*}}) : (tensor<?x16x32xf32>, tensor<4x32x48xf32>) -> tensor<4x16x48xf32>
   %C = matmul(%A, %B)
-    : (tensor<?x16x32xf32>, tensor<1x32x48xf32>)
-      -> tensor<?x16x48xf32>
-  results %C : tensor<?x16x48xf32>
+    : (tensor<?x16x32xf32>, tensor<4x32x48xf32>)
+      -> tensor<4x16x48xf32>
+  results %C : tensor<4x16x48xf32>
 }
 
 // Reduction Operation
@@ -391,6 +390,16 @@ nv_tensor_ir.graph @reductionAddTestGraphDynInput(
       reduction_mode = <add> >
        : tensor<16x?x64xf32> -> tensor<16x1x64xf32>
   results %reduce : tensor<16x1x64xf32>
+}
+
+// CHECK-LABEL: nv_tensor_ir.graph @reductionDropDimensions
+nv_tensor_ir.graph @reductionDropDimensions(
+  %input: tensor<2x3x4xf32>
+) -> tensor<3xf32> {
+  // CHECK: reduce(%{{.*}}) <dimensions = [0, 2], reduction_mode = <add>> : tensor<2x3x4xf32> -> tensor<3xf32>
+  %reduce = reduce(%input)<dimensions = [0, 2], reduction_mode = <add>>
+      : tensor<2x3x4xf32> -> tensor<3xf32>
+  results %reduce : tensor<3xf32>
 }
 
 // CHECK-LABEL: nv_tensor_ir.graph @convertTestGraph
@@ -652,6 +661,24 @@ nv_tensor_ir.graph @reductionUDWelfordTestGraphDynInput(
   } : tensor<8x?x64xf32>, tensor<8x?x64xf32>, tensor<8x?x64xf32> -> tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>
   // CHECK: results %[[reduce]]#0, %[[reduce]]#1, %[[reduce]]#2 : tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>
   results %reduce#0, %reduce#1, %reduce#2 : tensor<8x1x64xf32>, tensor<8x1x64xf32>, tensor<8x1x64xf32>
+}
+
+// CHECK-LABEL: nv_tensor_ir.graph @reductionUDDropDimensions
+nv_tensor_ir.graph @reductionUDDropDimensions(
+  %input0: tensor<8x32x64xf32>,
+  %input1: tensor<8x32x64xf16>
+) -> (tensor<8x64xf32>, tensor<8x64xf16>) {
+  // CHECK: %[[REDUCE:.*]]:2 = reduce_ud
+  // CHECK: } : tensor<8x32x64xf32>, tensor<8x32x64xf16> -> tensor<8x64xf32>, tensor<8x64xf16>
+  %reduce:2 = reduce_ud(%input0, %input1)<
+      dimensions = [1], identity = [0.0 : f32, 0.0 : f16]>
+      (%lhs0: f32, %lhs1: f16, %rhs0: f32, %rhs1: f16) {
+    %sum0 = arith.addf %lhs0, %rhs0 : f32
+    %sum1 = arith.addf %lhs1, %rhs1 : f16
+    nv_tensor_ir.yield %sum0, %sum1 : f32, f16
+  } : tensor<8x32x64xf32>, tensor<8x32x64xf16>
+      -> tensor<8x64xf32>, tensor<8x64xf16>
+  results %reduce#0, %reduce#1 : tensor<8x64xf32>, tensor<8x64xf16>
 }
 // -----
 

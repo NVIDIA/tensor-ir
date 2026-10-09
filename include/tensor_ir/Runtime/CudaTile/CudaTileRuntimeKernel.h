@@ -7,9 +7,9 @@
 #define TENSOR_IR_RUNTIME_CUDATILE_CUDATILERUNTIMEKERNEL_H
 
 #include "tensor_ir/Artifact/TensorIRArtifact.h"
-#include "tensor_ir/Runtime/CudaTile/KernelLaunchHelpers.h"
 #include "tensor_ir/Runtime/CudaTile/RuntimeOperandAccessor.h"
 #include "tensor_ir/Runtime/IRuntimeKernel.h"
+#include "tensor_ir/Runtime/KernelLaunchHelpers.h"
 #include "tensor_ir/Support/Status.h"
 
 #include "llvm/ADT/ArrayRef.h"
@@ -60,7 +60,7 @@ inline std::optional<std::string> getBytecodeDriverCompatibilityMessage(
 
 /// Type aliases for runtime-specific template instantiations.
 using RuntimeArgPacker =
-    ::tensor_ir::rt::KernelArgPacker<RuntimeOperandAccessor>;
+    ::tensor_ir::rt::ArgumentPacker<RuntimeOperandAccessor>;
 using RuntimeGridComputer =
     ::tensor_ir::rt::GridSizeComputer<RuntimeOperandAccessor>;
 
@@ -70,8 +70,8 @@ public:
       std::function<StatusOr<llvm::SmallVector<char, 0>>(
           llvm::ArrayRef<char>, int deviceComputeCapability)>;
 
-  /// Builds a ready-to-launch kernel from an artifact: wires the arg packer
-  /// and grid computer strategies from the artifact's layout, so the
+  /// Builds a ready-to-launch kernel from an artifact: initializes the argument
+  /// packer and grid computer from the artifact's layout, so the
   /// result needs no further setup before initializeRuntimeState()/launch().
   static StatusOr<IRuntimeKernelPtr>
   create(std::unique_ptr<TensorIRArtifact> artifact);
@@ -110,21 +110,19 @@ public:
         .starts_with(llvm::StringRef(kTileIRMagic, sizeof(kTileIRMagic) - 1));
   }
 
-  const std::string &name() const override { return artifact_->kernelName; }
+  const std::string &name() const override {
+    return artifact_->getKernelName();
+  }
 
-  const std::string &funcName() const { return artifact_->funcName; }
+  const std::string &funcName() const { return artifact_->getFuncName(); }
 
   const TensorIRArtifact &getArtifact() const { return *artifact_; }
 
 private:
   explicit CudaTileRuntimeKernel(
       std::unique_ptr<const TensorIRArtifact> artifact)
-      : artifact_(std::move(artifact)) {}
-
-  /// Set by create(); must be non-null before first launch (checked there).
-  void setArgPacker(std::unique_ptr<RuntimeArgPacker> packer) {
-    argPacker_ = std::move(packer);
-  }
+      : artifact_(std::move(artifact)),
+        argPacker_(artifact_->getLaunchMetadata()) {}
 
   void setGridComputer(std::unique_ptr<RuntimeGridComputer> computer) {
     gridComputer_ = std::move(computer);
@@ -146,7 +144,7 @@ private:
     }
     return std::visit(
         [](const auto &b) { return llvm::ArrayRef<char>(b.bytes); },
-        artifact_->binary);
+        artifact_->getBinary());
   }
 
   std::unique_ptr<const TensorIRArtifact> artifact_;
@@ -156,8 +154,8 @@ private:
   mutable CUlibrary lib_ = nullptr;
   mutable CUkernel kernel_ = nullptr;
 
-  /// Strategy for packing tensor operands into the flat kernel arg list.
-  std::unique_ptr<RuntimeArgPacker> argPacker_;
+  /// Packs arguments according to the artifact's compiled signature.
+  RuntimeArgPacker argPacker_;
 
   /// Strategy for computing grid dimensions at launch time.
   std::unique_ptr<RuntimeGridComputer> gridComputer_;

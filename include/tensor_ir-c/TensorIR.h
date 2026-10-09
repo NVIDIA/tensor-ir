@@ -87,75 +87,6 @@ typedef enum MlirTensorIRArchPortability {
 #define GEN_COMPILERINVOCATION_CAPI_DECLS
 #include "tensor_ir/Options/CompilerOptions.h.inc"
 
-/// Configures compilation of a TensorIR module for the CUDA Tile runtime.
-///
-/// Pointer and string fields are borrowed and need only remain valid for the
-/// duration of the call that receives this structure. Empty optional paths
-/// are represented by an `MlirStringRef` with length zero.
-typedef struct MlirTensorIRCudaTileCompileOptions {
-  /// Target compute capability encoded as an SM integer, for example 100 for
-  /// `sm_100`.
-  int32_t computeCapability;
-
-  /// Preferred portability mode applied to `computeCapability`. If the target
-  /// architecture does not support this mode, compilation uses the closest
-  /// supported mode with lower specificity. For example, arch-conditional
-  /// `sm_80` is lowered to portable `sm_80`.
-  MlirTensorIRArchPortability archPortability;
-
-  /// Number of cooperative thread arrays used by each MMA instruction.
-  int32_t ctaCount;
-
-  /// Number of warps in each cooperative thread array.
-  int32_t warpCount;
-
-  /// Per-dimension tile sizes. Must be non-NULL when `numTileSizes` is nonzero.
-  const int32_t *tileSizes;
-
-  /// Number of elements in `tileSizes`.
-  size_t numTileSizes;
-
-  /// Whether the kernel signature includes size and stride arguments for every
-  /// tensor dimension, including static dimensions.
-  bool uniformSignature;
-
-  /// TensorIR-to-CUDA-Tile lowering strategy.
-  MlirTensorIRCudaTileCodegenStrategy codegenStrategy;
-
-  /// Maximum number of tile candidates retained by layout propagation.
-  /// Ignored by the affine-map strategy.
-  int32_t maxTileCandidates;
-
-  /// Optional path to which the lowered CUDA Tile IR is written.
-  MlirStringRef dumpCudaTileIRPath;
-
-  /// Optional path to which generated CUDA Tile bytecode is written.
-  MlirStringRef dumpTileIRBCPath;
-
-  /// Optional path from which CUDA Tile bytecode is loaded instead of using
-  /// the bytecode generated from the lowered IR.
-  MlirStringRef loadTileIRBCPath;
-
-  /// Optional directory for per-pass IR snapshots. When non-empty, this takes
-  /// precedence over `printIRAfterAll`.
-  MlirStringRef printIRTreeDir;
-
-  /// Whether to print IR after every compiler pass.
-  bool printIRAfterAll;
-
-  /// Whether to collect and print compiler pass timing information.
-  bool enableTiming;
-
-  /// CUDA Tile bytecode version targeted by compilation.
-  MlirTensorIRBytecodeVersion bytecodeVersion;
-
-  /// Selects the requested device artifact. Cubin requires
-  /// MlirTensorIRArchPortabilityArchConditional. Zero-initialization requests
-  /// TileIR bytecode.
-  MlirTensorIRCudaTileArtifactKind artifactKind;
-
-} MlirTensorIRCudaTileCompileOptions;
-
 /// Validates cross-component option combinations.
 MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRCompilerInvocationValidate(
     MlirTensorIRCompilerInvocation invocation, MlirStringCallback errorCallback,
@@ -300,7 +231,7 @@ typedef struct MlirTensorIRPackedArgs {
 /// The key is forwarded to `keyCallback`. On failure, the key callback is not
 /// invoked and the error is optionally forwarded to `errorCallback`.
 MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRCalculateCacheKey(
-    MlirModule module, MlirTensorIRCudaTileCompileOptions options,
+    MlirModule module, MlirTensorIRCompilerInvocation invocation,
     MlirStringCallback keyCallback, void *keyUserData,
     MlirStringCallback errorCallback, void *errorUserData);
 
@@ -320,24 +251,25 @@ typedef struct MlirTensorIRProgram {
   void *ptr;
 } MlirTensorIRProgram;
 
-/// Compiles `module` using `options` and returns a new owning program handle.
+/// Compiles `module` using `invocation` and returns a new owning program
+/// handle.
 ///
-/// `module` and all borrowed storage in `options` need only remain valid for
-/// the duration of this call. On failure, returns a handle whose `ptr` is NULL
-/// and, when `errorCallback` is non-NULL, forwards an error message and
-/// `errorUserData` to it. The message is valid only during the callback.
+/// `module` and `invocation` need only remain valid for the duration of this
+/// call. On failure, returns a handle whose `ptr` is NULL and, when
+/// `errorCallback` is non-NULL, forwards an error message and `errorUserData`
+/// to it. The message is valid only during the callback.
 MLIR_CAPI_EXPORTED MlirTensorIRProgram mlirTensorIRProgramCompile(
-    MlirModule module, MlirTensorIRCudaTileCompileOptions options,
+    MlirModule module, MlirTensorIRCompilerInvocation invocation,
     MlirStringCallback errorCallback, void *errorUserData);
 
-/// Checks whether `module` can be compiled using `options` without compiling
-/// it.
+/// Checks whether `module` can be compiled using `invocation` without
+/// compiling it.
 ///
 /// On success, writes the result to `canCompile`. On failure, leaves
 /// `canCompile` unspecified and optionally reports an error through
 /// `errorCallback`. `canCompile` must not be NULL.
 MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramCanCompile(
-    MlirModule module, MlirTensorIRCudaTileCompileOptions options,
+    MlirModule module, MlirTensorIRCompilerInvocation invocation,
     bool *canCompile, MlirStringCallback errorCallback, void *errorUserData);
 
 /// Deletes `program` and releases both the handle and its owned resources.
@@ -405,9 +337,9 @@ MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramLaunch(
     void *workspaceData, size_t workspaceSize, void *stream,
     MlirStringCallback errorCallback, void *errorUserData);
 
-/// Sends the selected TileIR bytecode or cuBin artifact to `bytecodeCallback`.
+/// Sends the compiled TileIR bytecode or cubin artifact to `bytecodeCallback`.
 ///
-/// The artifact is binary data and is not NUL-terminated. Its `MlirStringRef`
+/// The bytecode is binary data and is not NUL-terminated. Its `MlirStringRef`
 /// is valid only for the duration of the callback. `bytecodeCallback` must not
 /// be NULL. On failure, an error is optionally reported through
 /// `errorCallback`.

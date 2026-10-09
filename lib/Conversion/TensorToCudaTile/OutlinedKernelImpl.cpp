@@ -196,12 +196,10 @@ static Value zeroBroadcastCoordinates(ConversionPatternRewriter &rewriter,
 }
 
 /// Type conversion for the staged ABI. A memref becomes a pointer followed by
-/// dynamic sizes and explicit dynamic strides. The uniform ABI includes every
-/// size and stride, including values that are statically known in the IR.
+/// dynamic sizes and explicit dynamic strides.
 class OutlinedKernelTypeConverter : public TypeConverter {
 public:
-  OutlinedKernelTypeConverter(MLIRContext *context, bool uniformSignature)
-      : uniformSignature(uniformSignature) {
+  explicit OutlinedKernelTypeConverter(MLIRContext *context) {
     addConversion([](cuda_tile::TileType type) -> Type { return type; });
     addConversion([](cuda_tile::TensorViewType type) -> Type { return type; });
     addConversion(
@@ -225,44 +223,38 @@ public:
           cuda_tile::PointerType::get(IntegerType::get(context, /*width=*/8));
       return cuda_tile::TileType::get(ArrayRef<int64_t>{}, bytePointer);
     });
-    addConversion(
-        [this, context](MemRefType type, SmallVectorImpl<Type> &results)
-            -> std::optional<LogicalResult> {
-          SmallVector<int64_t> strides;
-          int64_t offset;
-          if (failed(type.getStridesAndOffset(strides, offset))) {
-            return failure();
+    addConversion([context](MemRefType type, SmallVectorImpl<Type> &results)
+                      -> std::optional<LogicalResult> {
+      SmallVector<int64_t> strides;
+      int64_t offset;
+      if (failed(type.getStridesAndOffset(strides, offset))) {
+        return failure();
+      }
+      Type elementType = convertElementType(context, type.getElementType());
+      Type pointerType = cuda_tile::PointerType::get(elementType);
+      results.push_back(
+          cuda_tile::TileType::get(ArrayRef<int64_t>{}, pointerType));
+      Type indexType = scalarIndex(context);
+      for (int64_t size : type.getShape()) {
+        if (ShapedType::isDynamic(size)) {
+          results.push_back(indexType);
+        }
+      }
+      if (!type.getLayout().isIdentity()) {
+        for (int64_t stride : strides) {
+          if (ShapedType::isDynamic(stride)) {
+            results.push_back(indexType);
           }
-          Type elementType = convertElementType(context, type.getElementType());
-          Type pointerType = cuda_tile::PointerType::get(elementType);
-          results.push_back(
-              cuda_tile::TileType::get(ArrayRef<int64_t>{}, pointerType));
-          Type indexType = scalarIndex(context);
-          for (int64_t size : type.getShape()) {
-            if (this->uniformSignature || ShapedType::isDynamic(size)) {
-              results.push_back(indexType);
-            }
-          }
-          if (this->uniformSignature || !type.getLayout().isIdentity()) {
-            for (int64_t stride : strides) {
-              if (this->uniformSignature || ShapedType::isDynamic(stride)) {
-                results.push_back(indexType);
-              }
-            }
-          }
-          return success();
-        });
+        }
+      }
+      return success();
+    });
   }
-
-  bool usesUniformSignature() const { return uniformSignature; }
 
   static cuda_tile::TileType scalarIndex(MLIRContext *context) {
     return cuda_tile::TileType::get(ArrayRef<int64_t>{},
                                     IntegerType::get(context, 32));
   }
-
-private:
-  bool uniformSignature;
 };
 
 static FailureOr<Value> only(ValueRange range) {
@@ -782,11 +774,9 @@ public:
     }
 
     ValueRange descriptor = adaptor.getSource();
-    const auto &converter =
-        *static_cast<const OutlinedKernelTypeConverter *>(typeConverter);
     unsigned field = 1;
     for (int64_t dim = 0; dim < *dimension; ++dim) {
-      if (converter.usesUniformSignature() || memrefType.isDynamicDim(dim)) {
+      if (memrefType.isDynamicDim(dim)) {
         ++field;
       }
     }
@@ -798,15 +788,14 @@ public:
   }
 };
 
-static FailureOr<Value>
-getDescriptorSize(ValueRange descriptor, MemRefType type, unsigned dimension,
-                  const OutlinedKernelTypeConverter &converter) {
+static FailureOr<Value> getDescriptorSize(ValueRange descriptor,
+                                          MemRefType type, unsigned dimension) {
   if (!type.isDynamicDim(dimension)) {
     return failure();
   }
   unsigned field = 1;
   for (unsigned dim = 0; dim < dimension; ++dim) {
-    if (converter.usesUniformSignature() || type.isDynamicDim(dim)) {
+    if (type.isDynamicDim(dim)) {
       ++field;
     }
   }
@@ -816,20 +805,17 @@ getDescriptorSize(ValueRange descriptor, MemRefType type, unsigned dimension,
   return descriptor[field];
 }
 
-static FailureOr<Value>
-getDescriptorStride(ValueRange descriptor, MemRefType type,
-                    ArrayRef<int64_t> strides, unsigned dimension,
-                    const OutlinedKernelTypeConverter &converter) {
+static FailureOr<Value> getDescriptorStride(ValueRange descriptor,
+                                            MemRefType type,
+                                            ArrayRef<int64_t> strides,
+                                            unsigned dimension) {
   if (!ShapedType::isDynamic(strides[dimension])) {
     return failure();
   }
   unsigned field = 1;
-  field += converter.usesUniformSignature()
-               ? type.getRank()
-               : llvm::count_if(type.getShape(), ShapedType::isDynamic);
+  field += llvm::count_if(type.getShape(), ShapedType::isDynamic);
   for (unsigned dim = 0; dim < dimension; ++dim) {
-    if (converter.usesUniformSignature() ||
-        ShapedType::isDynamic(strides[dim])) {
+    if (ShapedType::isDynamic(strides[dim])) {
       ++field;
     }
   }
@@ -860,8 +846,6 @@ public:
     if (failed(sourceType.getStridesAndOffset(strides, sourceOffset))) {
       return failure();
     }
-    const auto &converter =
-        *static_cast<const OutlinedKernelTypeConverter *>(typeConverter);
     auto constant = [&](int64_t value) {
       return createConstant(
           rewriter, op.getLoc(),
@@ -881,15 +865,14 @@ public:
         continue;
       }
       FailureOr<Value> dynamic =
-          getDescriptorSize(descriptor, sourceType, dimension, converter);
+          getDescriptorSize(descriptor, sourceType, dimension);
       if (failed(dynamic)) {
         return op.emitError("missing dynamic size in converted memref ABI");
       }
       sizes.push_back(*dynamic);
     }
     llvm::append_range(replacements, sizes);
-    if (sourceType.getLayout().isIdentity() &&
-        !converter.usesUniformSignature()) {
+    if (sourceType.getLayout().isIdentity()) {
       SmallVector<Value> identityStrides(sourceType.getRank());
       Value running = constant(1);
       for (size_t position = sourceType.getRank(); position > 0; --position) {
@@ -907,8 +890,8 @@ public:
         replacements.push_back(constant(stride));
         continue;
       }
-      FailureOr<Value> dynamic = getDescriptorStride(
-          descriptor, sourceType, strides, dimension, converter);
+      FailureOr<Value> dynamic =
+          getDescriptorStride(descriptor, sourceType, strides, dimension);
       if (failed(dynamic)) {
         return op.emitError("missing dynamic stride in converted memref ABI");
       }
@@ -975,9 +958,10 @@ static LogicalResult verifyOutlinedKernel(func::FuncOp kernel) {
 
 } // namespace
 
-LogicalResult convertOutlinedKernels(
-    ModuleOp module, cuda_tile::OptimizationHintsAttr optimizationHints,
-    bool uniformSignature, bool enableExperimentalCudaTileOps) {
+LogicalResult
+convertOutlinedKernels(ModuleOp module,
+                       cuda_tile::OptimizationHintsAttr optimizationHints,
+                       bool enableExperimentalCudaTileOps) {
   SmallVector<func::FuncOp> kernels;
   for (func::FuncOp func : module.getOps<func::FuncOp>()) {
     if (func->hasAttr(gpu::GPUDialect::getKernelFuncAttrName())) {
@@ -1019,7 +1003,7 @@ LogicalResult convertOutlinedKernels(
   eraseDispatchWrappers(module, kernels);
 
   MLIRContext *context = module.getContext();
-  OutlinedKernelTypeConverter typeConverter(context, uniformSignature);
+  OutlinedKernelTypeConverter typeConverter(context);
   ConversionTarget target(*context);
   target.addLegalDialect<cuda_tile::CudaTileDialect>();
   target.addIllegalDialect<

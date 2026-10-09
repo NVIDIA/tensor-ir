@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef TENSORIR_ENUMS
-#define TENSORIR_ENUMS
+#ifndef TENSORIR_DIALECT_TENSORENUMS_TD
+#define TENSORIR_DIALECT_TENSORENUMS_TD
 
 include "mlir/IR/EnumAttr.td"
 include "tensor_ir/Dialect/TensorDialect.td"
@@ -165,4 +165,4 @@ def DimState : I32EnumAttr<
 }
 
 
-#endif  // TENSORIR_ENUMS
+#endif  // TENSORIR_DIALECT_TENSORENUMS_TD

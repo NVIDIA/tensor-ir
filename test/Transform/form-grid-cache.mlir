@@ -32,16 +32,14 @@
     #nv_tensor_ir.tensor_source<-1, 0, "(8):(0)">>
 #concat = #nv_tensor_ir.concat_source<dim = 0, #half, #half>
 #result = #nv_tensor_ir.composite_source<#concat, #shared>
-func.func @shared_producer(%input: !ptr.ptr<#ptr.generic_space>,
-    %output: !ptr.ptr<#ptr.generic_space>, %scalar: f32) attributes {
+func.func @shared_producer(%input: memref<1xf32, #ptr.generic_space>,
+    %output: memref<16xf32, #ptr.generic_space>, %scalar: f32) attributes {
   nv_tensor_ir.bufferized_program,
   iteration_space = #result,
   tile_size = array<i32: 1>
 } {
-  %zero = arith.constant 0 : index
-  %input_tile = nv_tensor_ir.load %input[%zero]
-      view offset: [0], sizes: [1], strides: [1], alignment: 4
-      : !ptr.ptr<#ptr.generic_space> to tensor<1xf32>
+  %input_tile = bufferization.to_tensor %input restrict
+      : memref<1xf32, #ptr.generic_space> to tensor<1xf32>
   %twice = arith.addf %scalar, %scalar : f32
   %splat = nv_tensor_ir.splat %twice {
       layout = #nv_tensor_ir.tensor_source<-1, 0, "(16):(0)">}
@@ -57,8 +55,7 @@ func.func @shared_producer(%input: !ptr.ptr<#ptr.generic_space>,
       : tensor<1xf32> -> tensor<16xf32>
   %result = nv_tensor_ir.add %concat, %whole {layout = #result}
       : tensor<16xf32>
-  nv_tensor_ir.store %result, %output[%zero]
-      view offset: [0], sizes: [16], strides: [1], alignment: 4
-      : tensor<16xf32>, !ptr.ptr<#ptr.generic_space>
+  bufferization.materialize_in_destination %result in restrict writable %output
+      : (tensor<16xf32>, memref<16xf32, #ptr.generic_space>) -> ()
   return
 }

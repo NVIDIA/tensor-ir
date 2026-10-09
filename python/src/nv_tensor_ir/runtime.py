@@ -22,6 +22,7 @@ __all__ = [
     "CudaTileArtifactKind",
     "can_compile",
     "compile",
+    "parse_compile_options",
 ]
 
 
@@ -165,7 +166,6 @@ _COMPILE_OPTION_NAMES = frozenset(
         "cta_count",
         "warp_count",
         "tile_sizes",
-        "uniform_signature",
         "codegen_strategy",
         "max_tile_candidates",
         "dump_cuda_tile_ir_path",
@@ -223,6 +223,11 @@ def _make_compile_options(options=None, **kwargs) -> CompileOptions:
             value = list(value)
         setattr(options, name, value)
     return options
+
+
+def parse_compile_options(text: str) -> CompileOptions:
+    """Parse globally keyed compile options from a textual invocation string."""
+    return CompileOptions.parse(text)
 
 
 def can_compile(module, *, options=None, **kwargs) -> bool:

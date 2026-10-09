@@ -139,7 +139,7 @@ static SmallVector<int32_t> convertInt64ToI32(ArrayRef<int64_t> int64Values) {
 
 /// Static shape/layout facts decoded from TensorIR tensor descriptors.
 ///
-/// TensorIR no longer encodes dynamic shape divisibility in TensorType. Dynamic
+/// TensorIR no longer encodes dynamic shape divisibility in RankedTensorType. Dynamic
 /// stride divisibility still comes from the stride layout string
 /// `?{div=N}` and is relayed to make_tensor_view operands.
 struct TensorDescriptorStaticMetadata {
@@ -303,63 +303,29 @@ private:
 ///                 If metadata has no explicit strides, row-major strides are
 ///                 computed from sizes and no stride args are expected.
 static size_t processTensorDescriptor(
-    nv_tensor_ir::TensorType tensorTy, Value tensorIRPtr,
+    RankedTensorType tensorTy, Value tensorIRPtr,
     ArrayRef<BlockArgument> cudaTileArgs, size_t ptrIdx,
     const TensorDescriptorStaticMetadata &metadata,
     CudaTileTensorDescriptor::TensorKind tensorKind, AffineMap iterSpaceMap,
     ArrayRef<int32_t> iterSpaceIds, bool allowTma, int64_t alignment,
     int32_t cost,
-    SmallVectorImpl<CudaTileTensorDescriptor> &inOutTensorDescriptors,
-    bool uniformSignature = false) {
+    SmallVectorImpl<CudaTileTensorDescriptor> &inOutTensorDescriptors) {
   assert(llvm::equal(tensorTy.getShape(), metadata.sizes) &&
          "Tensor type shape must match descriptor metadata");
 
   size_t sizeStartIdx = ptrIdx + 1;
 
-  // When uniformSignature is true, all dims get kernel args.
-  // When false, only dynamic dims get kernel args (original behavior).
-  int numSizeArgs = uniformSignature ? static_cast<int>(metadata.sizes.size())
-                                     : countDynamicDimensions(metadata.sizes);
-
-  int numStrideArgs = 0;
-  if (metadata.hasExplicitStrides) {
-    numStrideArgs = uniformSignature ? static_cast<int>(metadata.strides.size())
-                                     : countDynamicDimensions(metadata.strides);
-  }
-
+  int numSizeArgs = countDynamicDimensions(metadata.sizes);
+  int numStrideArgs = metadata.hasExplicitStrides
+                          ? countDynamicDimensions(metadata.strides)
+                          : 0;
   size_t strideStartIdx = sizeStartIdx + numSizeArgs;
   size_t numArgsConsumed = 1 + numSizeArgs + numStrideArgs;
 
-  // Extract block args that correspond to dynamic dims.
-  // When uniform, all dims have block args but only dynamic ones go into the
-  // descriptor (static dim block args become unused dead parameters).
-  SmallVector<BlockArgument> dynamicSizes;
-  if (uniformSignature) {
-    for (int d = 0; d < numSizeArgs; ++d) {
-      if (metadata.sizes[d] == cuda_tile::TensorViewType::kDynamic) {
-        dynamicSizes.push_back(cudaTileArgs[sizeStartIdx + d]);
-      }
-    }
-  } else {
-    dynamicSizes.assign(cudaTileArgs.slice(sizeStartIdx, numSizeArgs).begin(),
-                        cudaTileArgs.slice(sizeStartIdx, numSizeArgs).end());
-  }
-
-  SmallVector<BlockArgument> dynamicStrides;
-  if (metadata.hasExplicitStrides) {
-    if (uniformSignature) {
-      for (int d = 0; d < numStrideArgs; ++d) {
-        if (d < static_cast<int>(metadata.strides.size()) &&
-            metadata.strides[d] == cuda_tile::TensorViewType::kDynamic) {
-          dynamicStrides.push_back(cudaTileArgs[strideStartIdx + d]);
-        }
-      }
-    } else {
-      dynamicStrides.assign(
-          cudaTileArgs.slice(strideStartIdx, numStrideArgs).begin(),
-          cudaTileArgs.slice(strideStartIdx, numStrideArgs).end());
-    }
-  }
+  SmallVector<BlockArgument> dynamicSizes(
+      cudaTileArgs.slice(sizeStartIdx, numSizeArgs));
+  SmallVector<BlockArgument> dynamicStrides(
+      cudaTileArgs.slice(strideStartIdx, numStrideArgs));
 
   CudaTileTensorDescriptor descriptor(
       /*tensorIRTensor=*/tensorIRPtr,
@@ -981,6 +947,9 @@ public:
   /// Target occupancy (CTAs per SM). Default is 1.
   int32_t occupancy = 1;
 
+  /// Minimum CTAs per SM. Default is 1; 0 disables the residency hint.
+  int32_t minCTAsPerSM = 1;
+
   /// Number of warps per CTA. Default is 4.
   int32_t numWarps = 4;
 
@@ -992,7 +961,6 @@ public:
 
   /// When true, the kernel signature includes args for ALL tensor sizes and
   /// strides.  When false, only dynamic dims produce args (original behavior).
-  bool uniformSignature = false;
 
   /// Grid size X dimension for static persistent kernels.
   int64_t gridSizeX = 0;
@@ -1101,7 +1069,7 @@ TensorToCudaTileConversionState::computeCudaTileInOutTensorDescriptors(
       lastArgEnd = mappingEnd;
     }
 
-    auto tensorTy = dyn_cast<nv_tensor_ir::TensorType>(argType);
+    auto tensorTy = dyn_cast<RankedTensorType>(argType);
     if (!tensorTy) {
       continue;
     }
@@ -1142,7 +1110,7 @@ TensorToCudaTileConversionState::computeCudaTileInOutTensorDescriptors(
         tensorTy, tensorIRArg, cudaTileArgs, ptrIdx, metadata,
         CudaTileTensorDescriptor::TensorKind::Input, iterSpaceMap, iterSpaceIds,
         descriptor.allowTma, descriptor.alignment, descriptor.cost,
-        inOutTensorDescriptors, uniformSignature);
+        inOutTensorDescriptors);
 
     assert(mappingEnd == ptrIdx + numArgsConsumed &&
            "Mapping size mismatch: expected tensor to expand to "
@@ -1173,7 +1141,7 @@ TensorToCudaTileConversionState::computeCudaTileInOutTensorDescriptors(
 
   size_t outputArgIdx = lastArgEnd;
   for (auto [tensorIdx, returnValue] : llvm::enumerate(returnValues)) {
-    auto tensorTy = dyn_cast<nv_tensor_ir::TensorType>(returnValue.getType());
+    auto tensorTy = dyn_cast<RankedTensorType>(returnValue.getType());
     if (!tensorTy) {
       continue;
     }
@@ -1192,7 +1160,7 @@ TensorToCudaTileConversionState::computeCudaTileInOutTensorDescriptors(
         tensorTy, returnValue, cudaTileArgs, ptrIdx, metadata,
         CudaTileTensorDescriptor::TensorKind::Output, iterSpaceMap,
         {iterSpaceId}, descriptor.allowTma, descriptor.alignment,
-        descriptor.cost, inOutTensorDescriptors, uniformSignature);
+        descriptor.cost, inOutTensorDescriptors);
 
     outputArgIdx = ptrIdx + numArgsConsumed;
   }
@@ -1424,8 +1392,7 @@ void StaticPersistenceStrategy::createReturnOp(OpBuilder &builder, Location loc,
 LogicalResult functionArgumentConverter(Type argType,
                                         const TypeConverter &typeConverter,
                                         SmallVectorImpl<Type> &result,
-                                        std::optional<int> numDynamicStrides,
-                                        bool uniformSignature) {
+                                        std::optional<int> numDynamicStrides) {
 
   // Convert input type to CUDA Tile type.
   auto converted =
@@ -1435,7 +1402,7 @@ LogicalResult functionArgumentConverter(Type argType,
   }
 
   // Handle non-tensor type (e.g. a scalar).
-  auto tensorTy = dyn_cast<nv_tensor_ir::TensorType>(argType);
+  auto tensorTy = dyn_cast<RankedTensorType>(argType);
   if (!tensorTy) {
     result.push_back(converted);
     return success();
@@ -1450,9 +1417,7 @@ LogicalResult functionArgumentConverter(Type argType,
       cuda_tile::TileType::get(/*shape=*/llvm::ArrayRef<int64_t>{}, ptrType);
   result.push_back(ptrTileTy);
 
-  int numSizeArgs = uniformSignature
-                        ? tensorTy.getRank()
-                        : countDynamicDimensions(tensorTy.getShape());
+  int numSizeArgs = countDynamicDimensions(tensorTy.getShape());
 
   int strideCount =
       numDynamicStrides.has_value() ? *numDynamicStrides : numSizeArgs;
@@ -1482,7 +1447,6 @@ Type convertGraphOpSignature(FunctionType funcTy,
                              const TypeConverter &typeConverter,
                              ArrayRef<TensorDescriptor> argDescriptors,
                              ArrayRef<TensorDescriptor> resDescriptors,
-                             bool uniformSignature,
                              TypeConverter::SignatureConversion &result) {
 
   LLVM_DEBUG(llvm::dbgs() << "Converting GraphOp signature with "
@@ -1496,18 +1460,14 @@ Type convertGraphOpSignature(FunctionType funcTy,
     int numStrideArgs = 0;
     const TensorDescriptor &descriptor = argDescriptors[idx];
     if (!descriptor.strides.empty()) {
-      if (uniformSignature) {
-        numStrideArgs = descriptor.strides.size();
-      } else {
-        numStrideArgs =
-            llvm::count_if(descriptor.strides, [](const auto &stride) {
-              return stride.staticValue == ShapedType::kDynamic;
-            });
-      }
+      numStrideArgs =
+          llvm::count_if(descriptor.strides, [](const auto &stride) {
+            return stride.staticValue == ShapedType::kDynamic;
+          });
     }
 
     if (failed(functionArgumentConverter(argType, typeConverter, converted,
-                                         numStrideArgs, uniformSignature))) {
+                                         numStrideArgs))) {
       return {};
     }
 
@@ -1521,18 +1481,14 @@ Type convertGraphOpSignature(FunctionType funcTy,
     int numStrideArgs = 0;
     const TensorDescriptor &descriptor = resDescriptors[idx];
     if (!descriptor.strides.empty()) {
-      if (uniformSignature) {
-        numStrideArgs = descriptor.strides.size();
-      } else {
-        numStrideArgs =
-            llvm::count_if(descriptor.strides, [](const auto &stride) {
-              return stride.staticValue == ShapedType::kDynamic;
-            });
-      }
+      numStrideArgs =
+          llvm::count_if(descriptor.strides, [](const auto &stride) {
+            return stride.staticValue == ShapedType::kDynamic;
+          });
     }
 
     if (failed(functionArgumentConverter(resType, typeConverter, converted,
-                                         numStrideArgs, uniformSignature))) {
+                                         numStrideArgs))) {
       return {};
     }
 
@@ -2466,7 +2422,7 @@ static bool hasUniformTensors(nv_tensor_ir::GraphOp graphOp,
                               int64_t uniformRank) {
   auto walkResult = graphOp.walk([&](Operation *op) -> WalkResult {
     auto uniformTensorRank = [&](Value value) -> bool {
-      auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(value.getType());
+      auto tensorType = dyn_cast<RankedTensorType>(value.getType());
       return !tensorType || tensorType.getRank() == uniformRank;
     };
 
@@ -2504,7 +2460,7 @@ static bool hasMixedRanks(nv_tensor_ir::GraphOp graphOp) {
 
   // Check input arguments
   for (Type argType : graphOp.getArgumentTypes()) {
-    if (auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(argType)) {
+    if (auto tensorType = dyn_cast<RankedTensorType>(argType)) {
       size_t currentRank = tensorType.getRank();
       if (firstTensor) {
         expectedRank = currentRank;
@@ -2517,7 +2473,7 @@ static bool hasMixedRanks(nv_tensor_ir::GraphOp graphOp) {
 
   // Check result types
   for (Type resType : graphOp.getFunctionType().getResults()) {
-    if (auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(resType)) {
+    if (auto tensorType = dyn_cast<RankedTensorType>(resType)) {
       size_t currentRank = tensorType.getRank();
       if (currentRank != expectedRank) {
         return true; // Found different rank
@@ -2534,14 +2490,14 @@ static size_t getMaxRank(nv_tensor_ir::GraphOp graphOp) {
 
   // Check input arguments
   for (Type argType : graphOp.getArgumentTypes()) {
-    if (auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(argType)) {
+    if (auto tensorType = dyn_cast<RankedTensorType>(argType)) {
       maxRank = std::max(maxRank, static_cast<size_t>(tensorType.getRank()));
     }
   }
 
   // Check result types
   for (Type resType : graphOp.getFunctionType().getResults()) {
-    if (auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(resType)) {
+    if (auto tensorType = dyn_cast<RankedTensorType>(resType)) {
       maxRank = std::max(maxRank, static_cast<size_t>(tensorType.getRank()));
     }
   }
@@ -2552,7 +2508,7 @@ static size_t getMaxRank(nv_tensor_ir::GraphOp graphOp) {
 static bool hasAnyDynamicInputs(nv_tensor_ir::GraphOp graphOp) {
   // Check input tensors only - outputs are derived from inputs
   for (Type type : graphOp.getArgumentTypes()) {
-    if (auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(type)) {
+    if (auto tensorType = dyn_cast<RankedTensorType>(type)) {
       if (!tensorType.hasStaticShape()) {
         return true; // Found a dynamic input tensor
       }
@@ -2684,7 +2640,7 @@ static LogicalResult computeKernelInfoAndTileSizes(
 
     if (hasDynamicInputs) {
       auto tensorType =
-          dyn_cast<nv_tensor_ir::TensorType>(graphOp.getArgumentTypes()[0]);
+          dyn_cast<RankedTensorType>(graphOp.getArgumentTypes()[0]);
       if (tensorType) {
         size_t rank = tensorType.getRank();
         kernelInfo.tileSizes = SmallVector<int32_t>(rank, kDefaultTileSize);
@@ -2706,7 +2662,7 @@ static LogicalResult computeKernelInfoAndTileSizes(
         kernelInfo.tileSizes =
             SmallVector<int32_t>(iterSpaceRank, kDefaultTileSize);
       } else {
-        auto firstOutputTensor = dyn_cast<nv_tensor_ir::TensorType>(*it);
+        auto firstOutputTensor = dyn_cast<RankedTensorType>(*it);
         if (firstOutputTensor) {
           size_t rank = firstOutputTensor.getRank();
           kernelInfo.tileSizes = SmallVector<int32_t>(rank, kDefaultTileSize);
@@ -3074,7 +3030,7 @@ public:
         origFuncType.getNumInputs());
     auto convFuncType = convertGraphOpSignature(
         origFuncType, *getTypeConverter(), *argDescriptors, *resDescriptors,
-        conversionState.uniformSignature, signatureConversion);
+        signatureConversion);
 
     if (!convFuncType) {
       return graphOp.emitError("Failed to convert graph signature");
@@ -3103,7 +3059,7 @@ public:
     MLIRContext *ctx = rewriter.getContext();
     auto entryOpHint = tensor_to_cuda_tile::createEntryOptimizationHints(
         ctx, conversionState.numCTAs, conversionState.occupancy,
-        conversionState.numWarps);
+        conversionState.numWarps, conversionState.minCTAsPerSM);
 
     auto entryOp = cuda_tile::EntryOp::create(
         rewriter, graphOp.getLoc(), graphOp.getName(),
@@ -3251,7 +3207,7 @@ public:
     Value inputTile = conversionState.getOperandTile(adaptor.getInput());
 
     // Get the output tensor type and compute tile sizes from iteration space.
-    auto resultType = cast<nv_tensor_ir::TensorType>(op.getType());
+    auto resultType = cast<RankedTensorType>(op.getType());
 
     auto &iterSpaceTileSizes = conversionState.kernelInfo.tileSizes;
     AffineMap outputIterSpaceMap =
@@ -3482,8 +3438,12 @@ public:
     Value result = reductionEmission.buildEpilogue(
         rewriter, reduceOp.getResult(0), inputShape[reductionDim]);
 
-    // Reshape the result to match expected output shape (add dimension of size
-    // 1)
+    if (op.dropsReducedDimensions()) {
+      rewriter.replaceOp(op, result);
+      return success();
+    }
+
+    // Add a unit dimension to match a retained-rank result.
     SmallVector<int64_t> reshapeShape(outputShape.begin(), outputShape.end());
     reshapeShape.insert(reshapeShape.begin() + reductionDim, 1);
     auto reshapeType = cuda_tile::TileType::get(reshapeShape, elementType);
@@ -3601,16 +3561,17 @@ namespace tensor_to_cuda_tile {
 std::unique_ptr<ConversionState>
 createAffineMapConversionState(MLIRContext *context,
                                const TypeConverter &typeConverter,
-                               const TensorToCudaTilePipelineOptions &options) {
+                               const CodegenOptions &codegenOptions,
+                               const CudaTileOptions &cudaTileOptions) {
 
   TensorToCudaTileConversionState state;
-  state.tileSize.assign(options.tileSize.begin(), options.tileSize.end());
-  state.numCTAs = options.numCTAs;
-  state.occupancy = options.occupancy;
-  state.numWarps = options.numWarps;
-  state.smCount = options.smCount;
-  state.uniformSignature = options.uniformSignature;
-  state.persistence = options.persistence;
+  state.tileSize.assign(codegenOptions.tileSize.begin(),
+                        codegenOptions.tileSize.end());
+  state.numCTAs = codegenOptions.ctaCount;
+  state.occupancy = cudaTileOptions.occupancy;
+  state.numWarps = cudaTileOptions.warpCount;
+  state.smCount = cudaTileOptions.smCount;
+  state.persistence = cudaTileOptions.persistenceMode;
 
   bool enableExperimentalCudaTileOps = false;
   return std::make_unique<ConversionStateImpl>(

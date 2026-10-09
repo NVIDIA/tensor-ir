@@ -11,7 +11,6 @@
 #include "mlir/IR/BuiltinOps.h"
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <map>
@@ -61,8 +60,9 @@ public:
 
   /// Set runtime values for dynamic '?' strides before calling buildFromMLIR.
   /// Values are indexed by dimension position: dynamicStrides[d] resolves the
-  /// '?' stride at position d.  If not set, dynamic strides are deduced
-  /// assuming contiguous (packed) layout.
+  /// '?' stride at position d. A non-empty list must provide a value for every
+  /// dynamic stride position. If not set, dynamic strides are deduced assuming
+  /// contiguous (packed) layout.
   void setDynamicStrides(llvm::ArrayRef<int64_t> strides) {
     dynamicStrides.assign(strides.begin(), strides.end());
   }
@@ -83,6 +83,9 @@ public:
    * @return Status indicating success or failure
    */
   Status buildFromMLIR(mlir::ModuleOp module);
+
+  /// Build only graph input and output tensors, without CPU reference nodes.
+  Status buildIOTensorsFromMLIR(mlir::ModuleOp module);
 
   // ============================================================================
   // Graph Execution
@@ -151,200 +154,11 @@ private:
   createTensorFromMLIRType(const std::string &name, mlir::Type mlirType,
                            llvm::ArrayRef<int64_t> stridePattern = {});
 
-  /**
-   * @brief Parse tensor shape from MLIR type
-   *
-   * Extracts shape directly from ranked tensor types.
-   * Dynamic dimensions are preserved as ShapedType::kDynamic.
-   *
-   * @param mlirType MLIR tensor type
-   * @return Vector of dimension sizes
-   */
-  std::vector<int64_t> parseTensorShape(mlir::Type mlirType);
-
-  /**
-   * @brief Parse data type from MLIR type
-   *
-   * @param mlirType MLIR element type
-   * @return DataType enum, or an error for an unsupported element type
-   */
-  StatusOr<DataType> parseDataType(mlir::Type mlirType);
-
-  /**
-   * @brief Create input/output tensors from MLIR module signature
-   *
-   * Analyzes the graph operation to extract input and output tensor
-   * information, then creates SimplifiedTensor instances for all inputs and
-   * outputs.
-   *
-   * @param module MLIR module containing the graph
-   * @return Status indicating success or failure
-   */
+  /// Create input/output tensors using the graph signature's stride metadata.
   Status createIOTensor(mlir::ModuleOp module);
 
-  /**
-   * @brief Create Node for a tensor_ir.matmul operation
-   *
-   * Extracts tensor shapes directly from the operation's type information.
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createMatmulNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.constant operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createConstantNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.splat operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createSplatNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.iota operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createIotaNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.reduce operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createReduceNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for binary pointwise operations
-   *
-   * @param op MLIR operation
-   * @param mode BinaryPointwiseMode indicating the operation type
-   * @return Status indicating success or failure
-   */
-  Status createBinaryPointwiseNode(mlir::Operation *op,
-                                   BinaryPointwiseMode mode);
-
-  /**
-   * @brief Create Node for beta-parameterized binary pointwise operations
-   *
-   * @param op MLIR operation
-   * @param mode ParametricBinaryPointwiseMode indicating the operation type
-   * @param beta Floating-point activation parameter
-   * @return Status indicating success or failure
-   */
-  Status createParametricBinaryPointwiseNode(mlir::Operation *op,
-                                             ParametricBinaryPointwiseMode mode,
-                                             double beta);
-
-  /**
-   * @brief Create a one-result node with shared tensor plumbing
-   *
-   * @param op MLIR operation
-   * @param expectedOperands Number of input operands expected by the operation
-   * @param nodeFactory Factory that builds the concrete node
-   * @return Status indicating success or failure
-   */
-  Status
-  createSingleResultNode(mlir::Operation *op, unsigned expectedOperands,
-                         llvm::function_ref<std::unique_ptr<Node>(
-                             llvm::ArrayRef<std::shared_ptr<SimplifiedTensor>>,
-                             const std::string &)>
-                             nodeFactory);
-
-  /**
-   * @brief Create Node for unary pointwise operations
-   *
-   * @param op MLIR operation
-   * @param mode UnaryPointwiseMode indicating the operation type
-   * @return Status indicating success or failure
-   */
-  Status createUnaryPointwiseNode(mlir::Operation *op, UnaryPointwiseMode mode);
-
-  /**
-   * @brief Create Node for beta-parameterized unary pointwise operations
-   *
-   * @param op MLIR operation
-   * @param mode ParametricUnaryPointwiseMode indicating the operation type
-   * @param beta Floating-point activation parameter
-   * @return Status indicating success or failure
-   */
-  Status createParametricUnaryPointwiseNode(mlir::Operation *op,
-                                            ParametricUnaryPointwiseMode mode,
-                                            double beta);
-
-  /**
-   * @brief Create Node for a tensor_ir.cmp operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createCompareNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.binary_select operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createBinarySelectNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.concatenate operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createConcatenateNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.slice operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createSliceNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.reshape operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createReshapeNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.broadcast operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createBroadcastNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.transpose operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createTransposeNode(mlir::Operation *op);
-
-  /**
-   * @brief Create Node for a tensor_ir.convert operation
-   *
-   * @param op MLIR operation
-   * @return Status indicating success or failure
-   */
-  Status createConvertNode(mlir::Operation *op);
+  /// Collect tensors, construct the operation's node, and validate it.
+  Status createNode(mlir::Operation *op);
 
   /**
    * @brief Get or create tensor for an MLIR SSA value
@@ -369,23 +183,6 @@ private:
    * "addResult01")
    */
   std::string generateUniqueTensorName(mlir::Value value);
-
-  /**
-   * @brief Helper function to print tensor shape
-   *
-   * @param dims Dimension sizes
-   */
-  void printTensorShape(llvm::ArrayRef<int64_t> dims) const;
-
-  /// Given concrete dims and a stride pattern (with kDynamic for '?'),
-  /// resolve dynamic stride entries.
-  /// @param userStrides  If non-empty, use userStrides[d] for '?' at pos d.
-  ///                     If empty, deduce contiguous (packed) strides from
-  ///                     dims.
-  static std::vector<int64_t>
-  resolveStrides(llvm::ArrayRef<int64_t> dims,
-                 llvm::ArrayRef<int64_t> stridePattern,
-                 llvm::ArrayRef<int64_t> userStrides = {});
 
   // ============================================================================
   // Graph Data Structures

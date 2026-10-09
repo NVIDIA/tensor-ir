@@ -3,7 +3,9 @@
 
 namespace tensor_ir.rt.schema;
 
-struct BcVersion { major: uint8; minor: uint8; tag: uint16; }
+// Avoid the major()/minor() device-number macros from QNX system headers in
+// the generated C++ accessors.
+struct BcVersion { major_version: uint8; minor_version: uint8; tag: uint16; }
 
 enum Persistence : uint8 {
   None = 0,
@@ -58,7 +60,6 @@ table LaunchMetadata {
   grid_shape_tensor_idx: int32;
   grid_shape: [int64];
   grid_shape_dim_mapping: [int32];
-  uniform_signature: bool;
   persistence: Persistence;
   sm_count: int32;
   occupancy: int32;

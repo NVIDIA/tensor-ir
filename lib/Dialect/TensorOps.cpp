@@ -14,6 +14,7 @@
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -77,9 +78,9 @@ FailureOr<int64_t> mlir::nv_tensor_ir::mergeEqualDimensions(int64_t lhs,
 }
 
 LogicalResult mlir::nv_tensor_ir::verifyMatmulShapes(Operation *op,
-                                                     TensorType aType,
-                                                     TensorType bType,
-                                                     TensorType cType) {
+                                                     RankedTensorType aType,
+                                                     RankedTensorType bType,
+                                                     RankedTensorType cType) {
   if (aType.getRank() < 2 || bType.getRank() != aType.getRank() ||
       cType.getRank() != aType.getRank()) {
     if (aType.getRank() < 2) {
@@ -98,10 +99,10 @@ LogicalResult mlir::nv_tensor_ir::verifyMatmulShapes(Operation *op,
   ArrayRef<int64_t> cBatchShape = cShape.drop_back(2);
   for (auto [aDim, bDim, cDim] :
        llvm::zip_equal(aBatchShape, bBatchShape, cBatchShape)) {
-    FailureOr<int64_t> expected = mergeBroadcastDimensions(aDim, bDim);
+    FailureOr<int64_t> expected = mergeEqualDimensions(aDim, bDim);
     if (failed(expected) || cDim != *expected) {
       return op->emitOpError()
-             << "expects C batch dimensions to be the broadcasted shape of A "
+             << "expects C batch dimensions to equal the merged shape of A "
                 "and B, but got "
              << aBatchShape << ", " << bBatchShape << ", and " << cBatchShape;
     }
@@ -148,6 +149,70 @@ mlir::nv_tensor_ir::detail::verifyDynamicDimsOpInterface(Operation *op) {
 //===----------------------------------------------------------------------===//
 // Layout transformation helpers
 //===----------------------------------------------------------------------===//
+
+static ParseResult parseContractionIndexingMaps(OpAsmParser &parser,
+                                                ArrayAttr &indexingMaps) {
+  SmallVector<std::pair<StringRef, AffineExpr>> dimensions;
+  auto parseDimension = [&]() -> ParseResult {
+    auto loc = parser.getCurrentLocation();
+    StringRef name;
+    if (parser.parseKeyword(&name)) {
+      return failure();
+    }
+    if (llvm::any_of(dimensions,
+                     [&](const auto &dim) { return dim.first == name; })) {
+      return parser.emitError(loc, "duplicate indexing-map dimension ") << name;
+    }
+    dimensions.emplace_back(
+        name, getAffineDimExpr(dimensions.size(), parser.getContext()));
+    return success();
+  };
+  if (parser.parseCommaSeparatedList(OpAsmParser::Delimiter::Paren,
+                                     parseDimension) ||
+      parser.parseArrow()) {
+    return failure();
+  }
+
+  SmallVector<Attribute> maps;
+  for (unsigned i = 0; i < 3; ++i) {
+    if (i && parser.parseComma()) {
+      return failure();
+    }
+    SmallVector<AffineExpr> results;
+    auto parseResult = [&]() -> ParseResult {
+      AffineExpr expr;
+      if (parser.parseAffineExpr(dimensions, expr)) {
+        return failure();
+      }
+      results.push_back(expr);
+      return success();
+    };
+    if (parser.parseCommaSeparatedList(OpAsmParser::Delimiter::Paren,
+                                       parseResult)) {
+      return failure();
+    }
+    auto map =
+        AffineMap::get(dimensions.size(), 0, results, parser.getContext());
+    maps.push_back(AffineMapAttr::get(map));
+  }
+  indexingMaps = parser.getBuilder().getArrayAttr(maps);
+  return success();
+}
+
+static void printContractionIndexingMaps(OpAsmPrinter &printer, Operation *,
+                                         ArrayAttr indexingMaps) {
+  auto firstMap = cast<AffineMapAttr>(indexingMaps[0]).getValue();
+  printer << '(';
+  llvm::interleaveComma(llvm::seq<unsigned>(0, firstMap.getNumDims()), printer,
+                        [&](unsigned i) { printer << 'd' << i; });
+  printer << ") -> ";
+  llvm::interleaveComma(indexingMaps, printer, [&](Attribute attr) {
+    printer << '(';
+    llvm::interleaveComma(cast<AffineMapAttr>(attr).getValue().getResults(),
+                          printer);
+    printer << ')';
+  });
+}
 
 static ParseResult parseReductionBody(OpAsmParser &parser, Region &body);
 static void printReductionBody(OpAsmPrinter &printer, Operation *,
@@ -358,61 +423,184 @@ static void printReductionBody(OpAsmPrinter &printer, Operation *,
   printer.printRegion(body, /*printEntryBlockArgs=*/false);
 }
 
-namespace {
-
-LogicalResult verifyReductionShape(Operation *op, ArrayRef<int64_t> inputShape,
-                                   nv_tensor_ir::TensorType outputType,
-                                   ArrayRef<int32_t> dimensions,
-                                   bool verifyRank) {
-  if (verifyRank &&
-      static_cast<int64_t>(inputShape.size()) != outputType.getRank()) {
-    return op->emitOpError()
-           << "expects input and output to have the same rank, but got "
-           << inputShape.size() << " and " << outputType.getRank();
-  }
-  SmallVector<bool> isReductionDimension(inputShape.size(), false);
+/// Checks that `dimensions` are unique and in range for a tensor of `rank`.
+/// The returned bitvector is indexed by input dimension.
+static FailureOr<llvm::SmallBitVector>
+verifyReductionDimensions(Operation *op, int64_t rank,
+                          ArrayRef<int32_t> dimensions) {
+  llvm::SmallBitVector reducedDimensions(static_cast<unsigned>(rank));
   for (int32_t dimension : dimensions) {
-    if (dimension < 0 || static_cast<size_t>(dimension) >= inputShape.size()) {
-      return op->emitOpError()
-             << "reduction dimension " << dimension
-             << " is out of bounds for tensor rank " << inputShape.size();
+    if (dimension < 0 || static_cast<int64_t>(dimension) >= rank) {
+      return op->emitOpError() << "reduction dimension " << dimension
+                               << " is out of bounds for tensor rank " << rank;
     }
-    if (isReductionDimension[dimension]) {
+    if (reducedDimensions.test(dimension)) {
       return op->emitOpError()
              << "reduction dimension " << dimension << " is duplicated";
     }
-    isReductionDimension[dimension] = true;
+    reducedDimensions.set(dimension);
+  }
+  return reducedDimensions;
+}
+
+/// Verifies that `outputType` keeps every reduced dimension at static extent 1
+/// or drops every reduced dimension. Non-reduced extents come from
+/// `inputShape`.
+static LogicalResult
+verifyReductionResultShape(Operation *op, ArrayRef<int64_t> inputShape,
+                           RankedTensorType outputType,
+                           const llvm::SmallBitVector &reducedDimensions) {
+  int64_t inputRank = inputShape.size();
+  int64_t outputRank = outputType.getRank();
+  int64_t droppedRank =
+      inputRank - static_cast<int64_t>(reducedDimensions.count());
+  bool dropsReducedDimensions = outputRank == droppedRank;
+  if (outputRank != inputRank && !dropsReducedDimensions) {
+    return op->emitOpError()
+           << "expects output rank to be " << inputRank
+           << " when retaining reduced dimensions or " << droppedRank
+           << " when dropping them, but got " << outputRank;
   }
 
-  for (int64_t dimension = 0;
-       static_cast<size_t>(dimension) < inputShape.size(); ++dimension) {
-    int64_t expected =
-        isReductionDimension[dimension] ? 1 : inputShape[dimension];
-    int64_t actual = outputType.getDimSize(dimension);
-    // A dynamic result may be a less-refined declaration at a graph
-    // signature. Otherwise preserve dynamic/static information exactly.
-    if (!ShapedType::isDynamic(actual) && actual != expected) {
+  int64_t outputDimension = 0;
+  for (int64_t inputDimension = 0; inputDimension < inputRank;
+       ++inputDimension) {
+    bool isReduced =
+        reducedDimensions.test(static_cast<unsigned>(inputDimension));
+    if (dropsReducedDimensions && isReduced) {
+      continue;
+    }
+    int64_t expected = isReduced ? 1 : inputShape[inputDimension];
+    int64_t actual = outputType.getDimSize(outputDimension);
+    if (actual != expected) {
       if (ShapedType::isDynamic(expected)) {
         return op->emitOpError()
-               << "expects output dimension " << dimension
+               << "expects output dimension " << outputDimension
                << " to remain dynamic because the corresponding input "
                   "dimension is dynamic, but got "
                << outputType;
       }
       return op->emitOpError()
-             << "expects output dimension " << dimension << " to be "
+             << "expects output dimension " << outputDimension << " to be "
              << expected << ", but got " << actual;
     }
+    ++outputDimension;
   }
   return success();
 }
 
-} // namespace
+static bool reductionDropsDimensions(int64_t inputRank, int64_t outputRank,
+                                     ArrayRef<int32_t> dimensions) {
+  return outputRank == inputRank - static_cast<int64_t>(dimensions.size());
+}
+
+static llvm::SmallBitVector reductionDimMask(int64_t inputRank,
+                                             ArrayRef<int32_t> dimensions) {
+  llvm::SmallBitVector mask(static_cast<unsigned>(inputRank));
+  for (int32_t dimension : dimensions) {
+    assert(dimension >= 0 && dimension < inputRank &&
+           "dimension is out of bounds");
+    mask.set(static_cast<unsigned>(dimension));
+  }
+  return mask;
+}
+
+bool ReduceOp::dropsReducedDimensions() {
+  return reductionDropsDimensions(getInput().getType().getRank(),
+                                  getOutput().getType().getRank(),
+                                  getDimensions());
+}
+
+llvm::SmallBitVector ReduceOp::getReductionDimMask() {
+  return reductionDimMask(getInput().getType().getRank(), getDimensions());
+}
+
+AffineMap ReduceOp::computeCanonicalOutputIterSpaceMap(
+    std::optional<unsigned> iterSpaceRank) {
+  unsigned inputRank = getInput().getType().getRank();
+  unsigned numIterSpaceDims = iterSpaceRank.value_or(inputRank);
+  if (numIterSpaceDims != inputRank) {
+    return {};
+  }
+
+  llvm::SmallBitVector reducedDimensions = getReductionDimMask();
+  bool dropsDimensions = dropsReducedDimensions();
+  return AffineMap::getFilteredIdentityMap(
+      getContext(), numIterSpaceDims, [&](AffineDimExpr dimension) {
+        return !dropsDimensions ||
+               !reducedDimensions.test(dimension.getPosition());
+      });
+}
+
+AffineMap ReduceOp::inferInputFromOutputIterSpaceMap(unsigned inputIndex) {
+  assert(inputIndex == 0 && "invalid ReduceOp input index");
+  AffineMap outputMap = getOutputIterSpaceMap();
+  if (!outputMap || !dropsReducedDimensions()) {
+    return outputMap;
+  }
+
+  unsigned inputRank = getInput().getType().getRank();
+  llvm::SmallBitVector reducedDimensions = getReductionDimMask();
+  if (outputMap.getNumDims() != inputRank ||
+      outputMap.getNumResults() != inputRank - reducedDimensions.count()) {
+    return {};
+  }
+
+  SmallVector<AffineExpr> inputResults;
+  unsigned outputIndex = 0;
+  for (unsigned inputDim = 0; inputDim < inputRank; ++inputDim) {
+    if (reducedDimensions.test(inputDim)) {
+      inputResults.push_back(getAffineDimExpr(inputDim, getContext()));
+      continue;
+    }
+    inputResults.push_back(outputMap.getResult(outputIndex++));
+  }
+  return AffineMap::get(outputMap.getNumDims(), outputMap.getNumSymbols(),
+                        inputResults, getContext());
+}
+
+AffineMap ReduceOp::inferOutputFromInputIterSpaceMaps() {
+  AffineMap inputMap = getInputIterSpaceMap(0);
+  if (!inputMap || !dropsReducedDimensions()) {
+    return inputMap;
+  }
+
+  llvm::SmallBitVector reducedDimensions = getReductionDimMask();
+  if (inputMap.getNumResults() != reducedDimensions.size()) {
+    return {};
+  }
+
+  SmallVector<AffineExpr> outputResults;
+  for (auto [index, result] : llvm::enumerate(inputMap.getResults())) {
+    if (!reducedDimensions.test(index)) {
+      outputResults.push_back(result);
+    }
+  }
+  return AffineMap::get(inputMap.getNumDims(), inputMap.getNumSymbols(),
+                        outputResults, getContext());
+}
+
+bool ReduceUDOp::dropsReducedDimensions() {
+  auto inputType = cast<RankedTensorType>(getOperand(0).getType());
+  auto outputType = cast<RankedTensorType>(getResult(0).getType());
+  return reductionDropsDimensions(inputType.getRank(), outputType.getRank(),
+                                  getDimensions());
+}
+
+llvm::SmallBitVector ReduceUDOp::getReductionDimMask() {
+  auto inputType = cast<RankedTensorType>(getOperand(0).getType());
+  return reductionDimMask(inputType.getRank(), getDimensions());
+}
 
 LogicalResult ReduceOp::verify() {
-  return verifyReductionShape(getOperation(), getInput().getType().getShape(),
-                              getOutput().getType(), getDimensions(),
-                              /*verifyRank=*/false);
+  auto inputType = getInput().getType();
+  FailureOr<llvm::SmallBitVector> reducedDimensions = verifyReductionDimensions(
+      getOperation(), inputType.getRank(), getDimensions());
+  if (failed(reducedDimensions)) {
+    return failure();
+  }
+  return verifyReductionResultShape(getOperation(), inputType.getShape(),
+                                    getOutput().getType(), *reducedDimensions);
 }
 
 LogicalResult ReduceUDOp::verify() {
@@ -439,17 +627,18 @@ LogicalResult ReduceUDOp::verify() {
                          << getNumResults() << " results";
   }
 
-  auto firstInputType = cast<nv_tensor_ir::TensorType>(getOperand(0).getType());
+  auto firstInputType = cast<RankedTensorType>(getInputs().front().getType());
   SmallVector<int64_t> mergedInputShape(firstInputType.getShape());
 
   // Equal-merge all operand dimensions before checking results, so a static
   // operand can refine a corresponding dynamic operand dimension.
-  for (size_t i = 0; i < getNumOperands(); ++i) {
-    auto inputType = cast<nv_tensor_ir::TensorType>(getOperand(i).getType());
+  for (auto [i, input] : llvm::enumerate(getInputs().drop_front())) {
+    auto inputType = cast<RankedTensorType>(input.getType());
     if (inputType.getRank() != firstInputType.getRank()) {
       return emitOpError() << "expects all inputs to have the same rank, but "
                            << "input 0 has type " << firstInputType
-                           << " and input " << i << " has type " << inputType;
+                           << " and input " << i + 1 << " has type "
+                           << inputType;
     }
     for (int64_t dim = 0; dim < inputType.getRank(); ++dim) {
       FailureOr<int64_t> merged = mergeEqualDimensions(
@@ -458,19 +647,32 @@ LogicalResult ReduceUDOp::verify() {
         return emitOpError()
                << "expects all input dimensions to merge, but input 0 has "
                   "type "
-               << firstInputType << " and input " << i << " has type "
+               << firstInputType << " and input " << i + 1 << " has type "
                << inputType;
       }
       mergedInputShape[dim] = *merged;
     }
   }
 
-  for (size_t i = 0; i < getNumResults(); ++i) {
-    auto outputType = cast<nv_tensor_ir::TensorType>(getResult(i).getType());
-    if (failed(verifyReductionShape(getOperation(), mergedInputShape,
-                                    outputType, getDimensions(),
-                                    /*verifyRank=*/true))) {
+  FailureOr<llvm::SmallBitVector> reducedDimensions = verifyReductionDimensions(
+      getOperation(), firstInputType.getRank(), getDimensions());
+  if (failed(reducedDimensions)) {
+    return failure();
+  }
+
+  // Shape verification admits only the fully retained rank or the fully
+  // dropped rank, so equal result ranks are the same convention.
+  int64_t canonicalRank =
+      cast<RankedTensorType>(getResult(0).getType()).getRank();
+  for (auto [i, result] : llvm::enumerate(getResults())) {
+    auto outputType = cast<RankedTensorType>(result.getType());
+    if (failed(verifyReductionResultShape(getOperation(), mergedInputShape,
+                                          outputType, *reducedDimensions))) {
       return failure();
+    }
+    if (outputType.getRank() != canonicalRank) {
+      return emitOpError(
+          "expects all results to use the same reduced-dimension convention");
     }
 
     // Check that identity type matches the result element type
@@ -554,7 +756,8 @@ LogicalResult ReduceUDOp::verifyRegions() {
 namespace {
 
 tcg::Layout createReductionView(ArrayRef<int32_t> dimensions,
-                                ArrayRef<int64_t> shape) {
+                                ArrayRef<int64_t> shape,
+                                bool dropsReducedDimensions) {
   // Build CuTe layout view of the underlying source.
   tcg::Shape cgShape(shape);
   tcg::Layout flat(cgShape);
@@ -564,7 +767,7 @@ tcg::Layout createReductionView(ArrayRef<int32_t> dimensions,
   for (size_t i = 0, n = tcg::rank(flat); i < n; ++i) {
     if (llvm::find(dimensions, i) == dimensions.end()) {
       parts.push_back(tcg::get(flat, i));
-    } else {
+    } else if (!dropsReducedDimensions) {
       parts.emplace_back(1, 0);
     }
   }
@@ -585,7 +788,8 @@ LayoutSourceAttrInterface
 ReduceOp::inferResultLayout(ArrayRef<LayoutSourceAttrInterface> inputLayouts) {
   assert(inputLayouts.size() == 1 && "expects one input layout");
   SmallVector<int64_t> shape = inputLayouts[0].getShape();
-  auto view = createReductionView(getDimensions(), shape);
+  auto view =
+      createReductionView(getDimensions(), shape, dropsReducedDimensions());
   return ReductionSourceAttr::get(getContext(), view.toString(),
                                   inputLayouts[0]);
 }
@@ -599,7 +803,8 @@ LayoutSourceAttrInterface ReduceUDOp::inferResultLayout(
     underlying = CompositeSourceAttr::get(getContext(), inputLayouts);
   }
   SmallVector<int64_t> shape = underlying.getShape();
-  auto view = createReductionView(getDimensions(), shape);
+  auto view =
+      createReductionView(getDimensions(), shape, dropsReducedDimensions());
   return ReductionSourceAttr::get(getContext(), view.toString(), underlying);
 }
 
@@ -914,8 +1119,7 @@ LogicalResult ConcatenateOp::verify() {
     return emitOpError("requires at least one input");
   }
 
-  auto firstInputType =
-      cast<nv_tensor_ir::TensorType>(getInputs()[0].getType());
+  auto firstInputType = cast<RankedTensorType>(getInputs()[0].getType());
   auto outputType = getOutput().getType();
 
   // Get dimension info
@@ -940,7 +1144,7 @@ LogicalResult ConcatenateOp::verify() {
   SmallVector<int64_t> mergedShape(firstInputType.getShape());
 
   for (auto [idx, input] : llvm::enumerate(getInputs())) {
-    auto inputType = cast<nv_tensor_ir::TensorType>(input.getType());
+    auto inputType = cast<RankedTensorType>(input.getType());
     if (inputType.getRank() != rank) {
       return emitOpError() << "input " << idx << " has rank "
                            << inputType.getRank() << " but expected " << rank;
@@ -1000,6 +1204,94 @@ LayoutSourceAttrInterface ConcatenateOp::inferResultLayout(
          "expects one input layout for each input");
   return ConcatSourceAttr::get(getContext(), getDimension(), inputLayouts,
                                /*argumentIndex=*/{});
+}
+
+LogicalResult ContractionOp::verify() {
+  SmallVector<AffineMap> maps;
+  for (Attribute attr : getIndexingMaps()) {
+    maps.push_back(cast<AffineMapAttr>(attr).getValue());
+  }
+  RankedTensorType types[] = {getA().getType(), getB().getType(),
+                              getC().getType()};
+  unsigned numDims = maps.front().getNumDims();
+  SmallVector<SmallVector<int64_t>> positions(
+      3, SmallVector<int64_t>(numDims, -1));
+  for (auto [i, map] : llvm::enumerate(maps)) {
+    if (map.getNumSymbols() || !map.isProjectedPermutation()) {
+      return emitOpError() << "indexing map " << i
+                           << " must be a symbol-free projected permutation";
+    }
+    if (map.getNumDims() != numDims) {
+      return emitOpError("expects indexing maps to have the same domain rank");
+    }
+    if (map.getNumResults() != types[i].getRank()) {
+      return emitOpError() << "indexing map " << i
+                           << " result count must match its tensor rank";
+    }
+    for (auto [j, expr] : llvm::enumerate(map.getResults())) {
+      positions[i][cast<AffineDimExpr>(expr).getPosition()] = j;
+    }
+  }
+
+  // Infer dimension roles from membership in A, B, and C. No iterator
+  // attributes or canonical ordering of the domain dimensions are needed.
+  SmallVector<unsigned> roles;
+  for (unsigned dim = 0; dim < numDims; ++dim) {
+    int64_t aDim = positions[0][dim];
+    int64_t bDim = positions[1][dim];
+    int64_t cDim = positions[2][dim];
+    unsigned role =
+        (aDim >= 0 ? 1 : 0) | (bDim >= 0 ? 2 : 0) | (cDim >= 0 ? 4 : 0);
+    roles.push_back(role);
+    switch (role) {
+    case 7: { // Batch.
+      auto extent = mergeBroadcastDimensions(types[0].getDimSize(aDim),
+                                             types[1].getDimSize(bDim));
+      if (failed(extent) || types[2].getDimSize(cDim) != *extent) {
+        return emitOpError() << "expects C batch dimension " << cDim
+                             << " to be the broadcasted extent of A and B";
+      }
+      break;
+    }
+    case 5:   // Lhs product.
+    case 6: { // Rhs product.
+      unsigned input = role == 5 ? 0 : 1;
+      int64_t inputDim = role == 5 ? aDim : bDim;
+      if (types[2].getDimSize(cDim) != types[input].getDimSize(inputDim)) {
+        return emitOpError()
+               << "expects C product dimension " << cDim
+               << " to be inherited exactly from " << (input == 0 ? "A" : "B");
+      }
+      break;
+    }
+    case 3: // Contraction.
+      if (failed(mergeEqualDimensions(types[0].getDimSize(aDim),
+                                      types[1].getDimSize(bDim)))) {
+        return emitOpError() << "expects contraction domain dimension " << dim
+                             << " of A and B to match";
+      }
+      break;
+    default:
+      return emitOpError()
+             << "domain dimension " << dim
+             << " must be a batch, product, or contraction dimension";
+    }
+  }
+
+  unsigned previousGroup = 0;
+  for (AffineExpr expr : maps[2].getResults()) {
+    unsigned role = roles[cast<AffineDimExpr>(expr).getPosition()];
+    unsigned group = role == 7 ? 0 : (role == 5 ? 1 : 2);
+    if (group < previousGroup) {
+      return emitOpError(
+          "expects C dimensions in batch, lhs product, rhs product order");
+    }
+    previousGroup = group;
+  }
+  if (getAcc() && getAcc().getType() != getC().getType()) {
+    return emitOpError("expects accumulator type to match result type");
+  }
+  return success();
 }
 
 LogicalResult MatmulOp::verify() {
@@ -1227,7 +1519,7 @@ bool BroadcastOp::isIterationSpaceTransition(
 unsigned ConstantOp::getNumIterSpaceDims() {
   // ConstantOp has no operands, so we get the rank from the result type.
   // Scalar constants (e.g., f32) have 0 iteration space dimensions.
-  if (auto resultType = dyn_cast<TensorType>(getResult().getType())) {
+  if (auto resultType = dyn_cast<RankedTensorType>(getResult().getType())) {
     return resultType.getRank();
   }
   return 0;
@@ -1238,13 +1530,13 @@ AffineMap ConstantOp::computeCanonicalOutputIterSpaceMap(
   unsigned numIterSpaceDims = iterSpaceRank.value_or(getNumIterSpaceDims());
   // For scalar constants, return an empty 0-result map since they have no
   // iteration space dimensions.
-  if (!isa<TensorType>(getResult().getType())) {
+  if (!isa<RankedTensorType>(getResult().getType())) {
     return AffineMap::get(numIterSpaceDims, /*symbolCount=*/0, /*results=*/{},
                           getContext());
   }
 
   // For tensor constants, use identity map if ranks match.
-  auto resultType = cast<TensorType>(getResult().getType());
+  auto resultType = cast<RankedTensorType>(getResult().getType());
   int resultRank = resultType.getRank();
   if (numIterSpaceDims != static_cast<unsigned>(resultRank)) {
     return AffineMap();

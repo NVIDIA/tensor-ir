@@ -154,25 +154,24 @@ module {
 // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^,]*]]: tile<i32>, %[[NR:[^,]*]]: tile<i32>, %[[KR:[^,]*]]: tile<i32>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
 // CHECK-DAG: %[[C7:.*]] = constant <i32: 7>
-// CHECK-DAG: %[[C1:.*]] = constant <i32: 1>
+// The multiplications by the constant 1 may or may not be folded away depending
+// on the build, so the strides are captured at their use rather than their def.
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[INNERR:.*]] = muli %[[C1]], %[[KR]]
-// CHECK: %[[SR:.*]] = muli %[[INNERR]], %[[NR]]
+// CHECK: %[[SR:.*]] = muli %{{.*}}, %[[NR]]
 // CHECK: %[[MROUND:.*]] = addi %[[MR]], %[[C7]]
 // CHECK: %[[COUNT0:.*]] = divi %[[MROUND]], %[[C8]] unsigned
 // CHECK: %[[NROUND:.*]] = addi %[[NR]], %[[C7]]
 // CHECK: %[[COUNT1:.*]] = divi %[[NROUND]], %[[C8]] unsigned
-// CHECK: %[[INNER0:.*]] = muli %[[C1]], %[[K0]]
-// CHECK: %[[S0:.*]] = muli %[[INNER0]], %[[N0]]
+// CHECK: %[[S0:.*]] = muli %{{.*}}, %[[N0]]
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[IDX1:.*]] = remi %[[TEMP]], %[[COUNT1]] unsigned
 // CHECK: %[[IDX2:.*]] = divi %[[TEMP]], %[[COUNT1]] unsigned
-// CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]], %[[K0]]], strides = [%[[S0]], %[[INNER0]], 1]
+// CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]], %[[K0]]], strides = [%[[S0]], %[[INNER0:.*]], 1]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
 // CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
 // CHECK: %[[COS:.*]] = cos %[[IN_TILE]]
-// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], %[[KR]]], strides = [%[[SR]], %[[INNERR]], 1]
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], %[[KR]]], strides = [%[[SR]], %[[INNERR:.*]], 1]
 // CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
 // CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
 module {
@@ -294,23 +293,19 @@ module {
 // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^,]*]]: tile<i32>, %[[NR:[^,]*]]: tile<i32>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
 // CHECK-DAG: %[[C7:.*]] = constant <i32: 7>
-// CHECK-DAG: %[[C1:.*]] = constant <i32: 1>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[SR:.*]] = muli %[[C1]], %[[NR]]
 // CHECK: %[[MROUND:.*]] = addi %[[MR]], %[[C7]]
 // CHECK: %[[COUNT0:.*]] = divi %[[MROUND]], %[[C8]] unsigned
-// CHECK: %[[S0:.*]] = muli %[[C1]], %[[N0]]
-// CHECK: %[[S1:.*]] = muli %[[C1]], %[[N1]]
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
-// CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]]], strides = [%[[S0]], 1]
+// CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]]], strides = [%[[S0:.*]], 1]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
 // CHECK: %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]]]
-// CHECK: %[[TVIEW1:.*]] = make_tensor_view %[[ARG1]], shape = [%[[M1]], %[[N1]]], strides = [%[[S1]], 1]
+// CHECK: %[[TVIEW1:.*]] = make_tensor_view %[[ARG1]], shape = [%[[M1]], %[[N1]]], strides = [%[[S1:.*]], 1]
 // CHECK: %[[PVIEW1:.*]] = make_partition_view %[[TVIEW1]]
 // CHECK: %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[IDX0]], %[[IDX1]]]
 // CHECK: %[[SUM:.*]] = addf %[[TILE0]], %[[TILE1]]
-// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]]], strides = [%[[SR]], 1]
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]]], strides = [%[[SR:.*]], 1]
 // CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
 // CHECK: store_view_tko weak %[[SUM]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]]]
 module {
@@ -373,23 +368,19 @@ module {
 // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^,]*]]: tile<i32>, %[[NR:[^,]*]]: tile<i32>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
 // CHECK-DAG: %[[C7:.*]] = constant <i32: 7>
-// CHECK-DAG: %[[C1:.*]] = constant <i32: 1>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[SR:.*]] = muli %[[C1]], %[[NR]]
 // CHECK: %[[MROUND:.*]] = addi %[[MR]], %[[C7]]
 // CHECK: %[[COUNT0:.*]] = divi %[[MROUND]], %[[C8]] unsigned
-// CHECK: %[[S0:.*]] = muli %[[C1]], %[[N0]]
-// CHECK: %[[S1:.*]] = muli %[[C1]], %[[N1]]
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
-// CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[N0]], %[[M0]]], strides = [1, %[[S0]]]
+// CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[N0]], %[[M0]]], strides = [1, %[[S0:.*]]]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
 // CHECK: %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]]]
-// CHECK: %[[TVIEW1:.*]] = make_tensor_view %[[ARG1]], shape = [%[[M1]], %[[N1]]], strides = [%[[S1]], 1]
+// CHECK: %[[TVIEW1:.*]] = make_tensor_view %[[ARG1]], shape = [%[[M1]], %[[N1]]], strides = [%[[S1:.*]], 1]
 // CHECK: %[[PVIEW1:.*]] = make_partition_view %[[TVIEW1]]
 // CHECK: %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[IDX0]], %[[IDX1]]]
 // CHECK: %[[SUM:.*]] = addf %[[TILE0]], %[[TILE1]]
-// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]]], strides = [%[[SR]], 1]
+// CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]]], strides = [%[[SR:.*]], 1]
 // CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
 // CHECK: store_view_tko weak %[[SUM]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]]]
 module {

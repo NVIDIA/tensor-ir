@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef TENSOR_ATTRS
-#define TENSOR_ATTRS
+#ifndef TENSORIR_DIALECT_TENSORATTRS_TD
+#define TENSORIR_DIALECT_TENSORATTRS_TD
 
 include "tensor_ir/Dialect/TensorDialect.td"
 include "tensor_ir/Dialect/TensorEnums.td"
@@ -210,4 +210,4 @@ def TensorIR_FloatAttr : Attr<CPred<"::llvm::isa<::mlir::FloatAttr>($_self)">, "
   let constBuilderCall = "::mlir::FloatAttr::get($_builder.getF32Type(), $0)";
 }
 
-#endif // TENSOR_ATTRS
+#endif // TENSORIR_DIALECT_TENSORATTRS_TD

@@ -30,7 +30,7 @@ void normalizeGraphName(mlir::Operation *operation) {
 } // namespace
 
 std::string calculateCacheKey(mlir::ModuleOp module,
-                              const CompileOptions &options) {
+                              const CompilerInvocation &options) {
   mlir::OwningOpRef<mlir::ModuleOp> normalizedModule = module.clone();
   normalizedModule->walk(normalizeGraphName);
 
@@ -42,32 +42,15 @@ std::string calculateCacheKey(mlir::ModuleOp module,
   std::string key = "module-";
   llvm::raw_string_ostream stream(key);
   normalizedModule->print(stream, flags);
-  stream << '_' << options.toUniqueString();
+  CompilerInvocation cacheOptions = options;
+  cacheOptions.debug = {};
+  stream << '_' << cacheOptions.toString();
   stream.flush();
   return key;
 }
 
-Status CompileOptions::validate() const { return validateDerived(); }
-
-std::string CompileOptions::toString() const {
-  std::string s = "Compilation options:";
-  s += "\nBackend: " + stringifyCompilerBackend(backend).str();
-  s += "\nCompute capability: " + computeCapability.toString();
-  std::string derived = toStringDerived();
-  if (!derived.empty()) {
-    s += "\nBackend options: " + derived;
-  }
-  return s;
-}
-
-std::string CompileOptions::toUniqueString() const {
-  return llvm::join_items("_", stringifyCompilerBackend(backend).str(),
-                          computeCapability.toString(),
-                          toUniqueStringDerived());
-}
-
-StatusOr<::tensor_ir::rt::IRuntimeKernelPtr>
-ICompiler::compile(llvm::StringRef source, const CompileOptions &options) {
+StatusOr<std::unique_ptr<::tensor_ir::rt::TensorIRArtifact>>
+ICompiler::compile(llvm::StringRef source, const CompilerInvocation &options) {
   // Create MLIR context with TensorIR dialects registered
   mlir::DialectRegistry registry;
   mlir::nv_tensor_ir::registerDialects(registry);

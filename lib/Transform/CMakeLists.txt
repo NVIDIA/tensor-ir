@@ -18,6 +18,7 @@ add_tensor_ir_library(NVTensorIRTransform
   NVTensorIR::Analysis
   NVTensorIR::Utils
   MLIRArithDialect
+  MLIRBufferizationDialect
   MLIRFuncDialect
   MLIRGPUDialect
   MLIRIR

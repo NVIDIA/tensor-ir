@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef TENSOR_IR_DIALECT
-#define TENSOR_IR_DIALECT
+#ifndef TENSORIR_DIALECT_TENSORDIALECT_TD
+#define TENSORIR_DIALECT_TENSORDIALECT_TD
 
 include "mlir/IR/OpBase.td"
 
@@ -112,4 +112,4 @@ def TensorIR_Dialect : Dialect {
   ];
 }
 
-#endif // TENSOR_IR_DIALECT
+#endif // TENSORIR_DIALECT_TENSORDIALECT_TD

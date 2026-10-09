@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "tensor_ir/Compiler/Compiler.h"
-#include "tensor_ir/Compiler/CudaTile/CudaTileCompiler.h"
 #include "tensor_ir/Reference/ReferenceGraph.h"
 #include "tensor_ir/Reference/TensorMemory.h"
 #include "tensor_ir/Registration/Registration.h"
 #include "tensor_ir/Runtime/CudaTile/CudaTileRuntimeKernel.h"
 #include "tensor_ir/Support/CudaApi.h"
 #include "tensor_ir/Support/Status.h"
+#include "tensor_ir/Support/TIROverrideOptions.h"
 
 #include "mlir/IR/AsmState.h"
 #include "mlir/Parser/Parser.h"
@@ -17,15 +17,19 @@
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
+#include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "test_options.h"
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -34,11 +38,17 @@
 using mlir::nv_tensor_ir::Status;
 using mlir::nv_tensor_ir::StatusOr;
 using mlir::nv_tensor_ir::reference::DeviceRun;
-using mlir::nv_tensor_ir::test::Options;
+
 using namespace mlir::nv_tensor_ir;
 using namespace tensor_ir::rt;
 
 namespace {
+
+struct ToolInvocation {
+  CompilerInvocation invocation;
+  CompilerToolDebugOptions toolDebugOptions;
+  CompilerToolTestOptions toolTestOptions;
+};
 
 using mlir::nv_tensor_ir::reference::ReferenceGraph;
 using mlir::nv_tensor_ir::reference::SimplifiedTensor;
@@ -48,21 +58,6 @@ using OutputResults = std::vector<std::vector<std::byte>>;
 using TileSize = llvm::SmallVector<int32_t>;
 
 constexpr int kWarmupIterations = 5;
-
-mlir::nv_tensor_ir::CudaTileCodegenStrategy
-parseCodegenStrategy(llvm::StringRef strategy) {
-  if (strategy == "layout-propagation" || strategy == "layout_propagation" ||
-      strategy == "layout") {
-    return mlir::nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation;
-  }
-  if (strategy != "affine-map" && strategy != "affine_map" &&
-      strategy != "affine") {
-    llvm::errs() << "Warning: unknown --codegen-strategy='" << strategy
-                 << "', using layout-propagation\n";
-    return mlir::nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation;
-  }
-  return mlir::nv_tensor_ir::CudaTileCodegenStrategy::AffineMap;
-}
 
 struct ParsedModule {
   ParsedModule(std::unique_ptr<mlir::MLIRContext> context,
@@ -99,47 +94,18 @@ StatusOr<std::unique_ptr<ParsedModule>> parseModule(llvm::StringRef inputFile) {
   return std::make_unique<ParsedModule>(std::move(context), std::move(module));
 }
 
-backend::cuda_tile::CudaTileCompileOptions
-createCompileOptions(const Options &options, const SmTarget &smTarget) {
-  backend::cuda_tile::CudaTileCompileOptions compileOptions{smTarget};
-  compileOptions.ctaCount = 1;
-  compileOptions.warpCount = 4;
-  compileOptions.tileSize.assign(options.parsedTileSize.begin(),
-                                 options.parsedTileSize.end());
-  compileOptions.uniformSignature = options.uniformSignature;
-  compileOptions.codegenStrategy =
-      parseCodegenStrategy(options.codegenStrategy.getValue());
-  compileOptions.bytecodeVersion = options.getBytecodeVersion();
-  compileOptions.artifactKind = options.artifactKind.getValue();
-
-  // Environment variables can override these CLI defaults at compile time.
-  compileOptions.irDebug.dumpCudaTileIRPath = options.dumpCudaTileIR.getValue();
-  compileOptions.irDebug.dumpTileIRBCPath = options.dumpTileIRBC.getValue();
-  compileOptions.irDebug.loadTileIRBCPath = options.loadTileIRBC.getValue();
-  compileOptions.irDebug.printIRAfterAll = bool(options.printIrAfterAll);
-  compileOptions.irDebug.printIRTreeDir = options.printIrTreeDir.getValue();
-  compileOptions.irDebug.reproducerDir = options.reproducerDir.getValue();
-  compileOptions.irDebug.enableTiming = bool(options.timing);
-
-  return compileOptions;
-}
-
 StatusOr<IRuntimeKernelPtr> compileModule(ICompiler &compiler,
                                           mlir::ModuleOp module,
-                                          const Options &options,
-                                          const TileSize &tileSize,
-                                          const SmTarget &smTarget) {
+                                          const ToolInvocation &invocation) {
   llvm::outs() << "  Compiling...\n";
-  auto compileOptions = createCompileOptions(options, smTarget);
-  compileOptions.tileSize = tileSize;
-  TIR_RETURN_IF_ERROR(compileOptions.validate());
-  TIR_ASSIGN_OR_RETURN(auto runtimeKernel,
-                       compiler.compile(module, compileOptions));
-  return runtimeKernel;
+  TIR_ASSIGN_OR_RETURN(auto artifact,
+                       compiler.compile(module, invocation.invocation));
+  return CudaTileRuntimeKernel::create(std::move(artifact));
 }
 
-Status dumpArtifact(IRuntimeKernel &runtimeKernel, const Options &options) {
-  if (options.dumpArtifactPath.empty()) {
+Status dumpArtifact(IRuntimeKernel &runtimeKernel,
+                    const ToolInvocation &invocation) {
+  if (invocation.toolDebugOptions.dumpArtifactPath.empty()) {
     return Status::Ok();
   }
 
@@ -152,23 +118,23 @@ Status dumpArtifact(IRuntimeKernel &runtimeKernel, const Options &options) {
   }
   if (!tileRuntimeKernel->hasDeviceCode()) {
     return Status::InvalidArgument(
-        "Failed to dump artifact: runtime kernel has no CudaTile device "
-        "code");
+        "Failed to dump artifact: runtime kernel has no CudaTile device code");
   }
 
   std::error_code error;
-  llvm::raw_fd_ostream artifactOut(options.dumpArtifactPath, error,
-                                   llvm::sys::fs::OF_None);
+  llvm::raw_fd_ostream artifactOut(invocation.toolDebugOptions.dumpArtifactPath,
+                                   error, llvm::sys::fs::OF_None);
   if (error) {
-    return Status::InvalidArgument("Failed to open artifact path " +
-                                   options.dumpArtifactPath + ": " +
-                                   error.message());
+    return Status::InvalidArgument(
+        "Failed to open artifact path " +
+        invocation.toolDebugOptions.dumpArtifactPath + ": " + error.message());
   }
   artifactOut.write(tileRuntimeKernel->deviceCode().data(),
                     tileRuntimeKernel->deviceCode().size());
   artifactOut.close();
 
-  std::string metadataPath = options.dumpArtifactPath + ".meta";
+  std::string metadataPath =
+      invocation.toolDebugOptions.dumpArtifactPath + ".meta";
   llvm::raw_fd_ostream metadataOut(metadataPath, error, llvm::sys::fs::OF_Text);
   if (error) {
     return Status::InvalidArgument("Failed to open artifact metadata path " +
@@ -179,25 +145,32 @@ Status dumpArtifact(IRuntimeKernel &runtimeKernel, const Options &options) {
                                                          : "cubin")
               << "\n";
   metadataOut << "runtime_kernel_name=" << tileRuntimeKernel->name() << "\n";
+  metadataOut << "kernel_name=" << tileRuntimeKernel->funcName() << "\n";
+  llvm::StringRef runtimeApi =
+      "cuLibraryLoadData,cuLibraryGetKernel,cuLaunchKernelEx";
+  metadataOut << "runtime_api=" << runtimeApi << "\n";
   metadataOut.close();
 
-  llvm::outs() << "  Wrote CudaTile artifact: " << options.dumpArtifactPath
-               << "\n";
+  llvm::outs() << "  Wrote CudaTile artifact: "
+               << invocation.toolDebugOptions.dumpArtifactPath << "\n";
   llvm::outs() << "  Wrote CudaTile artifact metadata: " << metadataPath
                << "\n";
   return Status::Ok();
 }
 
-Status buildReferenceGraph(mlir::ModuleOp module, const Options &options,
+Status buildReferenceGraph(mlir::ModuleOp module,
+                           const ToolInvocation &invocation,
                            ReferenceGraph &graph) {
-  if (!options.parsedDynamicDims.empty()) {
-    graph.setDynamicDims(options.parsedDynamicDims);
+  if (!invocation.toolTestOptions.dynamicDims.empty()) {
+    graph.setDynamicDims(invocation.toolTestOptions.dynamicDims);
   }
-  if (!options.parsedDynamicStrides.empty()) {
-    graph.setDynamicStrides(options.parsedDynamicStrides);
+  if (!invocation.toolTestOptions.dynamicStrides.empty()) {
+    graph.setDynamicStrides(invocation.toolTestOptions.dynamicStrides);
   }
 
-  Status buildStatus = graph.buildFromMLIR(module);
+  Status buildStatus = invocation.toolTestOptions.verify
+                           ? graph.buildFromMLIR(module)
+                           : graph.buildIOTensorsFromMLIR(module);
   if (!buildStatus.ok()) {
     std::string prefix = buildStatus.code() == StatusCode::kNotSupported
                              ? "Reference execution is unsupported: "
@@ -220,10 +193,45 @@ void printTensors(llvm::StringRef label,
   }
 }
 
-Status initializeInputs(ReferenceGraph &graph, const Options &options) {
-  TIR_RETURN_IF_ERROR(graph.fillInputTensorsRandom(-1.0, 1.0, options.seed));
+Status loadRawInputs(llvm::StringRef prefix, ReferenceGraph &graph) {
+  auto inputs = graph.getInputTensors();
+  for (size_t index = 0; index < inputs.size(); ++index) {
+    const auto &input = inputs[index];
+    std::string path = prefix.str() + "." + std::to_string(index);
+    std::optional<size_t> expectedSize = input->getSizeInBytes();
+    if (!expectedSize || !input->hostPtr()) {
+      return Status::InvalidArgument("Input tensor has invalid storage: " +
+                                     path);
+    }
 
-  if (options.verbose) {
+    auto bufferOrErr = llvm::MemoryBuffer::getFile(path, /*IsText=*/false);
+    if (!bufferOrErr) {
+      return Status::NotFound("Failed to read input file " + path + ": " +
+                              bufferOrErr.getError().message());
+    }
+    llvm::StringRef data = (*bufferOrErr)->getBuffer();
+    if (data.size() != *expectedSize) {
+      return Status::InvalidArgument(
+          "Input file size does not match tensor allocation: " + path +
+          " (file=" + std::to_string(data.size()) +
+          ", expected=" + std::to_string(*expectedSize) + ")");
+    }
+    std::memcpy(input->hostPtr(), data.data(), data.size());
+  }
+  return Status::Ok();
+}
+
+Status initializeInputs(ReferenceGraph &graph,
+                        const ToolInvocation &invocation) {
+  if (!invocation.toolTestOptions.inputPrefix.empty()) {
+    TIR_RETURN_IF_ERROR(
+        loadRawInputs(invocation.toolTestOptions.inputPrefix, graph));
+  } else {
+    TIR_RETURN_IF_ERROR(graph.fillInputTensorsRandom(
+        -1.0, 1.0, invocation.toolTestOptions.seed));
+  }
+
+  if (invocation.toolDebugOptions.verbose) {
     llvm::outs() << "[Data check] After fillInputTensorsRandom min -1, max 1\n";
     printTensors("[Data check] Input host data:", graph.getInputTensors(),
                  [](SimplifiedTensor &tensor) { tensor.printHostData(); });
@@ -234,10 +242,10 @@ Status initializeInputs(ReferenceGraph &graph, const Options &options) {
   return Status::Ok();
 }
 
-Status runOnHost(ReferenceGraph &graph, const Options &options) {
+Status runOnHost(ReferenceGraph &graph, const ToolInvocation &invocation) {
   TIR_RETURN_IF_ERROR(graph.execute());
 
-  if (options.verbose) {
+  if (invocation.toolDebugOptions.verbose) {
     llvm::outs() << "[Data check] After execute\n";
     for (const auto &outputTensor : graph.getOutputTensors()) {
       outputTensor->printHostData();
@@ -305,14 +313,16 @@ void printDeviceTensors(const DeviceRun &deviceRun) {
 }
 
 void printBenchmarkResults(const BenchmarkResults &results,
-                           const Options &options) {
-  double gpuAverageUs = (results.gpuTotalMs * 1000.0) / options.iterations;
-  double wallAverageUs = results.wallTotalUs / options.iterations;
+                           const ToolInvocation &invocation) {
+  double gpuAverageUs =
+      (results.gpuTotalMs * 1000.0) / invocation.toolTestOptions.iterations;
+  double wallAverageUs =
+      results.wallTotalUs / invocation.toolTestOptions.iterations;
   double hostOverheadUs = wallAverageUs - gpuAverageUs;
 
   llvm::outs() << "  Benchmark (" << kWarmupIterations << " warmup + "
-               << options.iterations << " timed iterations, uniformSignature="
-               << (options.uniformSignature ? "true" : "false") << ")\n";
+               << invocation.toolTestOptions.iterations
+               << " timed iterations)\n";
   llvm::outs() << "  GPU kernel time:   "
                << llvm::format("%.3f", results.gpuTotalMs) << " ms total, "
                << llvm::format("%.2f", gpuAverageUs) << " us/iter\n";
@@ -327,7 +337,7 @@ void printBenchmarkResults(const BenchmarkResults &results,
 
 StatusOr<OutputResults> runOnDevice(IRuntimeKernel &runtimeKernel,
                                     ReferenceGraph &graph,
-                                    const Options &options) {
+                                    const ToolInvocation &invocation) {
   TIR_ASSIGN_OR_RETURN(
       DeviceRun deviceRun,
       DeviceRun::create(graph.getInputTensors(), graph.getOutputTensors()));
@@ -336,20 +346,43 @@ StatusOr<OutputResults> runOnDevice(IRuntimeKernel &runtimeKernel,
 
   TIR_RETURN_IF_ERROR(runtimeKernel.initializeRuntimeState());
   TIR_RETURN_IF_ERROR(runWarmups(runtimeKernel, packedArgs));
-  TIR_ASSIGN_OR_RETURN(
-      auto benchmarkResults,
-      benchmark(runtimeKernel, packedArgs, options.iterations));
+  TIR_ASSIGN_OR_RETURN(auto benchmarkResults,
+                       benchmark(runtimeKernel, packedArgs,
+                                 invocation.toolTestOptions.iterations));
 
   OutputResults outputResults;
-  if (options.verify) {
+  if (invocation.toolTestOptions.verify ||
+      !invocation.toolTestOptions.outputFile.empty()) {
     TIR_RETURN_IF_ERROR(deviceRun.copyOutputsTo(outputResults));
   }
-  if (options.verbose) {
+  if (invocation.toolDebugOptions.verbose) {
     printDeviceTensors(deviceRun);
   }
 
-  printBenchmarkResults(benchmarkResults, options);
+  printBenchmarkResults(benchmarkResults, invocation);
   return outputResults;
+}
+
+Status writeRawOutput(llvm::StringRef path,
+                      const OutputResults &outputResults) {
+  if (outputResults.empty()) {
+    return Status::InvalidArgument(
+        "No result tensor available for --output-file");
+  }
+
+  std::error_code error;
+  llvm::raw_fd_ostream stream(path, error, llvm::sys::fs::OF_None);
+  if (error) {
+    return Status::InvalidArgument("Failed to open output file " + path.str() +
+                                   ": " + error.message());
+  }
+  llvm::ArrayRef<std::byte> output = outputResults.front();
+  stream.write(reinterpret_cast<const char *>(output.data()), output.size());
+  stream.close();
+  if (stream.has_error()) {
+    return Status::InvalidArgument("Failed to write output file " + path.str());
+  }
+  return Status::Ok();
 }
 
 Status compareResults(const ReferenceGraph &graph,
@@ -370,39 +403,46 @@ Status compareResults(const ReferenceGraph &graph,
   return Status::Ok();
 }
 
-Status processInputFile(llvm::StringRef inputFile, const Options &options,
-                        const SmTarget &smTarget, ICompiler &compiler) {
+Status processInputFile(llvm::StringRef inputFile,
+                        const ToolInvocation &invocation, ICompiler &compiler) {
   TIR_ASSIGN_OR_RETURN(auto parsedModule, parseModule(inputFile));
-  TIR_ASSIGN_OR_RETURN(auto runtimeKernel,
-                       compileModule(compiler, *parsedModule->module, options,
-                                     options.parsedTileSize, smTarget));
-  TIR_RETURN_IF_ERROR(dumpArtifact(*runtimeKernel, options));
+  TIR_ASSIGN_OR_RETURN(
+      auto runtimeKernel,
+      compileModule(compiler, *parsedModule->module, invocation));
+  TIR_RETURN_IF_ERROR(dumpArtifact(*runtimeKernel, invocation));
 
   llvm::outs() << "  Compiled successfully\n";
-  if (!options.launch && !options.verify) {
+  if (!invocation.toolTestOptions.launch &&
+      !invocation.toolTestOptions.verify) {
     llvm::outs() << "  Done: " << inputFile << "\n";
     return Status::Ok();
   }
 
   ReferenceGraph graph;
   TIR_RETURN_IF_ERROR(
-      buildReferenceGraph(*parsedModule->module, options, graph));
+      buildReferenceGraph(*parsedModule->module, invocation, graph));
 
   llvm::outs() << "  Initializing inputs...\n";
-  TIR_RETURN_IF_ERROR(initializeInputs(graph, options));
+  TIR_RETURN_IF_ERROR(initializeInputs(graph, invocation));
 
-  if (options.verify) {
+  if (invocation.toolTestOptions.verify) {
     llvm::outs() << "  Running on host...\n";
-    TIR_RETURN_IF_ERROR(runOnHost(graph, options));
+    TIR_RETURN_IF_ERROR(runOnHost(graph, invocation));
   }
 
   llvm::outs() << "  Running on device...\n";
   TIR_ASSIGN_OR_RETURN(auto outputResults,
-                       runOnDevice(*runtimeKernel, graph, options));
+                       runOnDevice(*runtimeKernel, graph, invocation));
 
-  if (options.verify) {
-    TIR_RETURN_IF_ERROR(compareResults(graph, outputResults,
-                                       static_cast<double>(options.tolerance)));
+  if (!invocation.toolTestOptions.outputFile.empty()) {
+    TIR_RETURN_IF_ERROR(
+        writeRawOutput(invocation.toolTestOptions.outputFile, outputResults));
+  }
+
+  if (invocation.toolTestOptions.verify) {
+    TIR_RETURN_IF_ERROR(compareResults(
+        graph, outputResults,
+        static_cast<double>(invocation.toolTestOptions.tolerance)));
   }
   llvm::outs() << "  Done: " << inputFile << "\n";
   return Status::Ok();
@@ -415,38 +455,107 @@ Status processInputFile(llvm::StringRef inputFile, const Options &options,
 //===----------------------------------------------------------------------===//
 
 int main(int argc, char **argv) {
-  Options options(argc, argv);
-  auto smTarget = options.getTargetSM();
-  if (failed(smTarget)) {
-    llvm::errs() << "Error: invalid or unsupported --target-sm value '"
-                 << options.targetSM
-                 << "'; expected 'sm_<cc>', optionally suffixed with 'a' or "
-                    "'f'\n";
+
+  llvm::InitLLVM initLLVM(argc, argv);
+
+  llvm::cl::list<std::string> inputFiles(llvm::cl::Positional,
+                                         llvm::cl::desc("<input file>"),
+                                         llvm::cl::ZeroOrMore);
+
+  mlir::nv_tensor_ir::registerCompilerInvocationCLOptions();
+  mlir::nv_tensor_ir::registerCompilerToolDebugCLOptions();
+  mlir::nv_tensor_ir::registerCompilerToolTestCLOptions();
+
+  TIRCommandLineOverride overriddenArgv(argc, argv);
+
+  llvm::SmallVector<const llvm::cl::OptionCategory *, 8> optionCategories;
+  llvm::ArrayRef<const llvm::cl::OptionCategory *> invocationCategories =
+      getCompilerInvocationCLOptionCategories();
+  optionCategories.append(invocationCategories.begin(),
+                          invocationCategories.end());
+  optionCategories.push_back(&getCompilerToolDebugCLOptionCategory());
+  optionCategories.push_back(&getCompilerToolTestCLOptionCategory());
+  llvm::cl::HideUnrelatedOptions(optionCategories);
+
+  llvm::cl::ParseCommandLineOptions(overriddenArgv.argc(),
+                                    overriddenArgv.argv(),
+                                    "TensorIR Compiler and Test Tool\n");
+  auto optionWasSpecified = [](llvm::StringRef name) {
+    auto &registeredOptions = llvm::cl::getRegisteredOptions();
+    auto option = registeredOptions.find(name);
+    return option != registeredOptions.end() &&
+           option->second->getNumOccurrences() != 0;
+  };
+  const bool iterationsSpecified = optionWasSpecified("iterations");
+  const bool repeatSpecified = optionWasSpecified("repeat");
+
+  CompilerInvocation compilerInvocation;
+  applyCompilerInvocationOptionsFromCL(compilerInvocation);
+  ToolInvocation invocation{std::move(compilerInvocation),
+                            getCompilerToolDebugOptionsFromCL(),
+                            getCompilerToolTestOptionsFromCL()};
+
+  if (iterationsSpecified && repeatSpecified) {
+    llvm::errs() << "Error: --iterations and --repeat cannot be used "
+                    "together\n";
     return 1;
   }
-
-  if (options.verbose) {
-    options.print();
+  if (repeatSpecified) {
+    invocation.toolTestOptions.iterations = invocation.toolTestOptions.repeat;
   }
-  if (options.inputFiles.empty()) {
+  const bool rawIORequested = !invocation.toolTestOptions.inputPrefix.empty() ||
+                              !invocation.toolTestOptions.outputFile.empty();
+  if (rawIORequested) {
+    invocation.toolTestOptions.launch = true;
+  }
+
+  if (failed(invocation.invocation.getKernelSmTarget())) {
+    llvm::errs() << "Error: invalid or unsupported --kernel-target value '"
+                 << invocation.invocation.deviceTarget.kernelTarget << "'\n";
+    return 1;
+  }
+  Status validation = invocation.invocation.validate();
+  if (!validation.ok()) {
+    llvm::errs() << "Error: " << validation.message() << "\n";
+    return 1;
+  }
+  if (invocation.toolTestOptions.iterations <= 0) {
+    llvm::errs() << "Error: --iterations must be greater than 0\n";
+    return 1;
+  }
+  if (invocation.toolDebugOptions.verbose) {
+    llvm::outs() << "Target SM: "
+                 << invocation.invocation.deviceTarget.kernelTarget << "\n";
+    llvm::outs() << "Launch: "
+                 << ((invocation.toolTestOptions.launch ||
+                      invocation.toolTestOptions.verify)
+                         ? "yes"
+                         : "no")
+                 << "\n";
+    llvm::outs() << "Verify: "
+                 << (invocation.toolTestOptions.verify ? "yes" : "no") << "\n";
+    llvm::outs() << "Invocation: " << invocation.invocation.toString() << "\n";
+  }
+  if (inputFiles.empty()) {
     llvm::cl::PrintHelpMessage();
     return 0;
   }
+  if (rawIORequested && inputFiles.size() != 1) {
+    llvm::errs()
+        << "Error: raw input/output options require exactly one MLIR file\n";
+    return 1;
+  }
 
   std::unique_ptr<ICompiler> compiler =
-      ICompiler::create(CompilerBackend::CudaTile);
+      ICompiler::create(invocation.invocation.codegen.compilerBackend);
   if (!compiler) {
     llvm::errs() << "Failed to create CudaTile compiler\n";
     return 1;
   }
-  if (options.iterations <= 0) {
-    llvm::errs() << "Error: --iterations must be greater than 0\n";
-    return 1;
-  }
 
   int result = 0;
-  for (const auto &inputFile : options.inputFiles) {
-    Status status = processInputFile(inputFile, options, *smTarget, *compiler);
+  for (const auto &inputFile : inputFiles) {
+    Status status = processInputFile(inputFile, invocation, *compiler);
     if (!status.ok()) {
       llvm::errs() << "  " << status.message() << "\n";
       result = 1;

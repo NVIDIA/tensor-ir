@@ -29,30 +29,45 @@ nv_tensor_ir.graph @three_way(
 
 // -----
 
-// A slice may prune concat operands. Only the surviving operand positions are
-// represented in ConcatSourceAttr::argumentIndex. Formation must neither load
-// nor compute the discarded first input.
+// CHECK-LABEL: func.func @pruned_dispatch(
+//  CHECK-SAME:     %[[ARG0:[^:]+]]: memref<2xf32, #ptr.generic_space>
+//  CHECK-SAME:     %[[ARG1:[^:]+]]: memref<4xf32, #ptr.generic_space>
+//  CHECK-SAME:     %[[ARG2:[^:]+]]: memref<6xf32, #ptr.generic_space>
+//  CHECK-SAME:     %[[ARG3:[^:]+]]: memref<8xf32, #ptr.generic_space>
+//   CHECK-DAG:   %[[ARG1_PTR:.*]] = ptr.to_ptr %[[ARG1]]
+//   CHECK-DAG:   %[[ARG2_PTR:.*]] = ptr.to_ptr %[[ARG2]]
+//   CHECK-DAG:   %[[ARG3_PTR:.*]] = ptr.to_ptr %[[ARG3]]
 
-// CHECK-LABEL: func.func @pruned_dispatch
-//       CHECK: %[[DISCARDED:.*]] = ptr.to_ptr
-//       CHECK: %[[SECOND_PTR:.*]] = ptr.to_ptr
-//       CHECK: %[[THIRD_PTR:.*]] = ptr.to_ptr
-//       CHECK: scf.forall
-//   CHECK-NOT: nv_tensor_ir.load %[[DISCARDED]]
-//       CHECK: scf.if
-//   CHECK-NOT: nv_tensor_ir.load %[[DISCARDED]]
-//       CHECK: nv_tensor_ir.load %[[SECOND_PTR]]
-//   CHECK-NOT: nv_tensor_ir.load %[[DISCARDED]]
-//       CHECK: nv_tensor_ir.load %[[THIRD_PTR]]
-//   CHECK-NOT: nv_tensor_ir.load %[[DISCARDED]]
-//       CHECK: nv_tensor_ir.store
+//       CHECK:   scf.forall (%[[LINEAR:.*]]) in (2) {
+//       CHECK:     %[[TWO:.*]] = arith.constant 2 : index
+//       CHECK:     %[[ROW:.*]] = arith.remui %[[LINEAR]], %[[TWO]] : index
+//       CHECK:     %[[COL:.*]] = arith.divui %[[LINEAR]], %[[TWO]] : index
 nv_tensor_ir.graph @pruned(
     %arg0: tensor<2xf32>, %arg1: tensor<4xf32>, %arg2: tensor<6xf32>)
     -> tensor<8xf32> attributes {tile_size = array<i32: 1, 4>} {
+  //       CHECK:     %[[ONE:.*]] = arith.constant 1 : index
+  //       CHECK:     %[[IS_ARG1:.*]] = arith.cmpi ult, %[[ROW]], %[[ONE]] : index
+  //       CHECK:     %[[TILE:.*]] = scf.if %[[IS_ARG1]] -> (tensor<1x4xf32>) {
+  //       CHECK:       %[[ARG1_TILE:.*]] = nv_tensor_ir.load %[[ARG1_PTR]][0, %[[COL]]]
+  //  CHECK-SAME:         view offset: [0], sizes: [1, 4], strides: [0, 1], alignment: 4
+  //  CHECK-SAME:         to tensor<1x4xf32>
+  //       CHECK:       scf.yield %[[ARG1_TILE]] : tensor<1x4xf32>
+  //       CHECK:     } else {
+  //       CHECK:       %[[ARG2_TILE:.*]] = nv_tensor_ir.load %[[ARG2_PTR]][0, %[[COL]]]
+  //  CHECK-SAME:         view offset: [0], sizes: [1, 4], strides: [0, 1], alignment: 4
+  //  CHECK-SAME:         to tensor<1x4xf32>
+  //       CHECK:       scf.yield %[[ARG2_TILE]] : tensor<1x4xf32>
+  //       CHECK:     }
   %concat = concatenate %arg0, %arg1, %arg2 dimension = 0
       : (tensor<2xf32>, tensor<4xf32>, tensor<6xf32>) -> tensor<12xf32>
+  // The slice [2, 10) emits no ops. It covers all of %arg1 and the first four
+  // elements of %arg2, so both loads above start at offset 0.
   %result = slice %concat starts = [2] limits = [10] strides = [1]
       : tensor<12xf32> -> tensor<8xf32>
+  // The selected tile is stored at its grid coordinate.
+  //       CHECK:     nv_tensor_ir.store %[[TILE]], %[[ARG3_PTR]][%[[ROW]], %[[COL]]]
+  //  CHECK-SAME:       view offset: [0], sizes: [2, 4], strides: [4, 1], alignment: 4
+  //       CHECK:   } {mapping = [#gpu.block<x>]}
   results %result : tensor<8xf32>
 }
 

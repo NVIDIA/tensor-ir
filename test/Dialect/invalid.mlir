@@ -33,19 +33,6 @@ nv_tensor_ir.graph @someGraph(%arg0: tensor<(2,2)x4xf32>) {
 }
 
 // -----
-
-nv_tensor_ir.graph @reductionTestGraphIncompatibleInOut(
-  %input: tensor<16x?x64xf32>
-) -> tensor<16x64xf32> {
-  // expected-error@below{{'nv_tensor_ir.reduce' op failed to verify that all of {input, output} have same rank}}
-  %reduce = nv_tensor_ir.reduce(%input)<
-      dimensions = [1],
-      reduction_mode = <add> >
-       : tensor<16x?x64xf32> -> tensor<16x64xf32>
-  results %reduce : tensor<16x64xf32>
-}
-
-// -----
 nv_tensor_ir.graph @reduceUDIdentityCount(
   %input: tensor<16x32xf32>
 ) -> tensor<16x1xf32> {

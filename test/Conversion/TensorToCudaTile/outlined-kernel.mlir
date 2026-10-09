@@ -1,5 +1,4 @@
 // RUN: tensor_ir-opt %s -convert-tensor-to-cuda-tile="codegen-strategy=layout_propagation" -split-input-file | FileCheck %s
-// RUN: tensor_ir-opt %s -convert-tensor-to-cuda-tile="codegen-strategy=layout_propagation uniform-signature=true" -split-input-file | FileCheck %s --check-prefix=UNIFORM
 
 module @copy_module {
   gpu.module @kernels {
@@ -38,9 +37,6 @@ module @copy_module {
 // CHECK: return
 // CHECK: }
 
-// UNIFORM-LABEL: entry @copy(
-// UNIFORM-SAME: %{{[^:]+}}: tile<ptr<f32>>, %{{[^:]+}}: tile<i32>, %{{[^:]+}}: tile<i32>
-// UNIFORM-SAME: %{{[^:]+}}: tile<ptr<f32>>, %{{[^:]+}}: tile<i32>, %{{[^:]+}}: tile<i32>
 
 // -----
 

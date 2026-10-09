@@ -4,8 +4,8 @@
 #ifndef TENSOR_IR_COMPILER_CUDATILE_CUDATILEFRONTEND_H
 #define TENSOR_IR_COMPILER_CUDATILE_CUDATILEFRONTEND_H
 
-#include "tensor_ir/Conversion/TensorToCudaTile/Options.h"
-#include "tensor_ir/Runtime/CudaTile/KernelArgLayout.h"
+#include "tensor_ir/Artifact/KernelMetadata.h"
+#include "tensor_ir/Options/Options.h"
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
@@ -20,38 +20,17 @@
 
 namespace mlir::nv_tensor_ir::compiler::cuda_tile {
 
-/// Debug controls owned by the shared TensorIR-to-CudaTile frontend.
-struct CudaTileFrontendDebugOptions {
-  std::string dumpCudaTileIRPath;
-  std::string printIRTreeDir;
-  std::string reproducerDir;
-  bool printIRAfterAll = false;
-  bool printCudaTileIR = false;
-  bool enableTiming = false;
-};
-
-/// TensorIR-to-CudaTile lowering options.
-struct CudaTileFrontendOptions {
-  TensorToCudaTilePipelineOptions pipelineOptions;
-  CudaTileFrontendDebugOptions debug;
-
-  /// Optional parent scope for frontend phase and pass timing.
-  TimingScope *timing = nullptr;
-
-  /// Optional hook invoked on TensorIR after graph analysis and tile selection
-  /// but before conversion to CudaTile. The affine-map path invokes the hook
-  /// immediately before its combined conversion pipeline.
-  std::function<void(ModuleOp)> onTensorIRReady;
-};
-
 /// Result of the shared TensorIR-to-CudaTile frontend. Artifact backends
 /// consume this and diverge only at serialization/compilation time.
 struct CudaTileFrontendResult {
+  explicit CudaTileFrontendResult(::tensor_ir::rt::KernelMetadata argLayout)
+      : argLayout(std::move(argLayout)) {}
+
   OwningOpRef<ModuleOp> module;
   ::mlir::cuda_tile::ModuleOp cudaTileModule;
   std::string runtimeKernelName;
   std::string entryFunctionName;
-  ::tensor_ir::rt::KernelArgLayout argLayout;
+  ::tensor_ir::rt::KernelMetadata argLayout;
   SmallVector<int64_t> resolvedIterationSpaceShape;
   bool useRuntimeGrid = false;
 };
@@ -59,12 +38,16 @@ struct CudaTileFrontendResult {
 /// Lightweight legality check for the frontend. This intentionally avoids
 /// running graph analysis or conversion so public `canCompile` remains cheap.
 bool isCudaTileFrontendSupported(ModuleOp module,
-                                 const CudaTileFrontendOptions &options);
+                                 const CompilerInvocation &options);
 
 /// Lower TensorIR to CudaTile and return the frontend artifact metadata.
+/// `timing` optionally nests frontend pass timing under the supplied scope.
+/// `onTensorIRReady` is invoked after analysis and tile selection, before
+/// conversion to CudaTile.
 FailureOr<CudaTileFrontendResult>
-lowerTensorIRToCudaTile(ModuleOp module,
-                        const CudaTileFrontendOptions &options);
+lowerTensorIRToCudaTile(ModuleOp module, const CompilerInvocation &options,
+                        TimingScope *timing = nullptr,
+                        std::function<void(ModuleOp)> onTensorIRReady = {});
 
 /// Compute a fixed grid for static-shape frontend results.
 std::array<int32_t, 3>

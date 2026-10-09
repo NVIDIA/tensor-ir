@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef TENSOR_IR_CODEGEN_OPS
-#define TENSOR_IR_CODEGEN_OPS
+#ifndef TENSORIR_DIALECT_CODEGENOPS_TD
+#define TENSORIR_DIALECT_CODEGENOPS_TD
 
 // This file is included from TensorOps.td after the TensorIR operation base,
 // types, and attributes are defined.
@@ -224,4 +224,4 @@ def TensorIR_StoreOp : TensorIR_Op<"store", [
   let hasVerifier = 1;
 }
 
-#endif // TENSOR_IR_CODEGEN_OPS
+#endif // TENSORIR_DIALECT_CODEGENOPS_TD

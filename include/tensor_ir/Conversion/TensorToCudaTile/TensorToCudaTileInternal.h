@@ -27,9 +27,10 @@ namespace tensor_to_cuda_tile {
 /// through `gpu.launch_func` and consumed before kernel conversion. After the
 /// GPU modules are consumed, the enclosing module's `gpu.container_module`
 /// staging attribute is removed.
-LogicalResult convertOutlinedKernels(
-    ModuleOp module, cuda_tile::OptimizationHintsAttr optimizationHints,
-    bool uniformSignature, bool enableExperimentalCudaTileOps);
+LogicalResult
+convertOutlinedKernels(ModuleOp module,
+                       cuda_tile::OptimizationHintsAttr optimizationHints,
+                       bool enableExperimentalCudaTileOps);
 
 /// Populate conversions for tile-shaped TensorIR compute. These patterns use
 /// only converted SSA operands and result types; they do not consult layout
@@ -90,10 +91,10 @@ createLoadStoreOptimizationHints(MLIRContext *ctx, bool allowTma,
                                  int32_t latency);
 
 /// Create entry-point optimization hints with all launch options present.
-cuda_tile::OptimizationHintsAttr createEntryOptimizationHints(MLIRContext *ctx,
-                                                              int32_t numCTAs,
-                                                              int32_t occupancy,
-                                                              int32_t numWarps);
+cuda_tile::OptimizationHintsAttr
+createEntryOptimizationHints(MLIRContext *ctx, int32_t numCTAs,
+                             int32_t occupancy, int32_t numWarps,
+                             int32_t minCTAsPerSM = 1);
 
 /// Create constant tile (floating-point).
 /// @param type Shaped type with the original element type.

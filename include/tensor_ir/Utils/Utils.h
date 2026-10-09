@@ -191,7 +191,7 @@ FailureOr<llvm::SmallVector<int64_t>> toSmallVector(const T &attribute) {
   return result;
 }
 
-int64_t getDefaultAlignment(nv_tensor_ir::TensorType tensorType);
+int64_t getDefaultAlignment(RankedTensorType tensorType);
 
 /**
  * @brief Maps the grid size to the 3D grid size needed for kernel launches.

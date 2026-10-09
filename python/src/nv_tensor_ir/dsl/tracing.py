@@ -91,6 +91,8 @@ class TensorInfo:
     shape: tuple[int, ...]
     stride: tuple[int, ...]
     dynamic_shape: bool = False
+    stride_divisibility: tuple[int | None, ...] | None = None
+    alignment: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dtype", normalize_dtype(self.dtype))

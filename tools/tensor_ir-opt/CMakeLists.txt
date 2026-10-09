@@ -12,15 +12,25 @@ set(TENSOR_IR_OPT_LIBS
   # TensorIR libraries
   NVTensorIR::CudaTilePipelines
   NVTensorIR::Dialect
+  NVTensorIR::Support
   NVTensorIR::Transform
   NVTensorIR::ToCudaTileConversion
 
   # MLIR core
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRFuncInlinerExtension
+  MLIRGPUDialect
   MLIRIR
+  MLIRLLVMDialect
+  MLIRLinalgDialect
+  MLIRMathDialect
+  MLIRMemRefDialect
   MLIROptLib
   MLIRPass
+  MLIRSCFDialect
   MLIRTransforms
-  MLIRFuncDialect
+  MLIRVectorDialect
   )
 
 

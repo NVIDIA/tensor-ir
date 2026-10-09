@@ -9,6 +9,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "ConstantUtils.h"
+#include "DataTypeDispatch.h"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -49,6 +50,7 @@ bool isFloatDataType(DataType dtype) {
   case DataType::BFLOAT16:
   case DataType::F8E4M3FN:
   case DataType::F8E5M2:
+  case DataType::F4E2M1FN:
   case DataType::DOUBLE:
     return true;
   default:
@@ -57,32 +59,12 @@ bool isFloatDataType(DataType dtype) {
 }
 
 size_t getDataTypeSize(DataType dtype) {
-  switch (dtype) {
-  case DataType::BOOL:
-    return sizeof(bool);
-  case DataType::FLOAT32:
-    return sizeof(float);
-  case DataType::FLOAT16:
-    return sizeof(uint16_t);
-  case DataType::BFLOAT16:
-    return sizeof(nv_bfloat16);
-  case DataType::F8E4M3FN:
-    return sizeof(__nv_fp8_e4m3);
-  case DataType::F8E5M2:
-    return sizeof(__nv_fp8_e5m2);
-  case DataType::INT32:
-    return sizeof(int32_t);
-  case DataType::UINT32:
-    return sizeof(uint32_t);
-  case DataType::INT8:
-    return sizeof(int8_t);
-  case DataType::UINT8:
-    return sizeof(uint8_t);
-  case DataType::DOUBLE:
-    return sizeof(double);
-  default:
-    return 0;
-  }
+  size_t size = 0;
+  (void)detail::dispatchDataType(dtype, [&](auto tag) {
+    size = sizeof(typename decltype(tag)::Type);
+    return Status::Ok();
+  });
+  return size;
 }
 
 const char *getEnumName(DataType dtype) {
@@ -99,6 +81,8 @@ const char *getEnumName(DataType dtype) {
     return "F8E4M3FN";
   case DataType::F8E5M2:
     return "F8E5M2";
+  case DataType::F4E2M1FN:
+    return "F4E2M1FN";
   case DataType::INT32:
     return "INT32";
   case DataType::UINT32:
@@ -117,6 +101,8 @@ const char *getEnumName(DataType dtype) {
 // ============ TensorDesc Implementation ============
 void TensorDesc::computeStrides() {
   if (dims.empty()) {
+    strides.clear();
+    totalElements = 1;
     return;
   }
 
@@ -135,8 +121,27 @@ void TensorDesc::computeStrides() {
 }
 
 std::optional<size_t> TensorDesc::getSizeInBytes() const {
-  if (dims.empty() || dims.size() != strides.size()) {
+  if (dims.size() != strides.size()) {
     return std::nullopt;
+  }
+
+  auto getStorageSize = [&](size_t elementCount) -> std::optional<size_t> {
+    if (dtype == DataType::F4E2M1FN) {
+      return elementCount / 2 + elementCount % 2;
+    }
+    const size_t elementSize = getDataTypeSize(dtype);
+    if (elementSize == 0 ||
+        elementCount > std::numeric_limits<size_t>::max() / elementSize) {
+      return std::nullopt;
+    }
+    return elementCount * elementSize;
+  };
+
+  if (dims.empty()) {
+    if (totalElements != 1) {
+      return std::nullopt;
+    }
+    return getStorageSize(1);
   }
 
   for (size_t dim = 0; dim < dims.size(); ++dim) {
@@ -160,12 +165,10 @@ std::optional<size_t> TensorDesc::getSizeInBytes() const {
     maxElementOffset += extent * stride;
   }
 
-  const size_t elementSize = getDataTypeSize(dtype);
-  if (elementSize == 0 ||
-      maxElementOffset >= std::numeric_limits<size_t>::max() / elementSize) {
+  if (maxElementOffset == std::numeric_limits<size_t>::max()) {
     return std::nullopt;
   }
-  return (maxElementOffset + 1) * elementSize;
+  return getStorageSize(maxElementOffset + 1);
 }
 
 Status TensorDesc::validateStridedOffsetsWithinAllocation(
@@ -241,11 +244,6 @@ SimplifiedTensor::operator=(SimplifiedTensor &&other) noexcept {
 
 bool SimplifiedTensor::init(const std::string &name,
                             llvm::ArrayRef<int64_t> dims, DataType dtype) {
-  if (dims.empty()) {
-    llvm::errs() << "Error: Empty dimensions\n";
-    return false;
-  }
-
   this->name = name;
   desc.dims.assign(dims.begin(), dims.end());
   desc.dtype = dtype;
@@ -258,8 +256,8 @@ bool SimplifiedTensor::init(const std::string &name,
 bool SimplifiedTensor::init(const std::string &name,
                             llvm::ArrayRef<int64_t> dims,
                             llvm::ArrayRef<int64_t> strides, DataType dtype) {
-  if (dims.empty()) {
-    llvm::errs() << "Error: Empty dimensions\n";
+  if (dims.size() != strides.size()) {
+    llvm::errs() << "Error: Tensor rank and stride rank must match\n";
     return false;
   }
 
@@ -365,166 +363,107 @@ static void generateLogicalElements(SimplifiedTensor &tensor,
 }
 
 bool SimplifiedTensor::fillConstant(double value) {
-  void *hostData = hostPtr();
-  if (!hostData) {
+  if (!hostPtr() || desc.dtype == DataType::UINT8) {
     return false;
   }
-
-  // Fill according to data type
-  switch (desc.dtype) {
-  case DataType::BOOL: {
-    fillLogicalElements<bool>(*this, value != 0.0);
-    break;
-  }
-  case DataType::FLOAT32: {
-    fillLogicalElements<float>(*this, static_cast<float>(value));
-    break;
-  }
-  case DataType::FLOAT16: {
-    fillLogicalElements<half>(*this, __float2half(static_cast<float>(value)));
-    break;
-  }
-  case DataType::BFLOAT16: {
-    fillLogicalElements<nv_bfloat16>(*this,
-                                     nv_bfloat16(static_cast<float>(value)));
-    break;
-  }
-  case DataType::F8E4M3FN: {
-    fillLogicalElements<__nv_fp8_e4m3>(
-        *this, __nv_fp8_e4m3(static_cast<float>(value)));
-    break;
-  }
-  case DataType::F8E5M2: {
-    fillLogicalElements<__nv_fp8_e5m2>(
-        *this, __nv_fp8_e5m2(static_cast<float>(value)));
-    break;
-  }
-  case DataType::INT32: {
-    auto intValue =
-        detail::convertFiniteConstantToInteger<int32_t>(value, "INT32");
-    if (!intValue.ok()) {
-      return false;
+  Status status = detail::dispatchDataType(desc.dtype, [&](auto tag) -> Status {
+    using T = typename decltype(tag)::Type;
+    if constexpr (std::is_same_v<T, bool>) {
+      fillLogicalElements<T>(*this, value != 0.0);
+    } else if constexpr (std::is_integral_v<T>) {
+      TIR_ASSIGN_OR_RETURN(auto converted,
+                           detail::convertFiniteConstantToInteger<T>(
+                               value, getEnumName(desc.dtype)));
+      fillLogicalElements<T>(*this, converted);
+    } else if constexpr (std::is_floating_point_v<T>) {
+      fillLogicalElements<T>(*this, static_cast<T>(value));
+    } else {
+      // CUDA low-precision types round through float, including double inputs.
+      fillLogicalElements<T>(*this, T(static_cast<float>(value)));
     }
-    fillLogicalElements<int32_t>(*this, *intValue);
-    break;
-  }
-  case DataType::UINT32: {
-    auto intValue =
-        detail::convertFiniteConstantToInteger<uint32_t>(value, "UINT32");
-    if (!intValue.ok()) {
-      return false;
-    }
-    fillLogicalElements<uint32_t>(*this, *intValue);
-    break;
-  }
-  case DataType::INT8: {
-    auto intValue =
-        detail::convertFiniteConstantToInteger<int8_t>(value, "INT8");
-    if (!intValue.ok()) {
-      return false;
-    }
-    fillLogicalElements<int8_t>(*this, *intValue);
-    break;
-  }
-  case DataType::DOUBLE: {
-    fillLogicalElements<double>(*this, static_cast<double>(value));
-    break;
-  }
-  default:
-    return false;
-  }
-
-  return true;
+    return Status::Ok();
+  });
+  return status.ok();
 }
 
 bool SimplifiedTensor::fillRandom(float minVal, float maxVal,
                                   std::mt19937 &gen) {
-  void *hostData = hostPtr();
-  if (!hostData) {
+  if (!hostPtr() || desc.dtype == DataType::UINT8) {
     return false;
   }
-
   std::uniform_real_distribution<float> dis(minVal, maxVal);
+  if (desc.dtype == DataType::F4E2M1FN) {
+    constexpr std::array<float, 8> kPositiveValues = {0.0f, 0.5f, 1.0f, 1.5f,
+                                                      2.0f, 3.0f, 4.0f, 6.0f};
+    std::array<uint8_t, 16> candidates{};
+    size_t candidateCount = 0;
+    for (size_t magnitude = 0; magnitude < kPositiveValues.size();
+         ++magnitude) {
+      const float positive = kPositiveValues[magnitude];
+      if (minVal <= positive && positive <= maxVal) {
+        candidates[candidateCount++] = static_cast<uint8_t>(magnitude);
+      }
+      if (magnitude != 0 && minVal <= -positive && -positive <= maxVal) {
+        candidates[candidateCount++] = static_cast<uint8_t>(magnitude | 0x8);
+      }
+    }
+    std::optional<size_t> sizeInBytes = getSizeInBytes();
+    if (candidateCount == 0 || !sizeInBytes) {
+      return false;
+    }
 
-  switch (desc.dtype) {
-  case DataType::BOOL: {
-    std::bernoulli_distribution bool_dis(0.5);
-    generateLogicalElements<bool>(*this, [&]() { return bool_dis(gen); });
-    break;
-  }
-  case DataType::FLOAT32: {
-    generateLogicalElements<float>(*this, [&]() { return dis(gen); });
-    break;
-  }
-  case DataType::FLOAT16: {
-    generateLogicalElements<half>(*this,
-                                  [&]() { return __float2half(dis(gen)); });
-    break;
-  }
-  case DataType::BFLOAT16: {
-    generateLogicalElements<nv_bfloat16>(
-        *this, [&]() { return nv_bfloat16(dis(gen)); });
-    break;
-  }
-  case DataType::F8E4M3FN: {
-    generateLogicalElements<__nv_fp8_e4m3>(
-        *this, [&]() { return __nv_fp8_e4m3(dis(gen)); });
-    break;
-  }
-  case DataType::F8E5M2: {
-    generateLogicalElements<__nv_fp8_e5m2>(
-        *this, [&]() { return __nv_fp8_e5m2(dis(gen)); });
-    break;
-  }
-  case DataType::DOUBLE: {
-    generateLogicalElements<double>(
-        *this, [&]() { return static_cast<double>(dis(gen)); });
-    break;
-  }
-  case DataType::INT32: {
-    auto minInt = static_cast<int32_t>(std::ceil(minVal));
-    auto maxInt = static_cast<int32_t>(std::floor(maxVal));
-    if (minInt > maxInt) {
-      return false;
+    std::memset(hostPtr(), 0, *sizeInBytes);
+    auto *data = static_cast<uint8_t *>(hostPtr());
+    std::uniform_int_distribution<size_t> fp4Dis(0, candidateCount - 1);
+    for (int64_t i = 0; i < desc.totalElements; ++i) {
+      const uint8_t encoded = candidates[fp4Dis(gen)];
+      const int64_t storageIndex = getStorageIndex(i);
+      const unsigned shift = 4 * (storageIndex % 2);
+      uint8_t &storageByte = data[storageIndex / 2];
+      storageByte = (storageByte & ~(0x0F << shift)) | (encoded << shift);
     }
-    std::uniform_int_distribution<int32_t> intDis(minInt, maxInt);
-    generateLogicalElements<int32_t>(*this, [&]() { return intDis(gen); });
-    break;
-  }
-  case DataType::UINT32: {
-    const double clampedMin =
-        std::max(std::ceil(static_cast<double>(minVal)), 0.0);
-    const double clampedMax =
-        std::min(std::floor(static_cast<double>(maxVal)),
-                 static_cast<double>(std::numeric_limits<uint32_t>::max()));
-    if (clampedMin > clampedMax) {
-      return false;
-    }
-    std::uniform_int_distribution<uint32_t> intDis(
-        static_cast<uint32_t>(clampedMin), static_cast<uint32_t>(clampedMax));
-    generateLogicalElements<uint32_t>(*this, [&]() { return intDis(gen); });
-    break;
-  }
-  case DataType::INT8: {
-    auto minInt = static_cast<int32_t>(std::ceil(minVal));
-    auto maxInt = static_cast<int32_t>(std::floor(maxVal));
-    minInt = std::max(minInt,
-                      static_cast<int32_t>(std::numeric_limits<int8_t>::min()));
-    maxInt = std::min(maxInt,
-                      static_cast<int32_t>(std::numeric_limits<int8_t>::max()));
-    if (minInt > maxInt) {
-      return false;
-    }
-    std::uniform_int_distribution<int32_t> intDis(minInt, maxInt);
-    generateLogicalElements<int8_t>(
-        *this, [&]() { return static_cast<int8_t>(intDis(gen)); });
-    break;
-  }
-  default:
-    return false;
+    return true;
   }
 
-  return true;
+  Status status = detail::dispatchDataType(desc.dtype, [&](auto tag) -> Status {
+    using T = typename decltype(tag)::Type;
+    if constexpr (std::is_same_v<T, bool>) {
+      std::bernoulli_distribution boolDis(0.5);
+      generateLogicalElements<T>(*this, [&]() { return boolDis(gen); });
+    } else if constexpr (std::is_same_v<T, uint32_t>) {
+      const double lower =
+          std::max(std::ceil(static_cast<double>(minVal)), 0.0);
+      const double upper =
+          std::min(std::floor(static_cast<double>(maxVal)),
+                   static_cast<double>(std::numeric_limits<T>::max()));
+      if (lower > upper) {
+        return Status::InvalidArgument();
+      }
+      std::uniform_int_distribution<T> intDis(static_cast<T>(lower),
+                                              static_cast<T>(upper));
+      generateLogicalElements<T>(*this, [&]() { return intDis(gen); });
+    } else if constexpr (std::is_integral_v<T>) {
+      auto lower = static_cast<int32_t>(std::ceil(minVal));
+      auto upper = static_cast<int32_t>(std::floor(maxVal));
+      if constexpr (std::is_same_v<T, int8_t>) {
+        lower = std::max(lower,
+                         static_cast<int32_t>(std::numeric_limits<T>::min()));
+        upper = std::min(upper,
+                         static_cast<int32_t>(std::numeric_limits<T>::max()));
+      }
+      if (lower > upper) {
+        return Status::InvalidArgument();
+      }
+      std::uniform_int_distribution<int32_t> intDis(lower, upper);
+      generateLogicalElements<T>(*this,
+                                 [&]() { return static_cast<T>(intDis(gen)); });
+    } else {
+      generateLogicalElements<T>(*this,
+                                 [&]() { return static_cast<T>(dis(gen)); });
+    }
+    return Status::Ok();
+  });
+  return status.ok();
 }
 
 void SimplifiedTensor::print() const {
@@ -540,70 +479,37 @@ void SimplifiedTensor::print() const {
                << "\n";
 }
 
-template <typename T_ELEM>
-static T_ELEM getElem(int8_t const *mem, size_t elementOffset, DataType type) {
-  int64_t elemSizeInBytes = getDataTypeSize(type);
-  int64_t offsetInBytes = elementOffset * elemSizeInBytes;
-  return *(reinterpret_cast<T_ELEM const *>(mem + offsetInBytes));
-}
-
 static void printElem(int8_t const *mem, size_t elementOffset, DataType type) {
-  switch (type) {
-  case DataType::BOOL: {
-    llvm::outs() << (getElem<bool>(mem, elementOffset, type) ? "true"
-                                                             : "false");
-    break;
+  if (type == DataType::F4E2M1FN) {
+    constexpr std::array<float, 8> kPositiveValues = {0.0f, 0.5f, 1.0f, 1.5f,
+                                                      2.0f, 3.0f, 4.0f, 6.0f};
+    const auto *data = reinterpret_cast<const uint8_t *>(mem);
+    const uint8_t encoded =
+        (data[elementOffset / 2] >> (4 * (elementOffset % 2))) & 0x0F;
+    float value = kPositiveValues[encoded & 0x7];
+    if ((encoded & 0x8) != 0) {
+      value = -value;
+    }
+    llvm::outs() << llvm::format("%.3f", value);
+    return;
   }
-  case DataType::FLOAT32: {
-    llvm::outs() << llvm::format("%.3f",
-                                 getElem<float>(mem, elementOffset, type));
-    break;
-  }
-  case DataType::FLOAT16: {
-    half elem = getElem<half>(mem, elementOffset, type);
-    llvm::outs() << llvm::format("%.3f", static_cast<float>(elem));
-    break;
-  }
-  case DataType::BFLOAT16: {
-    nv_bfloat16 elem = getElem<nv_bfloat16>(mem, elementOffset, type);
-    llvm::outs() << llvm::format("%.3f", static_cast<float>(elem));
-    break;
-  }
-  case DataType::F8E4M3FN: {
-    __nv_fp8_e4m3 elem = getElem<__nv_fp8_e4m3>(mem, elementOffset, type);
-    llvm::outs() << llvm::format("%.3f", static_cast<float>(elem));
-    break;
-  }
-  case DataType::F8E5M2: {
-    __nv_fp8_e5m2 elem = getElem<__nv_fp8_e5m2>(mem, elementOffset, type);
-    llvm::outs() << llvm::format("%.3f", static_cast<float>(elem));
-    break;
-  }
-  case DataType::INT32: {
-    llvm::outs() << getElem<int32_t>(mem, elementOffset, type);
-    break;
-  }
-  case DataType::UINT32: {
-    llvm::outs() << getElem<uint32_t>(mem, elementOffset, type);
-    break;
-  }
-  case DataType::INT8: {
-    llvm::outs() << static_cast<int>(getElem<int8_t>(mem, elementOffset, type));
-    break;
-  }
-  case DataType::UINT8: {
-    llvm::outs() << static_cast<unsigned>(
-        getElem<uint8_t>(mem, elementOffset, type));
-    break;
-  }
-  case DataType::DOUBLE: {
-    llvm::outs() << llvm::format("%.6f",
-                                 getElem<double>(mem, elementOffset, type));
-    break;
-  }
-  default:
+
+  Status status = detail::dispatchDataType(type, [&](auto tag) {
+    using T = typename decltype(tag)::Type;
+    T value = reinterpret_cast<const T *>(mem)[elementOffset];
+    if constexpr (std::is_same_v<T, bool>) {
+      llvm::outs() << (value ? "true" : "false");
+    } else if constexpr (std::is_integral_v<T>) {
+      llvm::outs() << +value;
+    } else if constexpr (std::is_same_v<T, double>) {
+      llvm::outs() << llvm::format("%.6f", value);
+    } else {
+      llvm::outs() << llvm::format("%.3f", static_cast<float>(value));
+    }
+    return Status::Ok();
+  });
+  if (!status.ok()) {
     llvm::outs() << "Unknown data type";
-    break;
   }
 }
 
@@ -655,6 +561,13 @@ void SimplifiedTensor::printData(const void *dataPtr, const char *label,
   }
   llvm::outs() << "]):"
                << "\n";
+
+  if (dims.empty()) {
+    llvm::outs() << "  ";
+    printElem(data, /*elementOffset=*/0, desc.dtype);
+    llvm::outs() << "\n";
+    return;
+  }
 
   // Recursive lambda function to print multi-dimensional array
   std::function<void(int64_t, int64_t, const std::string &, int64_t &)>
@@ -837,47 +750,18 @@ bool SimplifiedTensor::checkRefAgainst(const void *gpuResultHost, double rtol,
         << "\n";
   }
 
-  switch (desc.dtype) {
-  case DataType::BOOL:
-    return checkRefKernel<bool>(*this, hostPtr(), gpuResultHost, numElements,
+  bool matches = false;
+  Status status = detail::dispatchDataType(desc.dtype, [&](auto tag) {
+    using T = typename decltype(tag)::Type;
+    matches = checkRefKernel<T>(*this, hostPtr(), gpuResultHost, numElements,
                                 rtol, atol, verbose);
-  case DataType::FLOAT32:
-    return checkRefKernel<float>(*this, hostPtr(), gpuResultHost, numElements,
-                                 rtol, atol, verbose);
-  case DataType::FLOAT16:
-    return checkRefKernel<half>(*this, hostPtr(), gpuResultHost, numElements,
-                                rtol, atol, verbose);
-  case DataType::BFLOAT16:
-    return checkRefKernel<nv_bfloat16>(*this, hostPtr(), gpuResultHost,
-                                       numElements, rtol, atol, verbose);
-  case DataType::F8E4M3FN:
-    return checkRefKernel<__nv_fp8_e4m3>(*this, hostPtr(), gpuResultHost,
-                                         numElements, rtol, atol, verbose);
-  case DataType::F8E5M2:
-    return checkRefKernel<__nv_fp8_e5m2>(*this, hostPtr(), gpuResultHost,
-                                         numElements, rtol, atol, verbose);
-  case DataType::DOUBLE:
-    return checkRefKernel<double>(*this, hostPtr(), gpuResultHost, numElements,
-                                  rtol, atol, verbose);
-  case DataType::INT32:
-    return checkRefKernel<int32_t>(*this, hostPtr(), gpuResultHost, numElements,
-                                   rtol, atol, verbose);
-  case DataType::UINT32:
-    return checkRefKernel<uint32_t>(*this, hostPtr(), gpuResultHost,
-                                    numElements, rtol, atol, verbose);
-  case DataType::INT8:
-    return checkRefKernel<int8_t>(*this, hostPtr(), gpuResultHost, numElements,
-                                  rtol, atol, verbose);
-  case DataType::UINT8:
-    return checkRefKernel<uint8_t>(*this, hostPtr(), gpuResultHost, numElements,
-                                   rtol, atol, verbose);
-  default:
-    if (verbose) {
-      llvm::outs() << "Unsupported data type: " << getEnumName(desc.dtype)
-                   << "\n";
-    }
-    return false;
+    return Status::Ok();
+  });
+  if (!status.ok() && verbose) {
+    llvm::outs() << "Unsupported data type: " << getEnumName(desc.dtype)
+                 << "\n";
   }
+  return matches;
 }
 
 // Factory functions

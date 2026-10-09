@@ -7,6 +7,7 @@ declare_mlir_python_extension(
   EMBED_CAPI_LINK_LIBS
     MLIRCAPIIR
     NVTensorIR::CAPI
+    NVTensorIR::CompilerCAPIOptions
   PRIVATE_LINK_LIBS
     LLVMSupport
     dlpack_includes
@@ -20,4 +21,3 @@ declare_mlir_python_extension(TensorIRPythonSources.SiteInitializer
   EMBED_CAPI_LINK_LIBS
     NVTensorIR::CAPI
 )
-

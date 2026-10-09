@@ -58,7 +58,7 @@ getStaticStrideInfo(StringRef strideText, size_t expectedRank) {
 FailureOr<int64_t> getAlignmentFromGraph(Value tensor) {
   Location loc = tensor.getLoc();
   if (!isTensorType(tensor.getType())) {
-    return emitError(loc) << "Expect value of TensorType as an input";
+    return emitError(loc) << "Expect value of RankedTensorType as an input";
   }
 
   auto graphOp = dyn_cast<GraphOp>(tensor.getParentRegion()->getParentOp());
@@ -76,8 +76,7 @@ FailureOr<int64_t> getAlignmentFromGraph(Value tensor) {
       }
     }
     // If alignment is not set, return default alignment
-    return getDefaultAlignment(
-        cast<nv_tensor_ir::TensorType>(tensor.getType()));
+    return getDefaultAlignment(cast<RankedTensorType>(tensor.getType()));
   };
 
   // Check if the tensor is input
@@ -102,9 +101,9 @@ FailureOr<int64_t> getAlignmentFromGraph(Value tensor) {
 
 FailureOr<tcg::Stride> getStrideFromGraph(Value tensor) {
   Location loc = tensor.getLoc();
-  auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(tensor.getType());
+  auto tensorType = dyn_cast<RankedTensorType>(tensor.getType());
   if (!tensorType || !isTensorType(tensor.getType())) {
-    return emitError(loc) << "Expect value of TensorType as an input";
+    return emitError(loc) << "Expect value of RankedTensorType as an input";
   }
 
   auto graphOp = dyn_cast<GraphOp>(tensor.getParentRegion()->getParentOp());
@@ -167,7 +166,7 @@ bool isEmptyRegionGraphOp(nv_tensor_ir::GraphOp graphOp) {
 
 bool hasDynamicInputOrOutputTensor(nv_tensor_ir::GraphOp graphOp) {
   for (Type type : graphOp.getArgumentTypes()) {
-    if (auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(type);
+    if (auto tensorType = dyn_cast<RankedTensorType>(type);
         tensorType && isTensorType(type)) {
       if (!tensorType.hasStaticShape()) {
         return true;
@@ -176,7 +175,7 @@ bool hasDynamicInputOrOutputTensor(nv_tensor_ir::GraphOp graphOp) {
   }
 
   for (Type type : graphOp.getResultTypes()) {
-    if (auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(type);
+    if (auto tensorType = dyn_cast<RankedTensorType>(type);
         tensorType && isTensorType(type)) {
       if (!tensorType.hasStaticShape()) {
         return true;
@@ -189,7 +188,7 @@ bool hasDynamicInputOrOutputTensor(nv_tensor_ir::GraphOp graphOp) {
 
 /// Get CuTe layout for a graph input or output.
 static std::optional<tcg::Layout> getLayoutForGraphInputOrOutput(Value value) {
-  if (auto tensorTy = dyn_cast<TensorType>(value.getType());
+  if (auto tensorTy = dyn_cast<RankedTensorType>(value.getType());
       tensorTy && isTensorType(value.getType())) {
     tcg::Shape shape = getShapeRef(tensorTy);
     auto stride = getStrideFromGraph(value);
@@ -326,7 +325,7 @@ getTensorDescriptors(ArrayRef<Type> types, ArrayAttr attributes) {
 
   for (size_t i = 0; i < types.size(); ++i) {
     TensorDescriptor &descriptor = result[i];
-    if (auto tensorType = dyn_cast<TensorType>(types[i])) {
+    if (auto tensorType = dyn_cast<RankedTensorType>(types[i])) {
       // Set the sizes and the alignment from the tensor type.
       for (int64_t size : tensorType.getShape()) {
         descriptor.sizes.push_back(
@@ -432,7 +431,7 @@ FailureOr<llvm::hash_code> getModuleHash(ModuleOp moduleOp) {
   return llvm::hash_value(buffer);
 }
 
-int64_t getDefaultAlignment(nv_tensor_ir::TensorType tensorType) {
+int64_t getDefaultAlignment(RankedTensorType tensorType) {
   return std::max(1u, tensorType.getElementType().getIntOrFloatBitWidth() /
                           CHAR_BIT);
 }

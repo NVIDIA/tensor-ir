@@ -116,6 +116,7 @@ def test_runtime_all_exports_only_public_api() -> None:
         "CudaTileArtifactKind",
         "can_compile",
         "compile",
+        "parse_compile_options",
     ]
 
 
@@ -391,3 +392,16 @@ def test_cubin_artifact_request_handles_incompatible_executable(
     )
     assert argv_log.read_text().splitlines() == ["--list-versions"]
     assert artifact.startswith(b"\x7fTileIR\0")
+
+
+def test_debug_option_properties_round_trip():
+    options = tensor_ir_runtime.CompileOptions()
+    options.cuda_toolkit_path = "/requested/toolkit"
+    options.print_cuda_tile_ir = True
+    parsed = tensor_ir_runtime.CompileOptions.parse(str(options))
+    assert parsed.cuda_toolkit_path == "/requested/toolkit"
+    assert parsed.print_cuda_tile_ir is True
+    parsed.print_cuda_tile_ir = False
+    parsed.cuda_toolkit_path = ""
+    assert parsed.print_cuda_tile_ir is False
+    assert parsed.cuda_toolkit_path == ""

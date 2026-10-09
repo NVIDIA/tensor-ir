@@ -130,7 +130,7 @@ public:
    *
    * The tile size is also reported invalid (returns false) when @p tensor_shape
    * is itself degenerate: a rank mismatch with @p tile_size or a non-positive
-   * dimension. The TensorType verifier does not forbid such shapes, so they can
+   * dimension. The RankedTensorType verifier does not forbid such shapes, so they can
    * originate from user input; this is a recoverable "invalid" answer rather
    * than a hard error.
    *
@@ -215,7 +215,7 @@ FailureOr<llvm::SmallVector<DimSize>> calculatePersistentGridSizeForGraph(
  * instead of input tensor shape.
  *
  * This function encapsulates the logic shared between compile-time analysis
- * (calculateGridSizeForGraph) and runtime grid computation (KernelArgLayout).
+ * (calculateGridSizeForGraph) and runtime grid computation (KernelMetadata).
  * Both must use the same logic to ensure alignment.
  *
  * Returns true if output tensor shape is used (for BroadcastOp or MatmulOp),

@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "tensor_ir/Options/Options.h"
+#include "tensor_ir/Options/Options.h" // IWYU pragma: keep
 
-#include "tensor_ir/Options/BytecodeVersionOptions.h"
+#include "tensor_ir/Options/BytecodeVersionOptions.h" // IWYU pragma: keep
+#include "tensor_ir/Options/OptionsDetail.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Allocator.h"

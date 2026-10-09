@@ -14,6 +14,9 @@ namespace mlir::nv_tensor_ir {
 /// Python package.
 void registerDialects(DialectRegistry &registry);
 
+/// Registers the passes provided by the TensorIR compiler.
+void registerPasses();
+
 } // namespace mlir::nv_tensor_ir
 
 #endif // TENSOR_IR_REGISTRATION_REGISTRATION_H

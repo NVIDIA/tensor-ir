@@ -28,7 +28,7 @@ nv_tensor_ir.graph @matmulBatchMismatch(
   %a: tensor<2x16x32xf32>,
   %b: tensor<3x32x8xf32>
 ) -> tensor<2x16x8xf32> {
-  // expected-error@below {{expects C batch dimensions to be the broadcasted shape of A and B, but got 2, 3, and 2}}
+  // expected-error@below {{expects C batch dimensions to equal the merged shape of A and B, but got 2, 3, and 2}}
   %result = matmul(%a, %b)
       : (tensor<2x16x32xf32>, tensor<3x32x8xf32>)
         -> tensor<2x16x8xf32>
@@ -37,15 +37,15 @@ nv_tensor_ir.graph @matmulBatchMismatch(
 
 // -----
 
-nv_tensor_ir.graph @matmulBroadcastResultMismatch(
+nv_tensor_ir.graph @matmulUnitBatchMismatch(
   %a: tensor<2x16x32xf32>,
   %b: tensor<1x32x8xf32>
-) -> tensor<1x16x8xf32> {
-  // expected-error@below {{expects C batch dimensions to be the broadcasted shape of A and B, but got 2, 1, and 1}}
+) -> tensor<2x16x8xf32> {
+  // expected-error@below {{expects C batch dimensions to equal the merged shape of A and B, but got 2, 1, and 2}}
   %result = matmul(%a, %b)
       : (tensor<2x16x32xf32>, tensor<1x32x8xf32>)
-        -> tensor<1x16x8xf32>
-  results %result : tensor<1x16x8xf32>
+        -> tensor<2x16x8xf32>
+  results %result : tensor<2x16x8xf32>
 }
 
 // -----

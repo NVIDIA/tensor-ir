@@ -24,7 +24,7 @@ namespace tensor_ir::rt {
 namespace {
 namespace schema = ::tensor_ir::rt::schema;
 
-constexpr uint32_t kTensorIRArtifactVersion = 1;
+constexpr uint32_t kTensorIRArtifactVersion = 2;
 
 schema::ArchPortability toSchema(ArchPortability portability) {
   switch (portability) {
@@ -147,49 +147,34 @@ StatusOr<ElementType> fromSchema(schema::ElementType type) {
       "serialized TensorIRArtifact has an invalid element type");
 }
 
-StatusOr<ElementTypeInfo> decodeElementType(schema::ElementType wireType) {
-  TIR_ASSIGN_OR_RETURN(ElementType type, fromSchema(wireType));
-  return ElementTypeInfo(type);
-}
-
-StatusOr<TensorArgDesc> decodeArgDesc(schema::ArgDesc kind, const void *value) {
+StatusOr<ArgDesc> decodeArgDesc(schema::ArgDesc kind, const void *value) {
   switch (kind) {
   case schema::ArgDesc::TensorArgDesc: {
     const auto *tensorArg = static_cast<const schema::TensorArgDesc *>(value);
-    TIR_ASSIGN_OR_RETURN(ElementTypeInfo elementInfo,
-                         decodeElementType(tensorArg->element_type()));
+    TIR_ASSIGN_OR_RETURN(ElementType elementType,
+                         fromSchema(tensorArg->element_type()));
     llvm::SmallVector<int64_t> staticShape;
     if (const auto *shape = tensorArg->shape()) {
       staticShape.assign(shape->begin(), shape->end());
     }
-    int32_t rank = static_cast<int32_t>(staticShape.size());
-    const auto *strides = tensorArg->strides();
-    llvm::SmallVector<int64_t> staticStrides;
-    bool hasExplicitStrides = strides != nullptr;
-    if (strides) {
-      staticStrides.assign(strides->begin(), strides->end());
+    std::optional<llvm::SmallVector<int64_t>> staticStrides;
+    if (const auto *strides = tensorArg->strides()) {
+      staticStrides.emplace(strides->begin(), strides->end());
     }
-    return TensorArgDesc{rank,
-                         std::move(staticShape),
-                         std::move(staticStrides),
-                         /*numDynSizes=*/0,
-                         /*numDynStrides=*/0,
-                         hasExplicitStrides,
-                         /*isScalar=*/false,
-                         elementInfo};
+    TIR_ASSIGN_OR_RETURN(
+        auto desc, TensorArgDesc::create(
+                       elementType, staticShape,
+                       staticStrides ? std::optional<llvm::ArrayRef<int64_t>>(
+                                           *staticStrides)
+                                     : std::nullopt));
+    return ArgDesc(std::move(desc));
   }
   case schema::ArgDesc::ScalarArgDesc: {
     const auto *scalarArg = static_cast<const schema::ScalarArgDesc *>(value);
-    TIR_ASSIGN_OR_RETURN(ElementTypeInfo elementInfo,
-                         decodeElementType(scalarArg->element_type()));
-    return TensorArgDesc{/*rank=*/0,
-                         /*staticShape=*/{},
-                         /*staticStrides=*/{},
-                         /*numDynSizes=*/0,
-                         /*numDynStrides=*/0,
-                         /*hasExplicitStrides=*/false,
-                         /*isScalar=*/true,
-                         elementInfo};
+    TIR_ASSIGN_OR_RETURN(ElementType elementType,
+                         fromSchema(scalarArg->element_type()));
+    TIR_ASSIGN_OR_RETURN(auto desc, ScalarArgDesc::create(elementType));
+    return ArgDesc(std::move(desc));
   }
   case schema::ArgDesc::NONE:
   default:
@@ -214,13 +199,13 @@ public:
 
   ::flatbuffers::Offset<schema::TensorIRArtifact>
   encode(const TensorIRArtifact &artifact) {
-    const KernelArgLayout &argLayout = artifact.argLayout;
+    const KernelMetadata &argLayout = artifact.argLayout;
 
     llvm::SmallVector<::flatbuffers::Offset<void>> argOffsets;
     llvm::SmallVector<schema::ArgDesc> argKinds;
-    argOffsets.reserve(argLayout.tensorDescs.size());
-    argKinds.reserve(argLayout.tensorDescs.size());
-    for (const TensorArgDesc &desc : argLayout.tensorDescs) {
+    argOffsets.reserve(argLayout.args.size());
+    argKinds.reserve(argLayout.args.size());
+    for (const ArgDesc &desc : argLayout.args) {
       schema::ArgDesc kind;
       argOffsets.push_back(encodeArgDesc(desc, kind));
       argKinds.push_back(kind);
@@ -245,9 +230,8 @@ public:
     auto metadata = schema::CreateLaunchMetadata(
         builder_, builder_.CreateString(artifact.funcName), argsType, args,
         tileSizes, argLayout.numInputs, argLayout.gridShapeTensorIdx, gridShape,
-        gridShapeDimMapping, argLayout.uniformSignature,
-        toSchema(argLayout.persistence), argLayout.smCount, argLayout.occupancy,
-        staticGridStruct ? &*staticGridStruct : nullptr);
+        gridShapeDimMapping, toSchema(argLayout.persistence), argLayout.smCount,
+        argLayout.occupancy, staticGridStruct ? &*staticGridStruct : nullptr);
 
     auto kernelNameOffset = builder_.CreateString(artifact.kernelName);
 
@@ -292,22 +276,23 @@ private:
         binary);
   }
 
-  ::flatbuffers::Offset<void> encodeArgDesc(const TensorArgDesc &desc,
+  ::flatbuffers::Offset<void> encodeArgDesc(const ArgDesc &arg,
                                             schema::ArgDesc &kind) {
-    schema::ElementType elementType = toSchema(desc.elementInfo.type());
-    if (desc.isScalar) {
+    schema::ElementType elementType = toSchema(getElementType(arg));
+    if (std::holds_alternative<ScalarArgDesc>(arg)) {
       kind = schema::ArgDesc::ScalarArgDesc;
       return schema::CreateScalarArgDesc(builder_, elementType).Union();
     }
+    const auto &desc = std::get<TensorArgDesc>(arg);
     kind = schema::ArgDesc::TensorArgDesc;
     auto staticShape =
-        builder_.CreateVector(desc.staticShape.data(), desc.staticShape.size());
+        builder_.CreateVector(desc.shape().data(), desc.shape().size());
     // The strides vector's presence (null vs. non-null, not emptiness) is
     // the hasExplicitStrides signal (see decodeArgDesc).
     ::flatbuffers::Offset<::flatbuffers::Vector<int64_t>> staticStrides;
-    if (desc.hasExplicitStrides) {
-      staticStrides = builder_.CreateVector(desc.staticStrides.data(),
-                                            desc.staticStrides.size());
+    if (desc.hasExplicitStrides()) {
+      staticStrides =
+          builder_.CreateVector(desc.strides().data(), desc.strides().size());
     }
     return schema::CreateTensorArgDesc(builder_, elementType, staticShape,
                                        staticStrides)
@@ -342,7 +327,7 @@ StatusOr<Binary> decodeBinary(schema::Binary kind, const void *value) {
     std::optional<::mlir::cuda_tile::BytecodeVersion> version;
     if (const schema::BcVersion *v = tileir->version()) {
       version = ::mlir::cuda_tile::BytecodeVersion::fromVersion(
-          v->major(), v->minor(), v->tag());
+          v->major_version(), v->minor_version(), v->tag());
       if (!version) {
         return Status::InvalidArgument(
             "serialized TensorIRArtifact has an unsupported bytecode "
@@ -366,50 +351,33 @@ decodeTensorIRArtifact(const schema::TensorIRArtifact &payload) {
                                 " is not supported");
   }
   const schema::LaunchMetadata *metadata = payload.metadata();
-  KernelArgLayout argLayout;
+  KernelMetadataBuilder builder;
   if (const auto *args = metadata->args()) {
     const auto *argTypes = metadata->args_type();
-    argLayout.tensorDescs.reserve(args->size());
+    builder.args.reserve(args->size());
     for (::flatbuffers::uoffset_t i = 0; i < args->size(); ++i) {
-      TIR_ASSIGN_OR_RETURN(TensorArgDesc desc,
+      TIR_ASSIGN_OR_RETURN(ArgDesc desc,
                            decodeArgDesc(argTypes->Get(i), args->Get(i)));
-      argLayout.tensorDescs.push_back(std::move(desc));
+      builder.args.push_back(std::move(desc));
     }
   }
   if (const auto *tileSizes = metadata->tile_sizes()) {
-    argLayout.tileSizes.assign(tileSizes->begin(), tileSizes->end());
+    builder.tileSizes.assign(tileSizes->begin(), tileSizes->end());
   }
-  argLayout.numInputs = metadata->num_inputs();
-  argLayout.gridShapeTensorIdx = metadata->grid_shape_tensor_idx();
+  builder.numInputs = metadata->num_inputs();
+  builder.gridShapeTensorIdx = metadata->grid_shape_tensor_idx();
   if (const auto *gridShape = metadata->grid_shape()) {
-    argLayout.gridShape.assign(gridShape->begin(), gridShape->end());
+    builder.gridShape.assign(gridShape->begin(), gridShape->end());
   }
   if (const auto *dimMapping = metadata->grid_shape_dim_mapping()) {
-    argLayout.gridShapeDimMapping.assign(dimMapping->begin(),
-                                         dimMapping->end());
+    builder.gridShapeDimMapping.assign(dimMapping->begin(), dimMapping->end());
   }
-  argLayout.uniformSignature = metadata->uniform_signature();
-  for (TensorArgDesc &desc : argLayout.tensorDescs) {
-    if (desc.isScalar) {
-      continue;
-    }
-    desc.numDynSizes = argLayout.uniformSignature
-                           ? desc.rank
-                           : countDynamicDims(desc.staticShape);
-    desc.numDynStrides = desc.hasExplicitStrides
-                             ? (argLayout.uniformSignature
-                                    ? desc.rank
-                                    : countDynamicDims(desc.staticStrides))
-                             : 0;
-  }
-  argLayout.totalKernelArgs = 0;
-  for (const TensorArgDesc &desc : argLayout.tensorDescs) {
-    argLayout.totalKernelArgs += desc.totalArgs();
-  }
-  TIR_ASSIGN_OR_RETURN(argLayout.persistence,
+  TIR_ASSIGN_OR_RETURN(builder.persistence,
                        fromSchema(metadata->persistence()));
-  argLayout.smCount = metadata->sm_count();
-  argLayout.occupancy = metadata->occupancy();
+  builder.smCount = metadata->sm_count();
+  builder.occupancy = metadata->occupancy();
+  TIR_ASSIGN_OR_RETURN(KernelMetadata argLayout,
+                       KernelMetadata::create(std::move(builder)));
 
   std::optional<std::array<int32_t, 3>> staticGrid;
   if (const schema::GridDimensions *grid = metadata->static_grid()) {

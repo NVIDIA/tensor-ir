@@ -148,13 +148,16 @@ def BufferizePass : Pass<"tir-bufferize", "mlir::ModuleOp"> {
   let summary = "Create destination-passing TensorIR buffer boundaries";
   let description = [{
     Replaces each TensorIR graph with a void function whose tensor inputs and
-    appended result destinations are strided memrefs. Direct TensorIR
-    loads/stores connect those physical buffers to the unchanged tensor
-    computation. The pass preserves layout and tile-selection metadata but
-    does not construct a grid or otherwise tile the computation.
+    appended result destinations are strided memrefs carrying
+    `nv_tensor_ir.alignment` attributes. Restrict `bufferization.to_tensor` and
+    `bufferization.materialize_in_destination` operations bridge these buffers
+    to the unchanged tensor computation. The pass emits no memory accesses,
+    preserves layout and tile-selection metadata, and performs no tiling or
+    grid construction.
   }];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
+    "::mlir::bufferization::BufferizationDialect",
     "::mlir::func::FuncDialect",
     "::mlir::memref::MemRefDialect",
     "::mlir::nv_tensor_ir::TensorIRDialect",
@@ -165,11 +168,12 @@ def BufferizePass : Pass<"tir-bufferize", "mlir::ModuleOp"> {
 def FormGridPass : Pass<"tir-form-grid", "mlir::func::FuncOp"> {
   let summary = "Tile a bufferized TensorIR function onto a GPU grid";
   let description = [{
-    Consumes a function produced by `tir-bufferize` plus normalized
-    layout-propagation metadata and the selected tile shape. The function
-    signature and buffer setup remain unchanged. A rank-one `scf.forall`
-    mapped to `#gpu.block<x>` delinearizes the block coordinate, loads
-    fixed-shape tiles, computes the graph result, and stores it.
+    Consumes a function produced by `tir-bufferize`, normalized
+    layout-propagation metadata, and the selected tile shape. The function
+    signature remains unchanged. A rank-one `scf.forall` mapped to
+    `#gpu.block<x>` delinearizes the block coordinate, loads fixed-shape tiles,
+    computes graph results, and stores them. These tiled `nv_tensor_ir.load` and
+    `nv_tensor_ir.store` operations replace the bufferization bridges.
 
     Layout-only reshape, transpose, broadcast, and slice operations are folded
     into the explicit access metadata. Analysis-only layout, iteration-space,
@@ -178,7 +182,9 @@ def FormGridPass : Pass<"tir-form-grid", "mlir::func::FuncOp"> {
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
     "::mlir::gpu::GPUDialect",
+    "::mlir::memref::MemRefDialect",
     "::mlir::nv_tensor_ir::TensorIRDialect",
+    "::mlir::ptr::PtrDialect",
     "::mlir::scf::SCFDialect"
   ];
 }

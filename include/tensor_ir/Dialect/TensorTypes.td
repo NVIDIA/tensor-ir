@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef TENSORIR_TYPES
-#define TENSORIR_TYPES
+#ifndef TENSORIR_DIALECT_TENSORTYPES_TD
+#define TENSORIR_DIALECT_TENSORTYPES_TD
 
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/BuiltinTypeInterfaces.td"
@@ -63,4 +63,4 @@ def TensorIR_UnsignedInt32Tensor  : TensorIR_TensorTypeOf<[UI32]>;
 // 64b Integer Type
 def TensorIR_SignedInt64Tensor  : TensorIR_TensorTypeOf<[SI64]>;
 def TensorIR_UnsignedInt64Tensor  : TensorIR_TensorTypeOf<[UI64]>;
-#endif  // TENSORIR_TYPES
+#endif  // TENSORIR_DIALECT_TENSORTYPES_TD

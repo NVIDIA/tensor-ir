@@ -4,8 +4,8 @@
 #ifndef TENSOR_IR_CONVERSION_TENSORTOCUDATILE_TENSORTOCUDATILE_H
 #define TENSOR_IR_CONVERSION_TENSORTOCUDATILE_TENSORTOCUDATILE_H
 
-#include "tensor_ir/Conversion/TensorToCudaTile/Options.h"
 #include "tensor_ir/Dialect/TensorIR.h"
+#include "tensor_ir/Options/Options.h"
 
 #include "mlir/Pass/Pass.h" // IWYU pragma: keep
 #include "mlir/Transforms/DialectConversion.h"
@@ -69,7 +69,8 @@ protected:
 std::unique_ptr<ConversionState>
 createAffineMapConversionState(MLIRContext *context,
                                const TypeConverter &typeConverter,
-                               const TensorToCudaTilePipelineOptions &options);
+                               const CodegenOptions &codegenOptions,
+                               const CudaTileOptions &cudaTileOptions);
 
 } // namespace tensor_to_cuda_tile
 } // namespace mlir::nv_tensor_ir

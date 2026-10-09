@@ -22,23 +22,19 @@ static constexpr unsigned kMaxInlineKernelArgs = 128;
 StatusOr<IRuntimeKernelPtr>
 CudaTileRuntimeKernel::create(std::unique_ptr<TensorIRArtifact> artifact) {
   std::unique_ptr<const TensorIRArtifact> owned = std::move(artifact);
-  const KernelArgLayout &layout = owned->argLayout;
-  std::optional<std::array<int32_t, 3>> staticGrid = owned->staticGrid;
+  const KernelMetadata &layout = owned->getLaunchMetadata();
+  const std::optional<std::array<int32_t, 3>> &staticGrid =
+      owned->getStaticGrid();
   std::optional<::mlir::cuda_tile::BytecodeVersion> bytecodeVersion;
-  if (const auto *tileir = std::get_if<TileIRBytecode>(&owned->binary)) {
+  if (const auto *tileir = std::get_if<TileIRBytecode>(&owned->getBinary())) {
     bytecodeVersion = tileir->version;
   }
-  SmTarget compiledTarget = owned->arch;
+  SmTarget compiledTarget = owned->getArch();
 
   std::unique_ptr<CudaTileRuntimeKernel> kernel(
       new CudaTileRuntimeKernel(std::move(owned)));
 
   using Acc = RuntimeOperandAccessor;
-  if (layout.uniformSignature || layout.hasDynamicShapes()) {
-    kernel->setArgPacker(std::make_unique<FlatArgPacker<Acc>>(layout));
-  } else {
-    kernel->setArgPacker(std::make_unique<PointerOnlyArgPacker<Acc>>());
-  }
   if (staticGrid) {
     kernel->setGridComputer(
         std::make_unique<StaticGridComputer<Acc>>(*staticGrid));
@@ -47,7 +43,7 @@ CudaTileRuntimeKernel::create(std::unique_ptr<TensorIRArtifact> artifact) {
         std::make_unique<TileBasedGridComputer<Acc>>(layout));
   }
 
-  if (std::holds_alternative<TileIRBytecode>(kernel->artifact_->binary)) {
+  if (std::holds_alternative<TileIRBytecode>(kernel->artifact_->getBinary())) {
     kernel->setTileIRFallbackAssembler(
         [compiledTarget, bytecodeVersion](
             llvm::ArrayRef<char> bytecode,
@@ -111,7 +107,7 @@ Status CudaTileRuntimeKernel::initializeRuntimeState() const {
     }
     lib_ = *library;
     StatusOr<CUkernel> kernel =
-        cuda::driver::getKernel(lib_, artifact_->funcName.c_str());
+        cuda::driver::getKernel(lib_, artifact_->getFuncName().c_str());
     if (!kernel.ok()) {
       (void)cuda::driver::unloadLibrary(lib_);
       lib_ = nullptr;
@@ -121,7 +117,7 @@ Status CudaTileRuntimeKernel::initializeRuntimeState() const {
     return Status::Ok();
   };
 
-  const auto *tileir = std::get_if<TileIRBytecode>(&artifact_->binary);
+  const auto *tileir = std::get_if<TileIRBytecode>(&artifact_->getBinary());
 
   Status driverStatus = loadKernel(code);
   bool alreadyFellBack = !fallbackCubin_.empty();
@@ -189,21 +185,20 @@ Status CudaTileRuntimeKernel::launch(PackedArgs args, Workspace workspace,
     return Status::NotSupported("No device code available");
   }
 
-  if (!argPacker_ || !gridComputer_) {
+  if (!gridComputer_) {
     return Status::InvalidArgument(
-        "CudaTileRuntimeKernel: argPacker or gridComputer not set");
+        "CudaTileRuntimeKernel: gridComputer not set");
   }
 
   // Wrap OSS PackedArgs in the generic accessor.
   RuntimeOperandAccessor acc{args};
 
-  // Pack arguments via strategy.
-  int32_t numArgs = argPacker_->numKernelArgs(acc.size());
+  // Pack arguments according to the compiled signature.
+  int32_t numArgs = argPacker_.numKernelArgs();
   llvm::SmallVector<int64_t, kMaxInlineKernelArgs> argValues(numArgs);
-  int32_t packed = argPacker_->packArgs(acc, argValues);
+  int32_t packed = argPacker_.packArgs(acc, argValues);
   if (packed < 0) {
-    return Status::InvalidArgument(
-        "Failed to pack kernel arguments: unsupported operand kind");
+    return Status::InvalidArgument("Failed to pack kernel arguments");
   }
 
   // Compute grid via strategy.

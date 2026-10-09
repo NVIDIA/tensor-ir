@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// ICompiler - Interface for compiling MLIR to IRuntimeKernel
+// ICompiler - Interface for compiling MLIR to TensorIRArtifact
 
 #ifndef TENSOR_IR_COMPILER_COMPILER_H
 #define TENSOR_IR_COMPILER_COMPILER_H
 
-#include "tensor_ir/Compiler/CompileOptions.h"
-#include "tensor_ir/Runtime/IRuntimeKernel.h"
+#include "tensor_ir/Artifact/TensorIRArtifact.h"
+#include "tensor_ir/Options/Options.h"
 
 #include "mlir/IR/BuiltinOps.h"
 
@@ -24,26 +24,27 @@ namespace mlir::nv_tensor_ir {
 /// original module remains unchanged, and names that do not affect generated
 /// code do not prevent otherwise equivalent modules from sharing a kernel.
 std::string calculateCacheKey(mlir::ModuleOp module,
-                              const CompileOptions &options);
+                              const CompilerInvocation &options);
 
 //===----------------------------------------------------------------------===//
-// ICompiler - Interface for compiling MLIR to IRuntimeKernel
+// ICompiler - Interface for compiling MLIR to TensorIRArtifact
 //===----------------------------------------------------------------------===//
 
 class ICompiler {
 public:
   virtual ~ICompiler() = default;
 
-  virtual StatusOr<::tensor_ir::rt::IRuntimeKernelPtr>
-  compile(mlir::ModuleOp module, const CompileOptions &options) = 0;
+  /// Compile to an owning artifact without creating runtime state.
+  virtual StatusOr<std::unique_ptr<::tensor_ir::rt::TensorIRArtifact>>
+  compile(mlir::ModuleOp module, const CompilerInvocation &options) = 0;
 
-  virtual StatusOr<::tensor_ir::rt::IRuntimeKernelPtr>
-  compile(llvm::StringRef source, const CompileOptions &options);
+  virtual StatusOr<std::unique_ptr<::tensor_ir::rt::TensorIRArtifact>>
+  compile(llvm::StringRef source, const CompilerInvocation &options);
 
   // XLA integration contract: keep this lightweight and coordinate before
   // changing the signature or semantics.
   virtual bool canCompile(mlir::ModuleOp module,
-                          const CompileOptions &options) const = 0;
+                          const CompilerInvocation &options) const = 0;
 
   static std::unique_ptr<ICompiler>
   create(CompilerBackend backend = CompilerBackend::Auto);

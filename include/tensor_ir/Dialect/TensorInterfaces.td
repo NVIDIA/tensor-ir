@@ -245,10 +245,10 @@ def IterationSpaceInfoInterface : OpInterface<"IterationSpaceInfoInterface"> {
       /*defaultImplementation=*/[{
         auto operand = $_op->getOperand(0);
         Type operandType = operand.getType();
-        assert(::llvm::isa<::mlir::nv_tensor_ir::TensorType>(operandType) &&
+        assert(::llvm::isa<::mlir::RankedTensorType>(operandType) &&
           "Invalid default implementation of getNumIterSpaceDims");
 
-        auto outputType = ::llvm::cast<::mlir::nv_tensor_ir::TensorType>(operandType);
+        auto outputType = ::llvm::cast<::mlir::RankedTensorType>(operandType);
         return outputType.getRank();
       }]
     >,
@@ -326,7 +326,7 @@ def IterationSpaceInfoInterface : OpInterface<"IterationSpaceInfoInterface"> {
         int numIterSpaceDims = iterSpaceRank.value_or($_op.getNumIterSpaceDims());
 
         Value operand = $_op->getOperand(inputIdx);
-        int operandRank = ::llvm::cast<::mlir::nv_tensor_ir::TensorType>(operand.getType()).getRank();
+        int operandRank = ::llvm::cast<::mlir::RankedTensorType>(operand.getType()).getRank();
         if (numIterSpaceDims != operandRank)
           return ::mlir::AffineMap();
 
@@ -359,7 +359,7 @@ def IterationSpaceInfoInterface : OpInterface<"IterationSpaceInfoInterface"> {
         int numIterSpaceDims = iterSpaceRank.value_or($_op.getNumIterSpaceDims());
 
         Value result = $_op->getResult(0);
-        auto resultType = ::llvm::cast<::mlir::nv_tensor_ir::TensorType>(result.getType());
+        auto resultType = ::llvm::cast<::mlir::RankedTensorType>(result.getType());
         int resultRank = resultType.getRank();
         if (numIterSpaceDims != resultRank)
           return ::mlir::AffineMap();
@@ -390,7 +390,7 @@ def IterationSpaceInfoInterface : OpInterface<"IterationSpaceInfoInterface"> {
           return ::mlir::AffineMap();
 
         Value operand = $_op->getOperand(inputIndex);
-        auto operandType = ::llvm::cast<::mlir::nv_tensor_ir::TensorType>(operand.getType());
+        auto operandType = ::llvm::cast<::mlir::RankedTensorType>(operand.getType());
         if (outputMap.getNumResults() != static_cast<unsigned>(operandType.getRank()))
           return ::mlir::AffineMap();
 
@@ -461,7 +461,7 @@ def IterationSpaceInfoInterface : OpInterface<"IterationSpaceInfoInterface"> {
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
         assert(!$_op->getResults().empty() && "expected at least one result");
-        auto outputType = ::mlir::dyn_cast<::mlir::nv_tensor_ir::TensorType>(
+        auto outputType = ::mlir::dyn_cast<::mlir::RankedTensorType>(
             $_op->getResult(0).getType());
         if (!outputType)
           return ::llvm::SmallVector<::mlir::nv_tensor_ir::DimState>{};
@@ -553,7 +553,7 @@ def AnchorOpInterface : OpInterface<"AnchorOpInterface"> {
       /*desc=*/[{
         Get A operand of the operation.
       }],
-      /*retTy=*/"::mlir::TypedValue<::mlir::nv_tensor_ir::TensorType>",
+      /*retTy=*/"::mlir::TypedValue<::mlir::RankedTensorType>",
       /*methodName=*/"getA",
       /*args=*/(ins)
     >,
@@ -562,7 +562,7 @@ def AnchorOpInterface : OpInterface<"AnchorOpInterface"> {
       /*desc=*/[{
         Get B operand of the operation.
       }],
-      /*retTy=*/"::mlir::TypedValue<::mlir::nv_tensor_ir::TensorType>",
+      /*retTy=*/"::mlir::TypedValue<::mlir::RankedTensorType>",
       /*methodName=*/"getB",
       /*args=*/(ins)
     >,
@@ -571,7 +571,7 @@ def AnchorOpInterface : OpInterface<"AnchorOpInterface"> {
       /*desc=*/[{
         Get C output of the operation.
       }],
-      /*retTy=*/"::mlir::TypedValue<::mlir::nv_tensor_ir::TensorType>",
+      /*retTy=*/"::mlir::TypedValue<::mlir::RankedTensorType>",
       /*methodName=*/"getC",
       /*args=*/(ins)
     >,

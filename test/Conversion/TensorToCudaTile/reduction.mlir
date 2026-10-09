@@ -43,6 +43,29 @@ module {
 }
 
 // -----
+
+// Test ReduceOp with a dropped reduction dimension.
+
+// CHECK-LABEL: entry @reduction_dropped_rank
+// CHECK: %[[INPUT_VIEW:.*]] = make_tensor_view {{.*}} shape = [16, 32, 64]
+// CHECK: %[[OUTPUT_VIEW:.*]] = make_tensor_view {{.*}} shape = [16, 64]
+// CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} : {{.*}} -> tile<2x2x2xf32>, token
+// CHECK: %[[REDUCE:.*]] = reduce %[[INPUT]] dim=1 {{.*}} : tile<2x2x2xf32> -> tile<2x2xf32>
+// CHECK-NOT: reshape %[[REDUCE]]
+// CHECK: store_view_tko weak %[[REDUCE]], {{.*}} : tile<2x2xf32>
+module {
+  nv_tensor_ir.graph @reduction_dropped_rank(
+      %input: tensor<16x32x64xf32> {
+        nv_tensor_ir.stride = "(2048,64,1)"})
+      -> (tensor<16x64xf32> {nv_tensor_ir.stride = "(64,1)"}) {
+    %result = reduce(%input) <
+      dimensions = [1],
+      reduction_mode = <add>> : tensor<16x32x64xf32> -> tensor<16x64xf32>
+    results %result : tensor<16x64xf32>
+  }
+}
+
+// -----
 // Test ReduceOp with mul mode
 
 module {

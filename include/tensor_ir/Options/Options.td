@@ -40,9 +40,6 @@ def CompilerDebugOptions : ComponentOptions<"CompilerDebug"> {
                "Path to load Tile IR bytecode">,
     FlagOption<"printCudaTileIR", "print-cuda-tile-ir",
            "Print CUDA Tile IR">,
-    StringOption<"cudaToolkitPath", "cuda-toolkit-path",
-               "Path to the CUDA toolkit root (replaces the CUDA_ROOT env "
-               "variable for compilation)">,
   ];
 }
 
@@ -68,11 +65,16 @@ def CompilerBackendOpt : EnumOption<"compilerBackend", "compiler-backend",
 def CodegenOptions : ComponentOptions<"Codegen"> {
   let clCategory = "TensorIR Codegen Options";
   let invocationMember = "codegen";
-  let options = [CompilerBackendOpt,
-       Option<"ctaCount", "cta-count", "int32_t", "1",
+  let options = [
+      CompilerBackendOpt,
+      Option<"ctaCount", "cta-count", "int32_t", "1",
               "Number of cooperative thread arrays", 1, [PositiveTrait<>]>,
-       TileShapeOption<"tileSize", "tile-size", "int32_t",
-                       "Per-dimension kernel tile sizes ('x' separated)">];
+      TileShapeOption<"tileSize", "tile-size", "int32_t",
+                       "Per-dimension kernel tile sizes ('x' or ',' separated)">,
+      StringOption<"cudaToolkitPath", "cuda-toolkit-path",
+               "Path to the CUDA toolkit root (replaces the CUDA_ROOT env "
+               "variable for compilation)">
+  ];
 }
 
 def CudaTileOptions : ComponentOptions<"CudaTile"> {
@@ -86,8 +88,6 @@ def CudaTileOptions : ComponentOptions<"CudaTile"> {
            "dotted version", "\"default\"", 0>,
        Option<"warpCount", "warp-count", "int32_t", "4",
               "Number of worker warps per CTA", 1, [PositiveTrait<>]>,
-       FlagOption<"uniformSignature", "uniform-signature",
-              "Pass sizes and strides for static and dynamic dimensions">,
        Option<"reductionTileSize", "reduction-tile-size", "int64_t", "128",
               "Tile size for contracting dimensions in layout-propagation "
               "lowering; must be a positive power of two",
@@ -115,8 +115,15 @@ def CompilerToolTestOptions : ComponentOptions<"CompilerToolTest"> {
        Option<"seed", "seed", "unsigned", "2024", "Random seed for test data">,
        Option<"iterations", "iterations", "int", "1",
               "Number of launch iterations">,
+       Option<"repeat", "repeat", "int", "0",
+              "Compatibility alias for --iterations", 1,
+              [RangeTrait<0, 2147483647>]>,
        Option<"tolerance", "tolerance", "float", "1e-2",
               "Tolerance for verification">,
+       StringOption<"inputPrefix", "input-prefix",
+              "Read raw input tensors from <prefix>.<input-index>">,
+       StringOption<"outputFile", "output-file",
+              "Write the first output tensor to a raw binary file">,
        ShapeOption<
            "dynamicDims", "dynamic-dims",
            "Runtime extents of the dynamic '?' dimensions, by position">,

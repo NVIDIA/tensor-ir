@@ -3,8 +3,8 @@
 
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTile.h"
 
-#include "tensor_ir/Conversion/TensorToCudaTile/Options.h"
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTileInternal.h"
+#include "tensor_ir/Options/Options.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
@@ -53,7 +53,7 @@ public:
 
     // Convert tensor types to 0-D tiles, as the actual tile shape is not
     // available during the type conversion (depends on the iteration space).
-    addConversion([=](nv_tensor_ir::TensorType tensorTy) -> Type {
+    addConversion([=](RankedTensorType tensorTy) -> Type {
       return convertType(tensorTy.getElementType());
     });
   }
@@ -88,8 +88,7 @@ public:
                    << "  codegen_strategy: "
                    << static_cast<int>(static_cast<CudaTileCodegenStrategy>(
                           codegen_strategy))
-                   << "\n"
-                   << "  uniform_signature: " << uniform_signature << "\n";
+                   << "\n";
     });
 
     // Verify the pass options and the IR state.
@@ -100,6 +99,7 @@ public:
 
     MLIRContext *ctx = &getContext();
     bool enableExperimentalCudaTileOps = false;
+    int32_t minCTAsPerSM = 1;
 
     const bool useLayoutPropagation =
         codegen_strategy == CudaTileCodegenStrategy::LayoutPropagation;
@@ -153,9 +153,9 @@ public:
       }
       auto optimizationHints =
           tensor_to_cuda_tile::createEntryOptimizationHints(
-              ctx, num_ctas, occupancy, num_warps);
+              ctx, num_ctas, occupancy, num_warps, minCTAsPerSM);
       if (failed(tensor_to_cuda_tile::convertOutlinedKernels(
-              getOperation(), optimizationHints, uniform_signature,
+              getOperation(), optimizationHints,
               enableExperimentalCudaTileOps))) {
         return signalPassFailure();
       }
@@ -187,18 +187,18 @@ public:
     std::unique_ptr<TypeConverter> typeConverterPtr =
         createTensorToCudaTileTypeConverter(ctx);
     TypeConverter &typeConverter = *typeConverterPtr;
-    TensorToCudaTilePipelineOptions options;
-    options.tileSize.assign(tile_size.begin(), tile_size.end());
-    options.numCTAs = num_ctas;
-    options.occupancy = occupancy;
-    options.numWarps = num_warps;
-    options.smCount = sm_count;
-    options.uniformSignature = uniform_signature;
-    options.persistence = persistence;
-    options.codegenStrategy = codegen_strategy;
+    CodegenOptions codegenOptions;
+    codegenOptions.tileSize.assign(tile_size.begin(), tile_size.end());
+    codegenOptions.ctaCount = num_ctas;
+    CudaTileOptions cudaTileOptions;
+    cudaTileOptions.warpCount = num_warps;
+    cudaTileOptions.occupancy = occupancy;
+    cudaTileOptions.smCount = sm_count;
+    cudaTileOptions.persistenceMode = persistence;
+    cudaTileOptions.codegenStrategy = codegen_strategy;
     std::unique_ptr<tensor_to_cuda_tile::ConversionState> state =
-        tensor_to_cuda_tile::createAffineMapConversionState(ctx, typeConverter,
-                                                            options);
+        tensor_to_cuda_tile::createAffineMapConversionState(
+            ctx, typeConverter, codegenOptions, cudaTileOptions);
 
     // Preserve the affine path's automatically resolved tile for backends that
     // run analysis and conversion as a single pipeline.

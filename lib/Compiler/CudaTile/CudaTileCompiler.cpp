@@ -6,217 +6,76 @@
 #include "tensor_ir/Artifact/TensorIRArtifact.h"
 #include "tensor_ir/Compiler/CudaTile/CudaTileFrontend.h"
 #include "tensor_ir/Compiler/CudaTile/TileIRAssembly.h"
-#include "tensor_ir/Runtime/CudaTile/CudaTileRuntimeKernel.h"
-#include "tensor_ir/Runtime/IRuntimeKernel.h"
 #include "tensor_ir/Support/Status.h"
 
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/Support/Casting.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "cuda_tile/Bytecode/Writer/BytecodeWriter.h"
-#include <cstdlib>
-#include <memory>
 #include <optional>
 
-namespace {
-
-static bool isEnvEnabledValue(llvm::StringRef value) {
-  return value.equals_insensitive("1") || value.equals_insensitive("true") ||
-         value.equals_insensitive("on") || value.equals_insensitive("yes");
-}
-
-static bool isEnvDisabledValue(llvm::StringRef value) {
-  return value.equals_insensitive("0") || value.equals_insensitive("false") ||
-         value.equals_insensitive("off") || value.equals_insensitive("no");
-}
-
-static void applyBoolEnvVar(const char *name, bool &option) {
-  const char *value = std::getenv(name);
-  if (!value || !*value) {
-    return;
-  }
-
-  llvm::StringRef valueRef(value);
-  if (isEnvEnabledValue(valueRef)) {
-    option = true;
-    return;
-  }
-  if (isEnvDisabledValue(valueRef)) {
-    option = false;
-    return;
-  }
-
-  llvm::errs() << "Warning: ignoring invalid boolean value '" << valueRef
-               << "' for " << name
-               << "; expected 0/1, false/true, off/on, or no/yes.\n";
-}
-
-static void applyPathEnvVar(const char *name, std::string &path) {
-  const char *value = std::getenv(name);
-  if (!value || !*value) {
-    return;
-  }
-
-  llvm::StringRef valueRef(value);
-  if (isEnvDisabledValue(valueRef)) {
-    path.clear();
-    return;
-  }
-  if (isEnvEnabledValue(valueRef)) {
-    path.clear();
-    llvm::errs() << "Warning: ignoring boolean value '" << valueRef << "' for "
-                 << name << "; expected a file or directory path.\n";
-    return;
-  }
-
-  path = value;
-}
-
-static mlir::nv_tensor_ir::CudaTileCodegenStrategy getCodegenStrategy(
-    mlir::nv_tensor_ir::CudaTileCodegenStrategy defaultStrategy) {
-  const char *strategy = std::getenv("TENSOR_IR_CODEGEN_STRATEGY");
-  if (!strategy) {
-    return defaultStrategy;
-  }
-  llvm::StringRef value(strategy);
-  if (value == "layout-propagation" || value == "layout_propagation" ||
-      value == "layout") {
-    return mlir::nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation;
-  }
-  if (value == "affine-map" || value == "affine_map" || value == "affine") {
-    return mlir::nv_tensor_ir::CudaTileCodegenStrategy::AffineMap;
-  }
-  return defaultStrategy;
-}
-
-static int getMaxTileCandidatesFromEnvOrDefault(int defaultValue) {
-  const char *maxCandidates = std::getenv("TENSOR_IR_MAX_TILE_CANDIDATES");
-  int parsed = defaultValue;
-  if (maxCandidates &&
-      !llvm::StringRef(maxCandidates).getAsInteger(10, parsed) && parsed > 0) {
-    return parsed;
-  }
-  return defaultValue;
-}
-
-} // namespace
-
-namespace mlir::nv_tensor_ir::backend::cuda_tile {
-
-mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions
-CudaTileCompiler::makePipelineOptions(
-    const mlir::nv_tensor_ir::backend::cuda_tile::CudaTileCompileOptions
-        &cudaTileOptions) {
-  mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions pipelineOptions;
-  pipelineOptions.computeCapability =
-      cudaTileOptions.computeCapability.getComputeCapabilityVersion();
-  pipelineOptions.numCTAs = cudaTileOptions.ctaCount;
-  pipelineOptions.numWarps = cudaTileOptions.warpCount;
-  pipelineOptions.tileSize.assign(cudaTileOptions.tileSize.begin(),
-                                  cudaTileOptions.tileSize.end());
-  pipelineOptions.uniformSignature = cudaTileOptions.uniformSignature;
-  pipelineOptions.codegenStrategy =
-      getCodegenStrategy(cudaTileOptions.codegenStrategy);
-  pipelineOptions.maxCandidates =
-      getMaxTileCandidatesFromEnvOrDefault(cudaTileOptions.maxTileCandidates);
-  return pipelineOptions;
-}
-
-mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions
-CudaTileCompiler::makeFrontendOptions(
-    const mlir::nv_tensor_ir::backend::cuda_tile::CudaTileCompileOptions
-        &cudaTileOptions,
-    const mlir::nv_tensor_ir::backend::cuda_tile::IRDebugOptions &debug) {
-  mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions options;
-  options.pipelineOptions = makePipelineOptions(cudaTileOptions);
-  options.debug.dumpCudaTileIRPath = debug.dumpCudaTileIRPath;
-  options.debug.printIRAfterAll = debug.printIRAfterAll;
-  options.debug.printIRTreeDir = debug.printIRTreeDir;
-  options.debug.reproducerDir = debug.reproducerDir;
-  options.debug.enableTiming = debug.enableTiming;
-  applyBoolEnvVar("TENSOR_IR_PRINT_IR", options.debug.printCudaTileIR);
-  return options;
-}
-
-bool CudaTileCompiler::canCompile(mlir::ModuleOp module,
-                                  const CompileOptions &options) const {
-  const auto *cudaTileOptions =
-      llvm::dyn_cast<CudaTileCompileOptions>(&options);
-  if (!cudaTileOptions || !options.validate().ok()) {
-    return false;
-  }
-
-  IRDebugOptions debug;
-  auto frontendOptions = makeFrontendOptions(*cudaTileOptions, debug);
-  return compiler::cuda_tile::isCudaTileFrontendSupported(module,
-                                                          frontendOptions);
-}
-
-std::string createUniqueReproducerDir(const std::string &dir) {
-  auto stripTrailingSlash = [](SmallString<128> &p) {
-    while (p.size() > 1 && llvm::sys::path::is_separator(p.back())) {
-      p.pop_back();
+static std::string createUniqueReproducerDir(const std::string &dir) {
+  auto stripTrailingSlash = [](llvm::SmallString<128> &path) {
+    while (path.size() > 1 && llvm::sys::path::is_separator(path.back())) {
+      path.pop_back();
     }
   };
 
-  if (!dir.empty()) {
-    SmallString<128> reproducerPath(dir);
-    if (auto ec = llvm::sys::fs::make_absolute(reproducerPath)) {
-      llvm::errs() << "failed to read the absolute path for mlir reproducer: "
-                   << ec.message() << "\n";
-      return std::string();
-    }
-
-    stripTrailingSlash(reproducerPath);
-    if (auto ec = llvm::sys::fs::create_directories(
-            llvm::sys::path::parent_path(reproducerPath))) {
-      llvm::errs()
-          << "failed to create the parent directory for mlir reproducer: "
-          << ec.message() << "\n";
-      return std::string();
-    }
-
-    SmallString<128> uniqueReproducerDir;
-    if (auto ec = llvm::sys::fs::createUniqueDirectory(reproducerPath,
-                                                       uniqueReproducerDir)) {
-      llvm::errs()
-          << "failed to create a unique directory for mlir reproducer: "
-          << ec.message() << "\n";
-      return std::string();
-    }
-    return std::string(uniqueReproducerDir);
+  if (dir.empty()) {
+    return {};
   }
-  return std::string();
+
+  llvm::SmallString<128> reproducerPath(dir);
+  if (auto ec = llvm::sys::fs::make_absolute(reproducerPath)) {
+    llvm::errs() << "failed to read the absolute path for mlir reproducer: "
+                 << ec.message() << "\n";
+    return {};
+  }
+
+  stripTrailingSlash(reproducerPath);
+  if (auto ec = llvm::sys::fs::create_directories(
+          llvm::sys::path::parent_path(reproducerPath))) {
+    llvm::errs() << "failed to create the parent directory for mlir "
+                    "reproducer: "
+                 << ec.message() << "\n";
+    return {};
+  }
+
+  llvm::SmallString<128> uniqueReproducerDir;
+  if (auto ec = llvm::sys::fs::createUniqueDirectory(reproducerPath,
+                                                     uniqueReproducerDir)) {
+    llvm::errs() << "failed to create a unique directory for mlir reproducer: "
+                 << ec.message() << "\n";
+    return {};
+  }
+  return std::string(uniqueReproducerDir);
 }
 
-StatusOr<::tensor_ir::rt::IRuntimeKernelPtr>
-CudaTileCompiler::compile(mlir::ModuleOp module,
-                          const CompileOptions &options) {
-  const auto *cudaTileOptions =
-      llvm::dyn_cast<CudaTileCompileOptions>(&options);
-  if (!cudaTileOptions) {
-    return Status::InvalidArgument("Invalid CudaTile compilation options");
+namespace mlir::nv_tensor_ir::backend::cuda_tile {
+
+bool CudaTileCompiler::canCompile(mlir::ModuleOp module,
+                                  const CompilerInvocation &options) const {
+  if (!options.validate().ok()) {
+    return false;
   }
+  return compiler::cuda_tile::isCudaTileFrontendSupported(module, options);
+}
 
-  // create a reproducer directory once per compilation
-  IRDebugOptions debug = cudaTileOptions->irDebug;
-  debug.reproducerDir = createUniqueReproducerDir(debug.reproducerDir);
+StatusOr<std::unique_ptr<::tensor_ir::rt::TensorIRArtifact>>
+CudaTileCompiler::compile(mlir::ModuleOp module,
+                          const CompilerInvocation &options) {
+  TIR_RETURN_IF_ERROR(options.validate());
 
-  applyPathEnvVar("TENSOR_IR_DUMP_IR", debug.dumpCudaTileIRPath);
-  applyPathEnvVar("TENSOR_IR_DUMP_TILEIR_BC", debug.dumpTileIRBCPath);
-  applyPathEnvVar("TENSOR_IR_LOAD_TILEIR_BC", debug.loadTileIRBCPath);
-  applyBoolEnvVar("TENSOR_IR_PRINT_IR_AFTER_ALL", debug.printIRAfterAll);
-  applyPathEnvVar("TENSOR_IR_PRINT_IR_TREE_DIR", debug.printIRTreeDir);
-  applyBoolEnvVar("TENSOR_IR_TIMING", debug.enableTiming);
+  CompilerInvocation effectiveInvocation = options;
+  effectiveInvocation.debug.reproducerDir =
+      createUniqueReproducerDir(options.debug.reproducerDir);
 
-  auto frontendOptions = makeFrontendOptions(*cudaTileOptions, debug);
+  const auto &debug = effectiveInvocation.debug;
   auto frontendOr =
-      compiler::cuda_tile::lowerTensorIRToCudaTile(module, frontendOptions);
+      compiler::cuda_tile::lowerTensorIRToCudaTile(module, effectiveInvocation);
   if (failed(frontendOr)) {
     return Status::CompilationError(
         "Failed to lower TensorIR to CudaTile dialect");
@@ -224,11 +83,14 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
   compiler::cuda_tile::CudaTileFrontendResult frontend = std::move(*frontendOr);
 
   llvm::SmallVector<char, 0> tileirBytecode;
+  TIR_ASSIGN_OR_RETURN(
+      auto bytecodeVersion,
+      resolveBytecodeVersion(options.cudaTile.bytecodeVersion));
   std::optional<mlir::cuda_tile::BytecodeVersion> runtimeBytecodeVersion =
-      cudaTileOptions->bytecodeVersion;
+      bytecodeVersion;
   llvm::raw_svector_ostream os(tileirBytecode);
-  if (failed(mlir::cuda_tile::writeBytecode(
-          os, frontend.cudaTileModule, cudaTileOptions->bytecodeVersion))) {
+  if (failed(mlir::cuda_tile::writeBytecode(os, frontend.cudaTileModule,
+                                            *runtimeBytecodeVersion))) {
     return Status::CompilationError("Failed to write tile-ir bytecode");
   }
 
@@ -268,14 +130,18 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
   // ran) -- unless artifactKind asks for a cubin, in which case it's
   // assembled into a real cubin below regardless of whether the version is
   // known.
+  auto compiledTarget = options.getKernelSmTarget();
+  if (failed(compiledTarget)) {
+    return Status::InvalidArgument("Invalid target SM '" +
+                                   options.deviceTarget.kernelTarget + "'");
+  }
   ::tensor_ir::rt::Binary binary = ::tensor_ir::rt::TileIRBytecode{
       std::move(tileirBytecode), runtimeBytecodeVersion};
-  if (cudaTileOptions->artifactKind == CudaTileArtifactKind::Cubin) {
+  if (options.cudaTile.artifactKind == ArtifactKind::Cubin) {
     const auto &tileirBinary =
         std::get<::tensor_ir::rt::TileIRBytecode>(binary);
     TIR_ASSIGN_OR_RETURN(
-        auto cubin, assembleTileIRToCubin(tileirBinary.bytes,
-                                          cudaTileOptions->computeCapability,
+        auto cubin, assembleTileIRToCubin(tileirBinary.bytes, *compiledTarget,
                                           runtimeBytecodeVersion));
     if (cubin) {
       binary = ::tensor_ir::rt::Cubin{std::move(*cubin)};
@@ -286,76 +152,9 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
   if (!frontend.useRuntimeGrid) {
     staticGrid = compiler::cuda_tile::computeStaticGridSize(frontend);
   }
-  TIR_ASSIGN_OR_RETURN(
-      std::unique_ptr<::tensor_ir::rt::TensorIRArtifact> artifact,
-      ::tensor_ir::rt::TensorIRArtifact::create(
-          frontend.runtimeKernelName, frontend.entryFunctionName,
-          std::move(binary), cudaTileOptions->computeCapability,
-          std::move(frontend.argLayout), staticGrid));
-  return ::tensor_ir::rt::CudaTileRuntimeKernel::create(std::move(artifact));
-}
-
-Status CudaTileCompileOptions::validateDerived() const {
-  if (ctaCount <= 0) {
-    return Status::InvalidArgument("CTA count must be greater than 0");
-  }
-  if (warpCount <= 0) {
-    return Status::InvalidArgument("Warp count must be greater than 0");
-  }
-  switch (artifactKind) {
-  case CudaTileArtifactKind::TileIR:
-    break;
-  case CudaTileArtifactKind::Cubin:
-    if (computeCapability.getPortability() !=
-        ArchPortability::arch_conditional) {
-      return Status::InvalidArgument(
-          "Cubin requires an arch-conditional target");
-    }
-    break;
-  default:
-    return Status::InvalidArgument("Unrecognized CUDA Tile artifact kind");
-  }
-  return Status::Ok();
-}
-
-std::string CudaTileCompileOptions::toStringDerived() const {
-  std::string s;
-  s += "\nCTA count: " + std::to_string(ctaCount);
-  s += "\nWarp count: " + std::to_string(warpCount);
-  if (!tileSize.empty()) {
-    s += "\nTile size: ";
-    for (size_t i = 0; i < tileSize.size(); ++i) {
-      if (i > 0) {
-        s += "x";
-      }
-      s += std::to_string(tileSize[i]);
-    }
-  }
-  s += "\nTile IR bytecode version: " + bytecodeVersion.toString();
-  s += "\nCUDA Tile artifact kind: ";
-  s += artifactKind == CudaTileArtifactKind::TileIR ? "tileir" : "cubin";
-  return s;
-}
-
-std::string CudaTileCompileOptions::toUniqueStringDerived() const {
-  std::string s =
-      llvm::join_items("_", std::to_string(ctaCount), std::to_string(warpCount),
-                       std::to_string(uniformSignature),
-                       std::to_string(static_cast<int32_t>(codegenStrategy)),
-                       std::to_string(maxTileCandidates));
-  if (!tileSize.empty()) {
-    s += "_tile";
-    for (size_t i = 0; i < tileSize.size(); ++i) {
-      s += "_" + std::to_string(tileSize[i]);
-    }
-  }
-  s += "_bc";
-  s += llvm::join_items(
-      "_", std::to_string(static_cast<unsigned>(bytecodeVersion.getMajor())),
-      std::to_string(static_cast<unsigned>(bytecodeVersion.getMinor())),
-      std::to_string(bytecodeVersion.getTag()));
-  s += artifactKind == CudaTileArtifactKind::TileIR ? "_tileir" : "_cubin";
-  return s;
+  return ::tensor_ir::rt::TensorIRArtifact::create(
+      frontend.runtimeKernelName, frontend.entryFunctionName, std::move(binary),
+      *compiledTarget, std::move(frontend.argLayout), staticGrid);
 }
 
 } // namespace mlir::nv_tensor_ir::backend::cuda_tile

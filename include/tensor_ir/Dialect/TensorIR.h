@@ -21,6 +21,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
@@ -34,8 +35,6 @@ namespace nv_tensor_ir {} // namespace nv_tensor_ir
 #include "tensor_ir/Dialect/TensorTypes.h.inc"
 
 namespace mlir::nv_tensor_ir {
-/// Compatibility alias for TensorIR's builtin ranked tensor representation.
-using TensorType = ::mlir::RankedTensorType;
 
 /// Returns whether `type` is a ranked tensor supported by TensorIR.
 bool isTensorType(Type type);
@@ -61,8 +60,9 @@ FailureOr<int64_t> mergeEqualDimensions(int64_t lhs, int64_t rhs);
 
 /// Verifies the shared A (..., M, K), B (..., K, N), C (..., M, N) shape
 /// contract used by matrix multiplication operations.
-LogicalResult verifyMatmulShapes(Operation *op, TensorType aType,
-                                 TensorType bType, TensorType cType);
+LogicalResult verifyMatmulShapes(Operation *op, RankedTensorType aType,
+                                 RankedTensorType bType,
+                                 RankedTensorType cType);
 
 namespace detail {
 /// Verify the operand/result contract shared by DynamicDimsOpInterface ops.
@@ -73,7 +73,7 @@ SmallVector<int64_t> getFlatTensorShape(const tcutegen::Shape &shape);
 } // namespace detail
 
 /// Converts the dimensions of `tensorType` to a flat tcutegen shape.
-tcutegen::Shape getShapeRef(TensorType tensorType);
+tcutegen::Shape getShapeRef(RankedTensorType tensorType);
 } // namespace mlir::nv_tensor_ir
 
 // Disable clang-format to prevent the includes to be rearranged

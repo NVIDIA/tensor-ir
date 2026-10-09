@@ -2,71 +2,74 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 //===----------------------------------------------------------------------===//
-// Builds a KernelArgLayout from a TensorIR GraphOp and CUDA Tile ABI options.
+// Builds a KernelMetadata from a TensorIR GraphOp and CUDA Tile ABI options.
 //===----------------------------------------------------------------------===//
 
-#include "tensor_ir/Compiler/CudaTile/KernelArgLayout.h"
+#include "tensor_ir/Compiler/CudaTile/KernelMetadataExtraction.h"
 
 #include "tensor_ir/Analysis/TileAnalyzer.h"
 #include "tensor_ir/Dialect/TensorIR.h"
+#include "tensor_ir/Options/Options.h"
 #include "tensor_ir/Utils/Utils.h"
 
 #include <optional>
 
-namespace tensor_ir {
+namespace mlir::nv_tensor_ir::compiler::cuda_tile {
 
-using rt::countDynamicDims;
-using rt::ElementTypeInfo;
-using rt::KernelArgLayout;
-using rt::TensorArgDesc;
+using ::tensor_ir::rt::ArgDesc;
+using ::tensor_ir::rt::ElementType;
+using ::tensor_ir::rt::KernelMetadata;
+using ::tensor_ir::rt::KernelMetadataBuilder;
+using ::tensor_ir::rt::ScalarArgDesc;
+using ::tensor_ir::rt::TensorArgDesc;
 
 /// Maps an MLIR type to the runtime ElementType enum, or nullopt if it
 /// doesn't match one of the recognized dtypes.
-static std::optional<rt::ElementType> toElementType(mlir::Type type) {
+static std::optional<ElementType> toElementType(mlir::Type type) {
   if (type.isSignlessInteger(1)) {
-    return rt::ElementType::Bool;
+    return ElementType::Bool;
   }
   if (type.isSignedInteger(8)) {
-    return rt::ElementType::SI8;
+    return ElementType::SI8;
   }
   if (type.isSignedInteger(16)) {
-    return rt::ElementType::SI16;
+    return ElementType::SI16;
   }
   if (type.isSignedInteger(32)) {
-    return rt::ElementType::SI32;
+    return ElementType::SI32;
   }
   if (type.isSignedInteger(64)) {
-    return rt::ElementType::SI64;
+    return ElementType::SI64;
   }
   if (type.isUnsignedInteger(8)) {
-    return rt::ElementType::UI8;
+    return ElementType::UI8;
   }
   if (type.isUnsignedInteger(16)) {
-    return rt::ElementType::UI16;
+    return ElementType::UI16;
   }
   if (type.isUnsignedInteger(32)) {
-    return rt::ElementType::UI32;
+    return ElementType::UI32;
   }
   if (type.isUnsignedInteger(64)) {
-    return rt::ElementType::UI64;
+    return ElementType::UI64;
   }
   if (type.isF16()) {
-    return rt::ElementType::F16;
+    return ElementType::F16;
   }
   if (type.isBF16()) {
-    return rt::ElementType::BF16;
+    return ElementType::BF16;
   }
   if (type.isF32()) {
-    return rt::ElementType::F32;
+    return ElementType::F32;
   }
   if (type.isF64()) {
-    return rt::ElementType::F64;
+    return ElementType::F64;
   }
   if (type.isF8E4M3FN()) {
-    return rt::ElementType::F8E4M3FN;
+    return ElementType::F8E4M3FN;
   }
   if (type.isF8E5M2()) {
-    return rt::ElementType::F8E5M2;
+    return ElementType::F8E5M2;
   }
   // Only add a dtype here once it's been verified to compile and run
   // through TensorIR's own tests -- an unrecognized dtype failing to
@@ -75,35 +78,35 @@ static std::optional<rt::ElementType> toElementType(mlir::Type type) {
   return std::nullopt;
 }
 
-/// Resolves an MLIR type to an ElementTypeInfo, failing with an MLIR
+/// Resolves an MLIR type to an ElementType, failing with an MLIR
 /// diagnostic (anchored at loc) if the type isn't one of the recognized
 /// runtime dtypes.
-static mlir::FailureOr<ElementTypeInfo>
-resolveElementTypeInfo(mlir::Location loc, mlir::Type type) {
-  std::optional<rt::ElementType> elemType = toElementType(type);
+static mlir::FailureOr<ElementType> resolveElementType(mlir::Location loc,
+                                                       mlir::Type type) {
+  std::optional<ElementType> elemType = toElementType(type);
   if (!elemType) {
     return mlir::emitError(loc)
            << "kernel argument element type " << type
            << " is not a recognized TensorIR runtime dtype";
   }
-  return ElementTypeInfo(*elemType);
+  return *elemType;
 }
 
-mlir::FailureOr<KernelArgLayout> extractKernelArgLayout(
-    mlir::nv_tensor_ir::GraphOp graphOp,
-    const mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions &options) {
-  KernelArgLayout layout;
-  layout.uniformSignature = options.uniformSignature;
+mlir::FailureOr<KernelMetadata>
+extractKernelMetadata(mlir::nv_tensor_ir::GraphOp graphOp,
+                      const mlir::nv_tensor_ir::CodegenOptions &codegen,
+                      const mlir::nv_tensor_ir::CudaTileOptions &cudaTile) {
+  KernelMetadataBuilder layout;
   // Runtime launch metadata must use the same persistence contract as lowering
   // for every code-generation strategy.
-  layout.persistence = options.persistence;
-  layout.smCount = options.smCount;
-  layout.occupancy = options.occupancy;
+  layout.persistence = cudaTile.persistenceMode;
+  layout.smCount = cudaTile.smCount;
+  layout.occupancy = cudaTile.occupancy;
   auto funcType = graphOp.getFunctionType();
   layout.numInputs = funcType.getNumInputs();
 
   // Copy tile sizes from conversion options.
-  layout.tileSizes.assign(options.tileSize.begin(), options.tileSize.end());
+  layout.tileSizes.assign(codegen.tileSize.begin(), codegen.tileSize.end());
 
   // Retrieve stride information from the tensor descriptors.
   using TensorDescriptor = mlir::nv_tensor_ir::TensorDescriptor;
@@ -116,78 +119,61 @@ mlir::FailureOr<KernelArgLayout> extractKernelArgLayout(
       graphOp.getResultTypes(), graphOp.getAllResultAttrs());
   assert(succeeded(resInfos) && "failed to get tensor info for output tensors");
 
-  // Helper: create a TensorArgDesc from a TensorType and its stride info.
-  //
-  // When uniformSignature is true, all sizes (and all strides when explicit)
-  // are emitted as kernel arguments, even for statically-known dimensions.
-  // When false, only dynamic dims produce kernel arguments (original behavior).
-  bool uniform = layout.uniformSignature;
+  // Resolve compiler types into validated runtime descriptors.
   mlir::Location loc = graphOp.getLoc();
   auto buildDesc =
-      [uniform,
-       loc](mlir::nv_tensor_ir::TensorType tensorTy,
-            const TensorDescriptor &info) -> mlir::FailureOr<TensorArgDesc> {
-    mlir::FailureOr<ElementTypeInfo> elementInfo =
-        resolveElementTypeInfo(loc, tensorTy.getElementType());
-    if (failed(elementInfo)) {
+      [loc](mlir::RankedTensorType tensorTy,
+            const TensorDescriptor &info) -> mlir::FailureOr<ArgDesc> {
+    mlir::FailureOr<ElementType> elementType =
+        resolveElementType(loc, tensorTy.getElementType());
+    if (failed(elementType)) {
       return mlir::failure();
     }
 
     auto shape = tensorTy.getShape();
-    int32_t rank = static_cast<int32_t>(shape.size());
     llvm::SmallVector<int64_t> staticShape(shape.begin(), shape.end());
-    int32_t numDynSizes = uniform ? rank : countDynamicDims(shape);
-    bool hasExplicitStrides = !info.strides.empty();
-
-    llvm::SmallVector<int64_t> staticStrides;
-    int32_t numDynStrides = 0;
-    if (hasExplicitStrides) {
+    std::optional<llvm::SmallVector<int64_t>> staticStrides;
+    if (!info.strides.empty()) {
+      staticStrides.emplace();
       for (const auto &stride : info.strides) {
-        staticStrides.push_back(stride.staticValue);
+        staticStrides->push_back(stride.staticValue);
       }
-      numDynStrides = uniform ? rank : countDynamicDims(staticStrides);
     }
-
-    return TensorArgDesc{rank,
-                         std::move(staticShape),
-                         std::move(staticStrides),
-                         numDynSizes,
-                         numDynStrides,
-                         hasExplicitStrides,
-                         /*isScalar=*/false,
-                         *elementInfo};
+    auto desc = TensorArgDesc::create(
+        *elementType, staticShape,
+        staticStrides ? std::optional<llvm::ArrayRef<int64_t>>(*staticStrides)
+                      : std::nullopt);
+    if (!desc.ok()) {
+      return mlir::emitError(loc) << desc.status().message();
+    }
+    return ArgDesc(std::move(*desc));
   };
 
   // Helper: build a scalar operand descriptor from a non-tensor MLIR type.
   // The kernel signature for a scalar graph argument is a single by-value
   // kernel parameter, so we record the element type so the runtime
   // arg-packer can memcpy the value (instead of packing a pointer).
-  auto buildScalarDesc =
-      [loc](mlir::Type type) -> mlir::FailureOr<TensorArgDesc> {
-    mlir::FailureOr<ElementTypeInfo> elementInfo =
-        resolveElementTypeInfo(loc, type);
-    if (failed(elementInfo)) {
+  auto buildScalarDesc = [loc](mlir::Type type) -> mlir::FailureOr<ArgDesc> {
+    mlir::FailureOr<ElementType> elementType = resolveElementType(loc, type);
+    if (failed(elementType)) {
       return mlir::failure();
     }
-    return TensorArgDesc{/*rank=*/0,
-                         /*staticShape=*/{},
-                         /*staticStrides=*/{},
-                         /*numDynSizes=*/0,
-                         /*numDynStrides=*/0,
-                         /*hasExplicitStrides=*/false,
-                         /*isScalar=*/true,
-                         *elementInfo};
+    auto desc = ScalarArgDesc::create(*elementType);
+    if (!desc.ok()) {
+      return mlir::emitError(loc) << desc.status().message();
+    }
+    return ArgDesc(std::move(*desc));
   };
 
   // Process input and output operands (same logic, different arrays).
-  // Track how many valid input operands we add to tensorDescs (tensors and
-  // scalars both count; rank-0 tensors are skipped).
+  // Track how many valid input operands we add to args (tensors and
+  // scalars both count).
   int32_t numValidInputTensors = 0;
   auto processTensors = [&](mlir::TypeRange types,
                             llvm::ArrayRef<TensorDescriptor> infos,
                             bool isInput) -> mlir::LogicalResult {
     for (auto [idx, type] : llvm::enumerate(types)) {
-      auto tensorTy = mlir::dyn_cast<mlir::nv_tensor_ir::TensorType>(type);
+      auto tensorTy = mlir::dyn_cast<mlir::RankedTensorType>(type);
       if (!tensorTy) {
         // Scalar (non-tensor) operand. The MLIR signature converter maps
         // it to a single by-value kernel parameter; record its size so
@@ -195,26 +181,21 @@ mlir::FailureOr<KernelArgLayout> extractKernelArgLayout(
         if (!type.isIntOrFloat()) {
           continue; // Unsupported scalar kind, skip.
         }
-        mlir::FailureOr<TensorArgDesc> desc = buildScalarDesc(type);
+        mlir::FailureOr<ArgDesc> desc = buildScalarDesc(type);
         if (failed(desc)) {
           return mlir::failure();
         }
-        layout.tensorDescs.push_back(*desc);
+        layout.args.push_back(*desc);
         if (isInput) {
           ++numValidInputTensors;
         }
         continue;
       }
-      // Skip rank-0 tensors (scalars) - they don't need dynamic shape/stride
-      // info.
-      if (tensorTy.getRank() == 0) {
-        continue;
-      }
-      mlir::FailureOr<TensorArgDesc> desc = buildDesc(tensorTy, infos[idx]);
+      mlir::FailureOr<ArgDesc> desc = buildDesc(tensorTy, infos[idx]);
       if (failed(desc)) {
         return mlir::failure();
       }
-      layout.tensorDescs.push_back(*desc);
+      layout.args.push_back(*desc);
       if (isInput) {
         ++numValidInputTensors;
       }
@@ -230,14 +211,8 @@ mlir::FailureOr<KernelArgLayout> extractKernelArgLayout(
   }
 
   // Update numInputs to reflect the actual count of valid input tensors in
-  // tensorDescs.
+  // args.
   layout.numInputs = numValidInputTensors;
-
-  // Compute total kernel args.
-  layout.totalKernelArgs = 0;
-  for (const auto &desc : layout.tensorDescs) {
-    layout.totalKernelArgs += desc.totalArgs();
-  }
 
   // Determine which tensor's runtime shape drives grid computation.
   //
@@ -249,9 +224,9 @@ mlir::FailureOr<KernelArgLayout> extractKernelArgLayout(
                                      bool isOutput) -> int32_t {
     int32_t tensorDescIdx = isOutput ? layout.numInputs : 0;
     for (auto type : types) {
-      auto tensorTy = mlir::dyn_cast<mlir::nv_tensor_ir::TensorType>(type);
+      auto tensorTy = mlir::dyn_cast<mlir::RankedTensorType>(type);
       if (!tensorTy) {
-        // Scalar operands do occupy a slot in tensorDescs, so advance the
+        // Scalar operands do occupy a slot in args, so advance the
         // running index. Unsupported non-tensor types are not emitted and
         // therefore do not consume a slot.
         if (type.isIntOrFloat()) {
@@ -260,7 +235,8 @@ mlir::FailureOr<KernelArgLayout> extractKernelArgLayout(
         continue;
       }
       if (tensorTy.getRank() == 0) {
-        // Rank-0 tensors are skipped entirely and consume no slot.
+        // Rank-0 tensors occupy an ABI slot but cannot drive grid shape.
+        ++tensorDescIdx;
         continue;
       }
       return tensorDescIdx;
@@ -279,7 +255,12 @@ mlir::FailureOr<KernelArgLayout> extractKernelArgLayout(
         findFirstValidTensorIdx(funcType.getInputs(), /*isOutput=*/false);
   }
 
-  return layout;
+  auto validatedLayout = KernelMetadata::create(std::move(layout));
+  if (!validatedLayout.ok()) {
+    return mlir::emitError(graphOp.getLoc())
+           << validatedLayout.status().message();
+  }
+  return std::move(*validatedLayout);
 }
 
-} // namespace tensor_ir
+} // namespace mlir::nv_tensor_ir::compiler::cuda_tile

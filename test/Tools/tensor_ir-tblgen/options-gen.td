@@ -70,9 +70,12 @@ def CompilerInvocation
 // CORE:        FrontendOptions frontend;
 // CORE-NEXT:   BackendOptions backend;
 // CORE:        llvm::LogicalResult parseFromString(llvm::StringRef str);
-// CORE:        void print(llvm::raw_ostream &os) const {
+// CORE:        void print(llvm::raw_ostream &os) const;
 // CORE:        std::string toString() const {
 // CORE:        std::optional<std::string> validateComponents() const
+// CORE:      void registerCompilerInvocationCLOptions();
+// CORE:      getCompilerInvocationCLOptionCategories();
+// CORE:      void applyCompilerInvocationOptionsFromCL(
 // CORE-NOT:    FrontendOptions::parseFromString
 // CORE-NOT:    FrontendOptions::absorbOption
 // CORE-NOT:    FrontendOptions::asTuple
@@ -93,6 +96,9 @@ def CompilerInvocation
 // CORE:      FrontendOptions::validate() const
 // CORE:        if (auto status = ::verifyFrontend(*this); !status.ok())
 // CORE-NEXT:     return status.message();
+// CORE:      CompilerInvocationComponents::print(
+// CORE:        os << "opt-level=";
+// CORE:        os << " backend-enabled=";
 // CORE:      CompilerInvocationComponents::parseFromString(
 // CORE:        CompilerInvocationComponents parsed = *this;
 // CORE:        parseFrontendOptsOption(
@@ -110,10 +116,19 @@ def CompilerInvocation
 // CORE:      llvm::cl::list<std::string> tileShape{"tile-shape"
 // CORE:      llvm::cl::opt<std::string> problemShape{"problem-shape"
 // CORE:      void mlir::nv_tensor_ir::applyFrontendOptionsFromCL(
-// CORE:      optd::parseListOrFatal(opts.tileShape, clFrontendOptions->tileShape, 'x',
+// CORE:      optd::parseTileShapeOrFatal(opts.tileShape, clFrontendOptions->tileShape,
 // CORE:      optd::parseShapeOrFatal(opts.problemShape, clFrontendOptions->problemShape.getValue(),
 // CORE:      FrontendOptions mlir::nv_tensor_ir::getFrontendOptionsFromCL()
 // CORE:      applyFrontendOptionsFromCL(opts);
+// CORE:      void mlir::nv_tensor_ir::registerCompilerInvocationCLOptions()
+// CORE:        registerFrontendCLOptions();
+// CORE-NEXT:   registerBackendCLOptions();
+// CORE:      mlir::nv_tensor_ir::getCompilerInvocationCLOptionCategories()
+// CORE:        &getFrontendCLOptionCategory(),
+// CORE-NEXT:   &getBackendCLOptionCategory(),
+// CORE:      void mlir::nv_tensor_ir::applyCompilerInvocationOptionsFromCL(
+// CORE:        applyFrontendOptionsFromCL(opts.frontend);
+// CORE-NEXT:   applyBackendOptionsFromCL(opts.backend);
 // CORE:      #undef GEN_OPTIONS_CL_BINDINGS
 // CORE-NEXT: #endif // GEN_OPTIONS_CL_BINDINGS
 

@@ -188,7 +188,20 @@ _ods_cext.ir.AttrBuilder.insert("TensorIR_FloatAttr", _tensorir_float_attr)
 
 
 class TensorIRTensorDescriptor:
-    def __init__(self, tensor, overwrite_strides=None, overwrite_shape=None):
+    _LOGICAL_DTYPE_TO_DLPACK = {
+        "f4E2M1FN": (2, 4),  # kDLFloat with an FP4 element width.
+        "f8E4M3FN": (10, 8),
+        "f8E5M2": (12, 8),
+        "f8E8M0FNU": (14, 8),
+    }
+
+    def __init__(
+        self,
+        tensor,
+        overwrite_strides=None,
+        overwrite_shape=None,
+        overwrite_dtype=None,
+    ):
         self.tensor = tensor
         if not (hasattr(tensor, "__dlpack__") and hasattr(tensor, "__dlpack_device__")):
             raise ValueError(
@@ -216,6 +229,8 @@ class TensorIRTensorDescriptor:
             self.overwrite_strides(overwrite_strides)
         if overwrite_shape is not None:
             self.overwrite_shape(overwrite_shape)
+        if overwrite_dtype is not None:
+            self.overwrite_dtype(overwrite_dtype)
 
     def overwrite_strides(self, overwrite_strides):
         if self.dlpack_capsule is None:
@@ -245,6 +260,34 @@ class TensorIRTensorDescriptor:
             )
         for dim in range(managed_tensor.dl_tensor.ndim):
             managed_tensor.dl_tensor.shape[dim] = overwrite_shape[dim]
+
+    def overwrite_dtype(self, overwrite_dtype):
+        """Override the logical element type recorded in the DLPack capsule.
+
+        Frameworks may expose narrow-precision storage only as ``uint8``. For
+        example, two FP4 values share one byte, while E8M0 scale factors use a
+        byte whose logical type is not available in PyTorch. The execution
+        runtime needs the logical type to validate a compiled executable graph
+        signature, so callers must identify such storage explicitly.
+
+        Args:
+            overwrite_dtype: TensorIR element type spelling. Supported values
+                are ``f4E2M1FN``, ``f8E4M3FN``, ``f8E5M2``, and ``f8E8M0FNU``.
+        """
+        if self.dlpack_capsule is None:
+            raise RuntimeError("DLPack capsule is not set")
+        try:
+            dtype_code, dtype_bits = self._LOGICAL_DTYPE_TO_DLPACK[overwrite_dtype]
+        except KeyError as error:
+            supported = ", ".join(self._LOGICAL_DTYPE_TO_DLPACK)
+            raise ValueError(
+                f"Unsupported TensorIR dtype {overwrite_dtype!r}; "
+                f"expected one of: {supported}"
+            ) from error
+        managed_tensor = self._get_managed_tensor(self.dlpack_capsule)
+        managed_tensor.dl_tensor.dtype.code = dtype_code
+        managed_tensor.dl_tensor.dtype.bits = dtype_bits
+        managed_tensor.dl_tensor.dtype.lanes = 1
 
     def _create_fp8_dlpack_workaround(self, tensor):
         """

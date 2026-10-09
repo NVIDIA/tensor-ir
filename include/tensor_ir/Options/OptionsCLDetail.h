@@ -9,6 +9,7 @@
 #include "tensor_ir/Options/OptionsDetail.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/LogicalResult.h"
@@ -53,6 +54,26 @@ void parseListOrFatal(std::vector<T> &out,
   reportCommandLineError(llvm::Twine("--") + flag +
                          ": cannot parse as a list separated by '" +
                          llvm::Twine(delimiter) + "'");
+}
+
+template <typename T>
+void parseTileShapeOrFatal(std::vector<T> &out,
+                           llvm::ArrayRef<std::string> occurrences,
+                           llvm::StringRef flag) {
+  out.clear();
+  bool mixed = llvm::any_of(occurrences, [](llvm::StringRef value) {
+    return value.contains('x') && value.contains(',');
+  });
+  if (!mixed &&
+      llvm::succeeded(appendOccurrences(out, occurrences, kShapeSeparators,
+                                        [](llvm::StringRef text, T &value) {
+                                          return parseValue(text, value);
+                                        }))) {
+    return;
+  }
+  reportCommandLineError(llvm::Twine("--") + flag +
+                         ": cannot parse; use either 'x' or ',' as the "
+                         "separator");
 }
 
 inline void parseShapeOrFatal(std::vector<int64_t> &out, llvm::StringRef value,

@@ -139,7 +139,20 @@ class ListOption<string cppName, string flag, string elemType, string helpStr,
 /// A static numeric list conventionally spelled `128x128x64`.
 class TileShapeOption<string cppName, string flag, string elemType,
                       string helpStr>
-    : ListOption<cppName, flag, elemType, helpStr, "x">;
+    : ListOption<cppName, flag, elemType, helpStr, "x"> {
+  let parse = [{
+    if (value.contains('x') && value.contains(','))
+      return llvm::failure();
+    return optd::parseElements(
+        opts.$varName, value, optd::kShapeSeparators,
+        [](llvm::StringRef text, $elemType &element) {
+          return optd::parseValue(text, element);
+        });
+  }];
+  let clAssignment =
+      "    optd::parseTileShapeOrFatal(opts.$varName, $clStatic->$varName, "
+      # "\"$argName\");\n";
+}
 
 /// An int64 shape accepting decimal extents or `?` separated by `,` or `x`.
 class ShapeOption<string cppName, string flag, string helpStr,

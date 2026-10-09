@@ -6,9 +6,11 @@ add_subdirectory(Schema)
 add_tensor_ir_library(NVTensorIRArtifact
   TensorIRArtifact.cpp
   TensorIRArtifactCodec.cpp
+  KernelMetadata.cpp
 
-  LINK_LIBS
-  PUBLIC
+  DEPENDS NVTensorIRCompilerOptionsIncGen
+
+  LINK_LIBS PUBLIC
     NVTensorIR::Utils
     CudaTileDialect
     CudaTileBytecodeWriter

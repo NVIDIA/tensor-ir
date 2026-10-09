@@ -8,6 +8,7 @@
 #include "llvm/ADT/ArrayRef.h"
 
 #include "ConstantUtils.h"
+#include "DataTypeDispatch.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -29,6 +30,8 @@ namespace mlir::nv_tensor_ir::reference {
 // ============================================================================
 
 namespace {
+
+using detail::dispatchDataType;
 
 /// Associates a tensor with the role name used in validation diagnostics.
 struct NamedTensor {
@@ -106,12 +109,6 @@ static Status unsupportedDataType(DataType dtype, const char *operationName) {
                                  operationName);
 }
 
-/// Tag type that carries the canonical C++ element type for a DataType.
-template <typename T>
-struct DataTypeTag {
-  using Type = T;
-};
-
 template <typename T, typename... CandidateTypes>
 constexpr bool isAnyOf = (std::is_same_v<T, CandidateTypes> || ...);
 
@@ -120,39 +117,6 @@ template <typename T>
 constexpr bool isSupportedConvertNumericType =
     isAnyOf<T, float, half, nv_bfloat16, __nv_fp8_e4m3, __nv_fp8_e5m2, int32_t,
             double>;
-
-/// Invoke \p callback with a tag for the canonical C++ type of \p dtype.
-///
-/// Callers retain responsibility for validating which data types their
-/// operation supports. The callback must return a Status.
-template <typename Callback>
-static Status dispatchDataType(DataType dtype, Callback &&callback) {
-  switch (dtype) {
-  case DataType::BOOL:
-    return std::forward<Callback>(callback)(DataTypeTag<bool>{});
-  case DataType::FLOAT32:
-    return std::forward<Callback>(callback)(DataTypeTag<float>{});
-  case DataType::FLOAT16:
-    return std::forward<Callback>(callback)(DataTypeTag<half>{});
-  case DataType::BFLOAT16:
-    return std::forward<Callback>(callback)(DataTypeTag<nv_bfloat16>{});
-  case DataType::F8E4M3FN:
-    return std::forward<Callback>(callback)(DataTypeTag<__nv_fp8_e4m3>{});
-  case DataType::F8E5M2:
-    return std::forward<Callback>(callback)(DataTypeTag<__nv_fp8_e5m2>{});
-  case DataType::INT32:
-    return std::forward<Callback>(callback)(DataTypeTag<int32_t>{});
-  case DataType::UINT32:
-    return std::forward<Callback>(callback)(DataTypeTag<uint32_t>{});
-  case DataType::INT8:
-    return std::forward<Callback>(callback)(DataTypeTag<int8_t>{});
-  case DataType::UINT8:
-    return std::forward<Callback>(callback)(DataTypeTag<uint8_t>{});
-  case DataType::DOUBLE:
-    return std::forward<Callback>(callback)(DataTypeTag<double>{});
-  }
-  return unsupportedDataType(dtype, "data type dispatch");
-}
 
 /// Associates a runtime data type with its type-specialized kernel.
 template <typename Kernel>
@@ -195,6 +159,7 @@ static bool isSupportedConstantDataType(DataType dtype) {
   case DataType::UINT8:
     return true;
   case DataType::BOOL:
+  case DataType::F4E2M1FN:
     return false;
   }
   return false;
@@ -218,6 +183,7 @@ static bool isSupportedIotaDataType(DataType dtype) {
   case DataType::UINT8:
     return true;
   case DataType::BOOL:
+  case DataType::F4E2M1FN:
     return false;
   }
   return false;

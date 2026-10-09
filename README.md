@@ -130,10 +130,11 @@ build/bin/tensor_ir-compiler \
 
 `--dynamic-dims` and `--dynamic-strides` provide runtime values for `?`
 dimensions and strides by tensor dimension position, and the same values are
-reused across tensors. When a dynamic position exceeds the supplied list, the
-last value is reused. If `--dynamic-strides` is omitted, dynamic strides are
-inferred as packed strides. `--tile-size` controls compiler tiling; it is not a
-runtime problem-size option.
+reused across tensors. When a dynamic dimension position exceeds the supplied
+list, the last dimension value is reused. A non-empty dynamic-stride list must
+provide a value for every dynamic stride position; if `--dynamic-strides` is
+omitted, dynamic strides are inferred as packed strides. `--tile-size` controls
+compiler tiling; it is not a runtime problem-size option.
 
 ### Command-Line Options
 
@@ -153,7 +154,7 @@ option list and defaults, run `build/bin/tensor_ir-compiler --help`.
   `max(compatibility, 13.3)`.
 - `--codegen-strategy=<strategy>` - TensorIR-to-CUDA-Tile lowering path:
   `layout-propagation` (default) or `affine-map`
-- `--target-sm=<sm_XX[a|f]>` - Target GPU architecture (for example,
+- `--kernel-target=<sm_XX[a|f]>` - Target GPU architecture (for example,
   `sm_100`, `sm_100a`, or `sm_100f`); defaults to the SM100 family target
   `sm_100f`
 - `--tile-size=<MxN>` or `<MxNxK>` - Tile sizes for kernel tiling
@@ -161,16 +162,15 @@ option list and defaults, run `build/bin/tensor_ir-compiler --help`.
   `--print-ir-tree-dir` is set
 - `--print-ir-tree-dir=<dir>` - Dump per-pass IR snapshots to a directory;
   takes precedence over `--print-ir-after-all`
+- `--reproducer-dir=<dir>` - Dump one MLIR reproducer for each compiler
+  pipeline into a unique directory derived from `<dir>`
 - `--timing` - Show pass timing information
-- `--uniform-signature` - Pass all sizes and strides as kernel arguments,
-  including static sizes and strides
 
-The IR debug options above also support environment variables that override CLI
-values: `TENSOR_IR_DUMP_IR`, `TENSOR_IR_DUMP_TILEIR_BC`,
-`TENSOR_IR_LOAD_TILEIR_BC`, `TENSOR_IR_PRINT_IR_AFTER_ALL`,
-`TENSOR_IR_PRINT_IR_TREE_DIR`, and `TENSOR_IR_TIMING`. Boolean env vars accept
-`1/0`, `true/false`, `on/off`, and `yes/no`; path env vars require a path, and
-`0/false/off/no` disables them.
+For tool command lines, `TIR_OVERRIDE_OPTIONS` can add, remove, reorder, or
+replace command-line options before they are parsed. For example,
+`TIR_OVERRIDE_OPTIONS=+dump-tileir-bc=/tmp/out.bc` adds
+`--dump-tileir-bc=/tmp/out.bc` when it is absent. This environment override is
+not consulted by the compiler libraries or APIs.
 
 **Execution:**
 - With no execution option, compile without building or running a reference graph

@@ -5,8 +5,8 @@
 
 #include "tensor_ir/Artifact/TensorIRArtifactCodec.h"
 #include "tensor_ir/Compiler/Compiler.h"
-#include "tensor_ir/Compiler/CudaTile/CudaTileCompiler.h"
 #include "tensor_ir/Dialect/TensorIR.h"
+#include "tensor_ir/Options/BytecodeVersionOptions.h"
 #include "tensor_ir/Registration/Registration.h"
 #include "tensor_ir/Runtime/CudaTile/CudaTileRuntimeKernel.h"
 #include "tensor_ir/Runtime/Types.h"
@@ -32,16 +32,11 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(nv_tensor_ir, nv_tensor_ir,
 namespace {
 
 using mlir::cuda_tile::BytecodeVersion;
-using mlir::nv_tensor_ir::ArchPortability;
-using mlir::nv_tensor_ir::CompilerBackend;
-using mlir::nv_tensor_ir::CudaTileCodegenStrategy;
+using mlir::nv_tensor_ir::CompilerInvocation;
 using mlir::nv_tensor_ir::ICompiler;
-using mlir::nv_tensor_ir::SmTarget;
 using mlir::nv_tensor_ir::Status;
 using mlir::nv_tensor_ir::StatusCode;
 using mlir::nv_tensor_ir::StatusOr;
-using mlir::nv_tensor_ir::backend::cuda_tile::CudaTileArtifactKind;
-using mlir::nv_tensor_ir::backend::cuda_tile::CudaTileCompileOptions;
 using tensor_ir::rt::Any;
 using tensor_ir::rt::CudaTileRuntimeKernel;
 using tensor_ir::rt::IRuntimeKernelPtr;
@@ -67,85 +62,6 @@ unwrapBytecodeVersion(MlirTensorIRBytecodeVersion version) {
         std::to_string(version.tag));
   }
   return *cppVersion;
-}
-
-ArchPortability unwrapArchPortability(MlirTensorIRArchPortability portability) {
-  return static_cast<ArchPortability>(portability);
-}
-
-CudaTileCodegenStrategy
-unwrapCodegenStrategy(MlirTensorIRCudaTileCodegenStrategy codegenStrategy) {
-  return static_cast<CudaTileCodegenStrategy>(codegenStrategy);
-}
-
-StatusOr<CudaTileArtifactKind>
-unwrapCudaTileArtifactKind(MlirTensorIRCudaTileArtifactKind kind) {
-  switch (kind) {
-  case MlirTensorIRCudaTileArtifactKindTileIR:
-    return CudaTileArtifactKind::TileIR;
-  case MlirTensorIRCudaTileArtifactKindCubin:
-    return CudaTileArtifactKind::Cubin;
-  }
-  return Status::InvalidArgument("Unrecognized CUDA Tile artifact kind: " +
-                                 std::to_string(static_cast<int>(kind)));
-}
-
-std::string copyString(MlirStringRef value) {
-  return std::string(value.data, value.length);
-}
-
-StatusOr<CudaTileCompileOptions>
-makeCudaTileCompileOptions(MlirTensorIRCudaTileCompileOptions options) {
-  auto smTarget =
-      SmTarget::fromCc(options.computeCapability,
-                       unwrapArchPortability(options.archPortability));
-  if (mlir::failed(smTarget)) {
-    return Status::InvalidArgument("Unsupported TensorIR compute capability: " +
-                                   std::to_string(options.computeCapability));
-  }
-
-  CudaTileCompileOptions cudaTileOptions{*smTarget};
-  cudaTileOptions.ctaCount = options.ctaCount;
-  cudaTileOptions.warpCount = options.warpCount;
-  if (options.numTileSizes != 0) {
-    if (!options.tileSizes) {
-      return Status::InvalidArgument(
-          "TensorIR tileSizes must not be null when numTileSizes is nonzero");
-    }
-    cudaTileOptions.tileSize.assign(options.tileSizes,
-                                    options.tileSizes + options.numTileSizes);
-  }
-  cudaTileOptions.uniformSignature = options.uniformSignature;
-  cudaTileOptions.codegenStrategy =
-      unwrapCodegenStrategy(options.codegenStrategy);
-  cudaTileOptions.maxTileCandidates = options.maxTileCandidates;
-  cudaTileOptions.irDebug.dumpCudaTileIRPath =
-      copyString(options.dumpCudaTileIRPath);
-  cudaTileOptions.irDebug.dumpTileIRBCPath =
-      copyString(options.dumpTileIRBCPath);
-  cudaTileOptions.irDebug.loadTileIRBCPath =
-      copyString(options.loadTileIRBCPath);
-  cudaTileOptions.irDebug.printIRTreeDir = copyString(options.printIRTreeDir);
-  cudaTileOptions.irDebug.printIRAfterAll = options.printIRAfterAll;
-  cudaTileOptions.irDebug.enableTiming = options.enableTiming;
-  StatusOr<BytecodeVersion> bytecodeVersion =
-      unwrapBytecodeVersion(options.bytecodeVersion);
-  if (!bytecodeVersion.ok()) {
-    return bytecodeVersion.status();
-  }
-  cudaTileOptions.bytecodeVersion = *bytecodeVersion;
-  StatusOr<CudaTileArtifactKind> artifactKind =
-      unwrapCudaTileArtifactKind(options.artifactKind);
-  if (!artifactKind.ok()) {
-    return artifactKind.status();
-  }
-  cudaTileOptions.artifactKind = *artifactKind;
-
-  Status status = cudaTileOptions.validate();
-  if (!status.ok()) {
-    return status;
-  }
-  return cudaTileOptions;
 }
 
 llvm::SmallVector<Any, 8> unwrapPackedArgs(MlirTensorIRPackedArgs args) {
@@ -325,6 +241,37 @@ Program *unwrapProgram(MlirTensorIRProgram program) {
   return static_cast<Program *>(program.ptr);
 }
 
+/// The C++ invocation behind `invocation`, validated and paired with a compiler
+/// for its backend. Returns nullopt after reporting through `errorCallback`.
+std::optional<std::pair<const CompilerInvocation *, std::unique_ptr<ICompiler>>>
+prepareCompile(MlirTensorIRCompilerInvocation invocation,
+               MlirStringCallback errorCallback, void *errorUserData) {
+  const auto *cppInvocation =
+      static_cast<const CompilerInvocation *>(invocation.ptr);
+  if (!cppInvocation) {
+    emitError("TensorIR compiler invocation is null", errorCallback,
+              errorUserData);
+    return std::nullopt;
+  }
+  Status validation = cppInvocation->validate();
+  if (!validation.ok()) {
+    reportStatus(validation, errorCallback, errorUserData);
+    return std::nullopt;
+  }
+  std::unique_ptr<ICompiler> compiler =
+      ICompiler::create(cppInvocation->codegen.compilerBackend);
+  if (!compiler) {
+    emitError(
+        "TensorIR backend '" +
+            stringifyCompilerBackend(cppInvocation->codegen.compilerBackend)
+                .str() +
+            "' is not supported by this entry point",
+        errorCallback, errorUserData);
+    return std::nullopt;
+  }
+  return std::make_pair(cppInvocation, std::move(compiler));
+}
+
 MlirLogicalResult reportNullProgram(MlirStringCallback errorCallback,
                                     void *errorUserData) {
   return reportStatus(Status::InvalidArgument("TensorIR program is null"),
@@ -380,7 +327,7 @@ uint32_t mlirTensorIRBytecodeVersionHash(MlirTensorIRBytecodeVersion version) {
 // Program C API
 
 MlirLogicalResult mlirTensorIRCalculateCacheKey(
-    MlirModule module, MlirTensorIRCudaTileCompileOptions options,
+    MlirModule module, MlirTensorIRCompilerInvocation invocation,
     MlirStringCallback keyCallback, void *keyUserData,
     MlirStringCallback errorCallback, void *errorUserData) {
   if (mlirModuleIsNull(module)) {
@@ -391,64 +338,52 @@ MlirLogicalResult mlirTensorIRCalculateCacheKey(
     return reportStatus(Status::InvalidArgument("keyCallback must not be null"),
                         errorCallback, errorUserData);
   }
-  StatusOr<CudaTileCompileOptions> cudaTileOptions =
-      makeCudaTileCompileOptions(options);
-  if (!cudaTileOptions.ok()) {
-    return reportStatus(cudaTileOptions.status(), errorCallback, errorUserData);
+  const auto *options = static_cast<const CompilerInvocation *>(invocation.ptr);
+  if (!options) {
+    return reportStatus(Status::InvalidArgument("invocation must not be null"),
+                        errorCallback, errorUserData);
+  }
+  Status validation = options->validate();
+  if (!validation.ok()) {
+    return reportStatus(validation, errorCallback, errorUserData);
   }
 
   std::string key =
-      mlir::nv_tensor_ir::calculateCacheKey(unwrap(module), *cudaTileOptions);
+      mlir::nv_tensor_ir::calculateCacheKey(unwrap(module), *options);
   keyCallback(mlirStringRefCreate(key.data(), key.size()), keyUserData);
   return mlirLogicalResultSuccess();
 }
 
 MlirTensorIRProgram mlirTensorIRProgramCompile(
-    MlirModule module, MlirTensorIRCudaTileCompileOptions options,
+    MlirModule module, MlirTensorIRCompilerInvocation invocation,
     MlirStringCallback errorCallback, void *errorUserData) {
-  StatusOr<CudaTileCompileOptions> cudaTileOptions =
-      makeCudaTileCompileOptions(options);
-  if (!cudaTileOptions.ok()) {
-    reportStatus(cudaTileOptions.status(), errorCallback, errorUserData);
+  auto prepared = prepareCompile(invocation, errorCallback, errorUserData);
+  if (!prepared) {
     return wrapProgram(nullptr);
   }
-
-  std::unique_ptr<ICompiler> compiler =
-      ICompiler::create(CompilerBackend::CudaTile);
-  if (!compiler) {
-    emitError("TensorIR CudaTile compiler is unavailable", errorCallback,
-              errorUserData);
+  auto &[cppInvocation, compiler] = *prepared;
+  auto artifact = compiler->compile(unwrap(module), *cppInvocation);
+  if (!artifact.ok()) {
+    reportStatus(artifact.status(), errorCallback, errorUserData);
     return wrapProgram(nullptr);
   }
-
-  StatusOr<IRuntimeKernelPtr> rtk =
-      compiler->compile(unwrap(module), *cudaTileOptions);
+  auto rtk = CudaTileRuntimeKernel::create(std::move(artifact).value());
   if (!rtk.ok()) {
     reportStatus(rtk.status(), errorCallback, errorUserData);
     return wrapProgram(nullptr);
   }
-
   return wrapProgram(new Program(std::move(compiler), std::move(rtk).value()));
 }
 
 MlirLogicalResult mlirTensorIRProgramCanCompile(
-    MlirModule module, MlirTensorIRCudaTileCompileOptions options,
+    MlirModule module, MlirTensorIRCompilerInvocation invocation,
     bool *canCompile, MlirStringCallback errorCallback, void *errorUserData) {
-  StatusOr<CudaTileCompileOptions> cudaTileOptions =
-      makeCudaTileCompileOptions(options);
-  if (!cudaTileOptions.ok()) {
-    return reportStatus(cudaTileOptions.status(), errorCallback, errorUserData);
-  }
-
-  std::unique_ptr<ICompiler> compiler =
-      ICompiler::create(CompilerBackend::CudaTile);
-  if (!compiler) {
-    emitError("TensorIR CudaTile compiler is unavailable", errorCallback,
-              errorUserData);
+  auto prepared = prepareCompile(invocation, errorCallback, errorUserData);
+  if (!prepared) {
     return mlirLogicalResultFailure();
   }
-
-  *canCompile = compiler->canCompile(unwrap(module), *cudaTileOptions);
+  auto &[cppInvocation, compiler] = *prepared;
+  *canCompile = compiler->canCompile(unwrap(module), *cppInvocation);
   return mlirLogicalResultSuccess();
 }
 

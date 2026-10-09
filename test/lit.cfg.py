@@ -54,6 +54,10 @@ config.test_exec_root = os.path.join(config.tensor_ir_obj_root, "test")
 
 config.excludes = config.tensor_ir_excludes
 
+# Individual tests set this variable when needed. Do not let a developer's
+# shell alter command lines throughout the suite.
+config.environment.pop("TIR_OVERRIDE_OPTIONS", None)
+
 config.substitutions.append(("%PATH%", config.environment["PATH"]))
 config.substitutions.append(("%shlibext", config.llvm_shlib_ext))
 

@@ -4,7 +4,7 @@
 //===- MaterializeDefaultStrides.cpp - Row-major stride materialization ---===//
 //
 // Attaches a row-major stride attribute to every GraphOp argument and result
-// of TensorType that does not already declare one. Running this pass at the
+// of RankedTensorType that does not already declare one. Running this pass at the
 // front of every backend pipeline turns TensorIR's row-major default into an
 // explicit IR fact, so downstream code can read strides from the graph
 // attributes without needing to know the default-layout convention.
@@ -30,7 +30,7 @@ namespace {
 namespace tcg = mlir::nv_tensor_ir::tcutegen;
 
 /// Build the row-major stride string for a tensor type's shape.
-std::string makeRowMajorStrideString(TensorType tensorTy) {
+std::string makeRowMajorStrideString(RankedTensorType tensorTy) {
   tcg::Shape shape = getShapeRef(tensorTy);
   return tcg::to_string(tcg::Layout(shape).stride());
 }
@@ -45,7 +45,8 @@ std::string makeRowMajorStrideString(TensorType tensorTy) {
 ///     the generated kernel would expect more args than it receives.
 ///     Dynamic-shape graphs fall back to the codegen-time row-major default.
 DictionaryAttr ensureStrideEntry(MLIRContext *ctx, DictionaryAttr existing,
-                                 TensorType tensorTy, StringRef strideName) {
+                                 RankedTensorType tensorTy,
+                                 StringRef strideName) {
   if (existing && existing.contains(strideName)) {
     return existing;
   }
@@ -71,7 +72,7 @@ ArrayAttr materializeStrides(MLIRContext *ctx, ArrayAttr existing,
   SmallVector<Attribute> updated;
   updated.reserve(types.size());
   for (size_t i = 0; i < types.size(); ++i) {
-    auto tensorTy = dyn_cast<TensorType>(types[i]);
+    auto tensorTy = dyn_cast<RankedTensorType>(types[i]);
     DictionaryAttr slot;
     if (existing && i < existing.size()) {
       slot = dyn_cast_or_null<DictionaryAttr>(existing[i]);

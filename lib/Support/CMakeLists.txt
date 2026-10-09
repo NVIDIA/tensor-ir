@@ -1,5 +1,6 @@
 add_tensor_ir_library(NVTensorIRSupport
   TCutegen.cpp
+  TIROverrideOptions.cpp
   PARTIAL_SOURCES_INTENDED
 
   LINK_LIBS PUBLIC

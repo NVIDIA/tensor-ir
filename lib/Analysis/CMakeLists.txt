@@ -1,5 +1,5 @@
 add_tensor_ir_library(NVTensorIRAnalysis
-  KernelArgLayout.cpp
+  PARTIAL_SOURCES_INTENDED
   TileAnalyzer.cpp
   TileCandidateGenerator.cpp
 
@@ -9,4 +9,11 @@ add_tensor_ir_library(NVTensorIRAnalysis
   LINK_LIBS PUBLIC
   NVTensorIR::Dialect
   NVTensorIR::Utils
+)
+
+add_tensor_ir_library(NVTensorIRPolyExprs
+  PARTIAL_SOURCES_INTENDED
+  PolyExprs.cpp
+
+  LINK_COMPONENTS Support
 )

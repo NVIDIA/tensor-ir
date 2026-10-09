@@ -7,14 +7,12 @@
 #ifndef TENSOR_IR_ARTIFACT_TENSORIRARTIFACT_H
 #define TENSOR_IR_ARTIFACT_TENSORIRARTIFACT_H
 
-#include "tensor_ir/Runtime/CudaTile/KernelArgLayout.h"
+#include "tensor_ir/Artifact/KernelMetadata.h"
 #include "tensor_ir/Support/Status.h"
 #include "tensor_ir/Utils/ComputeCapability.h"
 
-#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/MemoryBuffer.h"
 
 #include "cuda_tile/Bytecode/Common/Version.h"
 #include <array>
@@ -24,8 +22,6 @@
 #include <variant>
 
 namespace tensor_ir::rt {
-
-class CudaTileRuntimeKernel;
 
 /// A real cubin -- no bytecode version, since it's not TileIR bytecode.
 struct Cubin {
@@ -56,18 +52,17 @@ using Binary = std::variant<Cubin, TileIRBytecode>;
 /// invalid TensorIRArtifact.
 class TensorIRArtifact final {
 public:
-  friend class CudaTileRuntimeKernel;
   friend class TensorIRArtifactEncoder;
 
   static ::mlir::nv_tensor_ir::StatusOr<std::unique_ptr<TensorIRArtifact>>
   create(std::string kernelName, std::string funcName, Binary &&binary,
-         ::mlir::nv_tensor_ir::SmTarget arch, KernelArgLayout argLayout,
+         ::mlir::nv_tensor_ir::SmTarget arch, KernelMetadata argLayout,
          const std::optional<std::array<int32_t, 3>> &staticGrid);
 
   TensorIRArtifact(const TensorIRArtifact &) = default;
-  TensorIRArtifact &operator=(const TensorIRArtifact &) = default;
+  TensorIRArtifact &operator=(const TensorIRArtifact &) = delete;
   TensorIRArtifact(TensorIRArtifact &&) = default;
-  TensorIRArtifact &operator=(TensorIRArtifact &&) = default;
+  TensorIRArtifact &operator=(TensorIRArtifact &&) = delete;
   ~TensorIRArtifact() = default;
 
   bool operator==(const TensorIRArtifact &other) const {
@@ -76,22 +71,31 @@ public:
            argLayout == other.argLayout && staticGrid == other.staticGrid;
   }
 
+  const std::string &getKernelName() const { return kernelName; }
+  const std::string &getFuncName() const { return funcName; }
+  const Binary &getBinary() const { return binary; }
+  ::mlir::nv_tensor_ir::SmTarget getArch() const { return arch; }
+  const KernelMetadata &getLaunchMetadata() const { return argLayout; }
+  const std::optional<std::array<int32_t, 3>> &getStaticGrid() const {
+    return staticGrid;
+  }
+
 private:
   TensorIRArtifact(std::string kernelName, std::string funcName,
                    Binary &&binary, ::mlir::nv_tensor_ir::SmTarget arch,
-                   KernelArgLayout argLayout,
+                   KernelMetadata argLayout,
                    const std::optional<std::array<int32_t, 3>> &staticGrid);
 
   static ::mlir::nv_tensor_ir::Status
   validateFields(llvm::StringRef kernelName, llvm::StringRef funcName,
-                 const Binary &binary, const KernelArgLayout &argLayout,
+                 const Binary &binary,
                  const std::optional<std::array<int32_t, 3>> &staticGrid);
 
   std::string kernelName;
   std::string funcName;
   Binary binary;
   ::mlir::nv_tensor_ir::SmTarget arch;
-  KernelArgLayout argLayout;
+  KernelMetadata argLayout;
   /// Absent selects the runtime-computed grid.
   std::optional<std::array<int32_t, 3>> staticGrid;
 };

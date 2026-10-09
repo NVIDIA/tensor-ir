@@ -317,13 +317,12 @@ bool TileAnalyzer::isValidTileSize(llvm::ArrayRef<DimSize> tileSize,
 
 namespace {
 
-FailureOr<std::pair<mlir::nv_tensor_ir::TensorType, tcg::Stride>>
+FailureOr<std::pair<mlir::RankedTensorType, tcg::Stride>>
 getTensorTypeAndStrideFromGraph(mlir::nv_tensor_ir::GraphOp graphOp) {
   // Prefer inputs when available
   if (!graphOp.getArgumentTypes().empty()) {
-    const mlir::nv_tensor_ir::TensorType tensorType =
-        mlir::dyn_cast<mlir::nv_tensor_ir::TensorType>(
-            graphOp.getArgumentTypes()[0]);
+    const mlir::RankedTensorType tensorType =
+        mlir::dyn_cast<mlir::RankedTensorType>(graphOp.getArgumentTypes()[0]);
     if (!tensorType) {
       return graphOp.emitError(
           "the graph's first argument must have a tensor type");
@@ -335,9 +334,8 @@ getTensorTypeAndStrideFromGraph(mlir::nv_tensor_ir::GraphOp graphOp) {
 
   // Zero-input graphs: derive from first result
   if (!graphOp.getResultTypes().empty()) {
-    const mlir::nv_tensor_ir::TensorType tensorType =
-        mlir::dyn_cast<mlir::nv_tensor_ir::TensorType>(
-            graphOp.getResultTypes()[0]);
+    const mlir::RankedTensorType tensorType =
+        mlir::dyn_cast<mlir::RankedTensorType>(graphOp.getResultTypes()[0]);
     if (!tensorType) {
       return graphOp.emitError("the graph's first result must have a tensor "
                                "type");
@@ -446,8 +444,7 @@ calculateGridSizeForGraph(const TileAnalyzer &tileAnalyzer,
   if (useOutputTensorShapeForGrid(graphOp)) {
     // Find the first output tensor to use its shape
     for (Type resType : graphOp.getFunctionType().getResults()) {
-      if (auto outputType =
-              mlir::dyn_cast<mlir::nv_tensor_ir::TensorType>(resType)) {
+      if (auto outputType = mlir::dyn_cast<mlir::RankedTensorType>(resType)) {
         auto outputShapeVector = toSmallVector(getShapeRef(outputType));
         if (succeeded(outputShapeVector)) {
           gridCalculationShape = *outputShapeVector;
@@ -507,7 +504,7 @@ bool useOutputTensorShapeForGrid(mlir::nv_tensor_ir::GraphOp graphOp) {
   // Check which operations require using output tensor shape for grid
   // computation. This logic must be kept in sync between compile-time
   // (calculateGridSizeForGraph) and runtime
-  // (KernelArgLayout::gridShapeTensorIdx).
+  // (KernelMetadata::gridShapeTensorIdx).
   //
   // - BroadcastOp: grid should cover the broadcast output dimensions
   // - ConcatenateOp: grid should cover the full concatenated output dimensions,

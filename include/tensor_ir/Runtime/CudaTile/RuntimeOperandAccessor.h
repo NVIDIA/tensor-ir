@@ -5,7 +5,7 @@
 // RuntimeOperandAccessor — thin adapter for PackedArgs / TensorView
 //
 // Implements the OperandAccessor concept expected by the templated
-// KernelArgPacker / GridSizeComputer:
+// ArgumentPacker / GridSizeComputer:
 //
 //   int32_t  size()               const;
 //   void*    pointer(int32_t i)   const;

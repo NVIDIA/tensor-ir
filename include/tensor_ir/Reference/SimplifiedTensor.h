@@ -28,6 +28,7 @@ enum class DataType {
   BFLOAT16,
   F8E4M3FN,
   F8E5M2,
+  F4E2M1FN,
   INT32,
   UINT32,
   INT8,
@@ -51,7 +52,9 @@ struct TensorDesc {
   std::vector<int64_t> dims{};    // Dimensions
   std::vector<int64_t> strides{}; // Strides
   DataType dtype{DataType::FLOAT32};
-  int64_t totalElements{0}; // Total number of elements
+  // Initialization sets this to the shape product. The empty product is one
+  // for an initialized rank-zero tensor; zero marks an uninitialized object.
+  int64_t totalElements{0};
 
   TensorDesc() = default;
 

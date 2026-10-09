@@ -74,7 +74,13 @@ def prepare_tensor_infos(
     *,
     dynamic_shape: bool = False,
 ) -> TensorInfoOverrides:
-    """Prepare CUDA Tile tensor metadata for the shared module builder."""
+    """Reject unsupported divisibility; preserve alignment for MLIR emission.
+
+    Static metadata is consumed directly by the shared builder, while dynamic
+    overrides retain alignment through ``dataclasses.replace``.
+    """
+    if any(node.tensor_info.stride_divisibility is not None for node in graph.nodes):
+        raise TypeError("The CUDA Tile backend does not support stride_divisibility")
     if not dynamic_shape:
         return {}
     _check_dynamic_shape_supported(graph)

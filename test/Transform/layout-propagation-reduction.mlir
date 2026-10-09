@@ -20,6 +20,45 @@ nv_tensor_ir.graph @reduction_multiple_dims(
 
 // -----
 
+// Rank-reduced results omit the reduced dimensions from the reduction view.
+
+// CHECK-LABEL: @reduction_single_dim_dropped
+// CHECK: reduce({{.*}} {layout = #nv_tensor_ir.reduction_source<"(128,(64)):(64,(1))", #nv_tensor_ir.tensor_source<0, 0, "(128,64):(1,128)">>}
+nv_tensor_ir.graph @reduction_single_dim_dropped(
+        %in0: tensor<128x64xf32> {nv_tensor_ir.stride = "(1,128)"}) -> (tensor<128xf32> {nv_tensor_ir.stride = "(1)"}) {
+    %reduce = reduce(%in0)<dimensions = [1], reduction_mode = <add>> : tensor<128x64xf32> -> tensor<128xf32>
+    results %reduce : tensor<128xf32>
+}
+
+// -----
+
+// CHECK-LABEL: @reduction_noncontiguous_dims_dropped
+// CHECK: reduce({{.*}} {layout = #nv_tensor_ir.reduction_source<"(3,(2,4)):(4,(12,1))", #nv_tensor_ir.tensor_source<0, 0, "(2,3,4):(1,2,6)">>}
+nv_tensor_ir.graph @reduction_noncontiguous_dims_dropped(
+        %in0: tensor<2x3x4xf32> {nv_tensor_ir.stride = "(1,2,6)"}) -> (tensor<3xf32> {nv_tensor_ir.stride = "(2)"}) {
+    %reduce = reduce(%in0)<dimensions = [0, 2], reduction_mode = <add>> : tensor<2x3x4xf32> -> tensor<3xf32>
+    results %reduce : tensor<3xf32>
+}
+
+// -----
+
+// CHECK-LABEL: @reduction_ud_dropped
+// CHECK: {layout = #nv_tensor_ir.reduction_source<"(8,64,(32)):(2048,1,(64))", #nv_tensor_ir.composite_source<#nv_tensor_ir.tensor_source<0, 0, "(8,32,64):(1,8,256)">, #nv_tensor_ir.tensor_source<1, 0, "(8,32,64):(1,8,256)">>>}
+nv_tensor_ir.graph @reduction_ud_dropped(
+        %in0: tensor<8x32x64xf32> {nv_tensor_ir.stride = "(1,8,256)"},
+        %in1: tensor<8x32x64xf32> {nv_tensor_ir.stride = "(1,8,256)"}) -> (tensor<8x64xf32> {nv_tensor_ir.stride = "(1,256)"}, tensor<8x64xf32> {nv_tensor_ir.stride = "(1,256)"}) {
+    %reduce:2 = reduce_ud(%in0, %in1)<
+        dimensions = [1], identity = [0.0 : f32, 0.0 : f32]>
+        (%lhs0: f32, %lhs1: f32, %rhs0: f32, %rhs1: f32) {
+      %sum0 = arith.addf %lhs0, %rhs0 : f32
+      %sum1 = arith.addf %lhs1, %rhs1 : f32
+      nv_tensor_ir.yield %sum0, %sum1 : f32, f32
+    } : tensor<8x32x64xf32>, tensor<8x32x64xf32> -> tensor<8x64xf32>, tensor<8x64xf32>
+    results %reduce#0, %reduce#1 : tensor<8x64xf32>, tensor<8x64xf32>
+}
+
+// -----
+
 //===----------------------------------------------------------------------===//
 // ReshapeOp
 //===----------------------------------------------------------------------===//

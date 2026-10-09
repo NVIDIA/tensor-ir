@@ -114,8 +114,9 @@ createLoadStoreOptimizationHints(MLIRContext *ctx, bool allowTma,
 /// Create entry-point optimization hints with authoritative launch options.
 cuda_tile::OptimizationHintsAttr
 createEntryOptimizationHints(MLIRContext *ctx, int32_t numCTAs,
-                             int32_t occupancy, int32_t numWarps) {
-  SmallVector<NamedAttribute, 3> hintAttrs;
+                             int32_t occupancy, int32_t numWarps,
+                             int32_t minCTAsPerSM) {
+  SmallVector<NamedAttribute, 4> hintAttrs;
   Type intTy = IntegerType::get(ctx, 32);
   OptimizationHintNames hintNames = getOptimizationHintNames();
 

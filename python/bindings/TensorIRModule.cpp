@@ -50,6 +50,14 @@ void appendStringRef(MlirStringRef value, void *userData) {
   result->append(value.data, value.length);
 }
 
+MlirStringRef wrapStringRef(const std::string &value) {
+  return mlirStringRefCreate(value.data(), value.size());
+}
+
+std::string unwrapStringRef(MlirStringRef value) {
+  return std::string(value.data, value.length);
+}
+
 std::string formatBytecodeVersion(const PyBytecodeVersion &bytecodeVersion) {
   std::string formatted;
   mlirTensorIRFormatBytecodeVersion(bytecodeVersion.value, appendStringRef,
@@ -57,53 +65,124 @@ std::string formatBytecodeVersion(const PyBytecodeVersion &bytecodeVersion) {
   return formatted;
 }
 
-struct CompileOptions {
-  int32_t computeCapability = 100;
-  MlirTensorIRArchPortability archPortability =
-      MlirTensorIRArchPortabilityFamilyPortable;
-  int32_t ctaCount = 1;
-  int32_t warpCount = 4;
-  std::vector<int32_t> tileSizes;
-  bool uniformSignature = false;
-  MlirTensorIRCudaTileCodegenStrategy codegenStrategy =
-      MlirTensorIRCudaTileCodegenStrategyLayoutPropagation;
-  int32_t maxTileCandidates = 1;
-  std::string dumpCudaTileIRPath;
-  std::string dumpTileIRBCPath;
-  std::string loadTileIRBCPath;
-  std::string printIRTreeDir;
-  bool printIRAfterAll = false;
-  bool enableTiming = false;
-  PyBytecodeVersion bytecodeVersion{mlirTensorIRGetDefaultBytecodeVersion()};
-  MlirTensorIRCudaTileArtifactKind artifactKind =
-      MlirTensorIRCudaTileArtifactKindTileIR;
-};
-
-MlirStringRef wrapStringRef(const std::string &value) {
-  return mlirStringRefCreate(value.data(), value.size());
+[[noreturn]] void throwCAPIError(llvm::StringRef api,
+                                 const std::string &error) {
+  llvm::StringRef message = error;
+  if (message.empty()) {
+    message = "TensorIR C API call failed";
+  }
+  std::string fullMessage = api.str();
+  fullMessage += ": ";
+  fullMessage.append(message.data(), message.size());
+  throw std::runtime_error(fullMessage);
 }
 
-MlirTensorIRCudaTileCompileOptions
-wrapCompileOptions(const CompileOptions &options) {
-  MlirTensorIRCudaTileCompileOptions cOptions{};
-  cOptions.computeCapability = options.computeCapability;
-  cOptions.archPortability = options.archPortability;
-  cOptions.ctaCount = options.ctaCount;
-  cOptions.warpCount = options.warpCount;
-  cOptions.tileSizes = options.tileSizes.data();
-  cOptions.numTileSizes = options.tileSizes.size();
-  cOptions.uniformSignature = options.uniformSignature;
-  cOptions.codegenStrategy = options.codegenStrategy;
-  cOptions.maxTileCandidates = options.maxTileCandidates;
-  cOptions.dumpCudaTileIRPath = wrapStringRef(options.dumpCudaTileIRPath);
-  cOptions.dumpTileIRBCPath = wrapStringRef(options.dumpTileIRBCPath);
-  cOptions.loadTileIRBCPath = wrapStringRef(options.loadTileIRBCPath);
-  cOptions.printIRTreeDir = wrapStringRef(options.printIRTreeDir);
-  cOptions.printIRAfterAll = options.printIRAfterAll;
-  cOptions.enableTiming = options.enableTiming;
-  cOptions.bytecodeVersion = options.bytecodeVersion.value;
-  cOptions.artifactKind = options.artifactKind;
-  return cOptions;
+void checkCAPIResult(MlirLogicalResult result, llvm::StringRef api,
+                     const std::string &error) {
+  if (mlirLogicalResultIsFailure(result)) {
+    throwCAPIError(api, error);
+  }
+}
+
+/// Shared ownership for the opaque invocation used by CompileOptions and its
+/// InternalOptions view.
+struct InvocationStorage {
+  InvocationStorage() : value(mlirTensorIRCompilerInvocationCreate()) {}
+  ~InvocationStorage() { mlirTensorIRCompilerInvocationDestroy(value); }
+
+  MlirTensorIRCompilerInvocation value;
+};
+
+/// The options a `compile` call takes: an owning compiler invocation handle
+/// plus the defaults this module has always presented.
+///
+/// Every option is reached through `tensor_ir-c`, never through the C++ options
+/// structs: the typed accessors the C API declares per component for the
+/// options whose type has a C spelling, and the invocation-level accessors for
+/// the target and for the two (a version and a list) that do not.
+class CompileOptions {
+public:
+  CompileOptions() : invocation(std::make_shared<InvocationStorage>()) {
+    mlirTensorIRCompilerInvocationSetCompilerBackend(
+        handle(), MlirTensorIRCodegenCompilerBackendCudaTile);
+    mlirTensorIRCompilerInvocationSetBytecodeVersion(
+        handle(), mlirTensorIRGetDefaultBytecodeVersion());
+    // Cannot fail: sm_100 supports family portability, so this is a target.
+    (void)mlirTensorIRCompilerInvocationSetKernelTarget(
+        handle(), 100, MlirTensorIRArchPortabilityFamilyPortable);
+  }
+
+  // Move-only: the handle is owning, and nothing in the Python API copies an
+  // options object. `parse` returns one by value, which the move covers.
+  CompileOptions(CompileOptions &&) noexcept = default;
+  CompileOptions &operator=(CompileOptions &&) noexcept = default;
+  CompileOptions(const CompileOptions &) = delete;
+  CompileOptions &operator=(const CompileOptions &) = delete;
+  ~CompileOptions() = default;
+
+  MlirTensorIRCompilerInvocation handle() const { return invocation->value; }
+
+  static CompileOptions parse(const std::string &text) {
+    CompileOptions options;
+    if (mlirLogicalResultIsFailure(mlirTensorIRCompilerInvocationSetFromString(
+            options.handle(), wrapStringRef(text)))) {
+      throw std::invalid_argument("Failed to parse TensorIR compile options: " +
+                                  text);
+    }
+    return options;
+  }
+
+  std::string toString() const {
+    std::string text;
+    mlirTensorIRCompilerInvocationPrint(handle(), appendStringRef, &text);
+    return text;
+  }
+
+private:
+  std::shared_ptr<InvocationStorage> invocation;
+};
+
+/// Retargets `options`, reporting a compute capability and portability pair no
+/// target supports as \p what.
+void setKernelTargetOrThrow(MlirTensorIRCompilerInvocation options,
+                            int32_t computeCapability,
+                            MlirTensorIRArchPortability portability,
+                            const std::string &what) {
+  if (mlirLogicalResultIsFailure(mlirTensorIRCompilerInvocationSetKernelTarget(
+          options, computeCapability, portability))) {
+    throw std::invalid_argument("Unsupported TensorIR " + what);
+  }
+}
+
+/// Exposes a compile option as the read/write Python property \p name, reading
+/// it with \p get and writing it with \p set. Both receive the invocation
+/// handle, so that a binding names the C API accessors that reach its option
+/// and nothing else. \p Value is the Python-visible type, which nanobind needs
+/// spelled out.
+template <typename Value, typename Class, typename Get, typename Set>
+void bindOption(Class &cls, const char *name, Get get, Set set) {
+  using Self = typename Class::Type;
+  cls.def_prop_rw(
+      name, [get](const Self &self) { return get(self.handle()); },
+      [set](const Self &self, Value value) {
+        set(self.handle(), std::move(value));
+      });
+}
+
+/// Same, for a string option whose C getter returns borrowed storage.
+template <typename Class>
+void bindStringOption(Class &cls, const char *name,
+                      MlirStringRef (*get)(MlirTensorIRCompilerInvocation),
+                      void (*set)(MlirTensorIRCompilerInvocation,
+                                  MlirStringRef)) {
+  bindOption<std::string>(
+      cls, name,
+      [get](MlirTensorIRCompilerInvocation options) {
+        return unwrapStringRef(get(options));
+      },
+      [set](MlirTensorIRCompilerInvocation options, const std::string &value) {
+        set(options, wrapStringRef(value));
+      });
 }
 
 struct PackedPythonArgs {
@@ -134,12 +213,11 @@ MlirModule validateModule(MlirModule module) {
 
 std::string calculateCacheKey(MlirModule module,
                               const CompileOptions &options) {
-  MlirTensorIRCudaTileCompileOptions cOptions = wrapCompileOptions(options);
   std::string key;
   std::string error;
-  checkCAPIResult(mlirTensorIRCalculateCacheKey(validateModule(module),
-                                                cOptions, appendStringRef, &key,
-                                                appendStringRef, &error),
+  checkCAPIResult(mlirTensorIRCalculateCacheKey(
+                      validateModule(module), options.handle(), appendStringRef,
+                      &key, appendStringRef, &error),
                   "mlirTensorIRCalculateCacheKey", error);
   return key;
 }
@@ -399,25 +477,6 @@ void *packStream(nb::object stream) {
       "stream must be None, an integer pointer, or a CUDA stream");
 }
 
-[[noreturn]] void throwCAPIError(llvm::StringRef api,
-                                 const std::string &error) {
-  llvm::StringRef message = error;
-  if (message.empty()) {
-    message = "TensorIR C API call failed";
-  }
-  std::string fullMessage = api.str();
-  fullMessage += ": ";
-  fullMessage.append(message.data(), message.size());
-  throw std::runtime_error(fullMessage);
-}
-
-void checkCAPIResult(MlirLogicalResult result, llvm::StringRef api,
-                     const std::string &error) {
-  if (mlirLogicalResultIsFailure(result)) {
-    throwCAPIError(api, error);
-  }
-}
-
 class PyProgram {
 public:
   explicit PyProgram(MlirTensorIRProgram program) : program_(program) {}
@@ -571,24 +630,89 @@ NB_MODULE(_tensor_ir, m) {
         return "BytecodeVersion('" + formatBytecodeVersion(version) + "')";
       });
 
-  nb::class_<CompileOptions>(m, "CompileOptions")
-      .def(nb::init<>())
-      .def_rw("compute_capability", &CompileOptions::computeCapability)
-      .def_rw("arch_portability", &CompileOptions::archPortability)
-      .def_rw("cta_count", &CompileOptions::ctaCount)
-      .def_rw("warp_count", &CompileOptions::warpCount)
-      .def_rw("tile_sizes", &CompileOptions::tileSizes)
-      .def_rw("uniform_signature", &CompileOptions::uniformSignature)
-      .def_rw("codegen_strategy", &CompileOptions::codegenStrategy)
-      .def_rw("max_tile_candidates", &CompileOptions::maxTileCandidates)
-      .def_rw("dump_cuda_tile_ir_path", &CompileOptions::dumpCudaTileIRPath)
-      .def_rw("dump_tileir_bc_path", &CompileOptions::dumpTileIRBCPath)
-      .def_rw("load_tileir_bc_path", &CompileOptions::loadTileIRBCPath)
-      .def_rw("print_ir_tree_dir", &CompileOptions::printIRTreeDir)
-      .def_rw("print_ir_after_all", &CompileOptions::printIRAfterAll)
-      .def_rw("enable_timing", &CompileOptions::enableTiming)
-      .def_rw("bytecode_version", &CompileOptions::bytecodeVersion)
-      .def_rw("artifact_kind", &CompileOptions::artifactKind);
+  auto compileOptions =
+      nb::class_<CompileOptions>(m, "CompileOptions")
+          .def(nb::init<>())
+          .def_static("parse", &CompileOptions::parse, nb::arg("text"))
+          .def("__str__", &CompileOptions::toString);
+
+  // The target reaches Python as the compute capability and portability pair a
+  // caller chooses; the invocation stores the `kernel-target` spelling they name.
+  // Setting one preserves the other.
+  bindOption<int32_t>(
+      compileOptions, "compute_capability",
+      [](auto options) {
+        return mlirTensorIRCompilerInvocationGetKernelComputeCapability(
+            options);
+      },
+      [](auto options, int32_t computeCapability) {
+        setKernelTargetOrThrow(
+            options, computeCapability,
+            mlirTensorIRCompilerInvocationGetKernelArchPortability(options),
+            "compute capability: " + std::to_string(computeCapability));
+      });
+  bindOption<MlirTensorIRArchPortability>(
+      compileOptions, "arch_portability",
+      [](auto options) {
+        return mlirTensorIRCompilerInvocationGetKernelArchPortability(options);
+      },
+      [](auto options, MlirTensorIRArchPortability portability) {
+        setKernelTargetOrThrow(
+            options,
+            mlirTensorIRCompilerInvocationGetKernelComputeCapability(options),
+            portability, "arch portability");
+      });
+
+  // A version and a list have no C spelling among the typed accessors, so both
+  // are reached through the invocation instead of a component handle.
+  bindOption<PyBytecodeVersion>(
+      compileOptions, "bytecode_version",
+      [](auto options) {
+        return PyBytecodeVersion{
+            mlirTensorIRCompilerInvocationGetBytecodeVersion(options)};
+      },
+      [](auto options, PyBytecodeVersion version) {
+        mlirTensorIRCompilerInvocationSetBytecodeVersion(options,
+                                                         version.value);
+      });
+  bindOption<std::vector<int32_t>>(
+      compileOptions, "tile_sizes",
+      [](auto options) {
+        size_t numSizes = 0;
+        const int32_t *sizes =
+            mlirTensorIRCompilerInvocationGetTileSizes(options, &numSizes);
+        return std::vector<int32_t>(sizes, sizes + numSizes);
+      },
+      [](auto options, const std::vector<int32_t> &sizes) {
+        mlirTensorIRCompilerInvocationSetTileSizes(options, sizes.data(),
+                                                   sizes.size());
+      });
+
+#define TIR_BIND_OPTION(type, name, field)                                     \
+  bindOption<type>(compileOptions, name,                                       \
+                   mlirTensorIRCompilerInvocationGet##field,                   \
+                   mlirTensorIRCompilerInvocationSet##field)
+#define TIR_BIND_STRING_OPTION(name, field)                                    \
+  bindStringOption(compileOptions, name,                                       \
+                   mlirTensorIRCompilerInvocationGet##field,                   \
+                   mlirTensorIRCompilerInvocationSet##field)
+  TIR_BIND_OPTION(int32_t, "cta_count", CtaCount);
+  TIR_BIND_OPTION(int32_t, "warp_count", WarpCount);
+  TIR_BIND_OPTION(int32_t, "max_tile_candidates", MaxTileCandidates);
+  TIR_BIND_OPTION(MlirTensorIRCudaTileCodegenStrategy, "codegen_strategy",
+                  CodegenStrategy);
+  TIR_BIND_OPTION(MlirTensorIRCudaTileArtifactKind, "artifact_kind",
+                  ArtifactKind);
+  TIR_BIND_OPTION(bool, "print_ir_after_all", PrintIRAfterAll);
+  TIR_BIND_OPTION(bool, "enable_timing", EnableTiming);
+  TIR_BIND_OPTION(bool, "print_cuda_tile_ir", PrintCudaTileIR);
+  TIR_BIND_STRING_OPTION("cuda_toolkit_path", CudaToolkitPath);
+  TIR_BIND_STRING_OPTION("dump_cuda_tile_ir_path", DumpCudaTileIRPath);
+  TIR_BIND_STRING_OPTION("dump_tileir_bc_path", DumpTileIRBCPath);
+  TIR_BIND_STRING_OPTION("load_tileir_bc_path", LoadTileIRBCPath);
+  TIR_BIND_STRING_OPTION("print_ir_tree_dir", PrintIRTreeDir);
+#undef TIR_BIND_STRING_OPTION
+#undef TIR_BIND_OPTION
 
   nb::class_<PyProgram>(m, "_Program")
       .def("initialize", &PyProgram::initialize)
@@ -616,11 +740,10 @@ NB_MODULE(_tensor_ir, m) {
       "compile",
       [](MlirModule module,
          const CompileOptions &compileOptions) -> std::unique_ptr<PyProgram> {
-        MlirTensorIRCudaTileCompileOptions cOptions =
-            wrapCompileOptions(compileOptions);
         std::string error;
         MlirTensorIRProgram program = mlirTensorIRProgramCompile(
-            validateModule(module), cOptions, appendStringRef, &error);
+            validateModule(module), compileOptions.handle(), appendStringRef,
+            &error);
         if (!program.ptr) {
           throwCAPIError("mlirTensorIRProgramCompile", error);
         }
@@ -631,13 +754,11 @@ NB_MODULE(_tensor_ir, m) {
   m.def(
       "can_compile",
       [](MlirModule module, const CompileOptions &compileOptions) -> bool {
-        MlirTensorIRCudaTileCompileOptions cOptions =
-            wrapCompileOptions(compileOptions);
         bool canCompile = false;
         std::string error;
-        checkCAPIResult(mlirTensorIRProgramCanCompile(validateModule(module),
-                                                      cOptions, &canCompile,
-                                                      appendStringRef, &error),
+        checkCAPIResult(mlirTensorIRProgramCanCompile(
+                            validateModule(module), compileOptions.handle(),
+                            &canCompile, appendStringRef, &error),
                         "mlirTensorIRProgramCanCompile", error);
         return canCompile;
       },

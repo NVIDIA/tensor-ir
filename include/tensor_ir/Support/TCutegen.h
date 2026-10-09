@@ -32,10 +32,13 @@ namespace mlir::nv_tensor_ir::tcutegen {
 
 struct CgErrorT {};
 
-class Shape;
-class Stride;
+enum class SequenceKind { Shape, Stride, Coord };
+template <SequenceKind Kind>
+class DimSequence;
+using Shape = DimSequence<SequenceKind::Shape>;
+using Stride = DimSequence<SequenceKind::Stride>;
+using Coord = DimSequence<SequenceKind::Coord>;
 class Layout;
-class Coord;
 
 namespace detail {
 
@@ -56,12 +59,14 @@ bool is_congruent(const Lhs &lhs, const Rhs &rhs);
 
 namespace detail {
 
+template <typename T, bool Mutable>
+class SequenceIterator;
 template <typename T>
-class IndexedIterator;
+using IndexedIterator = SequenceIterator<T, false>;
 template <typename T>
 class IndexedReference;
 template <typename T>
-class MutableIndexedIterator;
+using MutableIndexedIterator = SequenceIterator<T, true>;
 
 // Represents a single dimension of a shape or stride. Can be either a static
 // integer or a dynamic DimValue, with divisibility and integer width metadata.
@@ -123,11 +128,11 @@ public:
   explicit RecursiveDimValue(std::vector<RecursiveDimValue> values);
   explicit RecursiveDimValue(CgErrorT);
 
-  bool isLeaf() const;
+  bool isLeaf() const { return leaf; }
   const DimValue &getLeaf() const;
   llvm::ArrayRef<RecursiveDimValue> getValues() const;
   std::string toString() const;
-  size_t rank() const;
+  size_t rank() const { return isLeaf() ? 1 : values.size(); }
 
   // Returns true if this scalar or recursive dimension value is fully static.
   bool isStatic() const;
@@ -161,206 +166,167 @@ using RecursiveDimValues = SmallVector<RecursiveDimValue>;
 
 } // namespace detail
 
-class Layout;
-class Coord;
+namespace detail {
 
-// Potentially recursive sequence of DimValues representing a shape.
-class Shape {
+template <typename T>
+class IndexedReference {
 public:
-  using iterator = detail::MutableIndexedIterator<Shape>;
-  using const_iterator = detail::IndexedIterator<Shape>;
+  IndexedReference() = default;
+  IndexedReference(const IndexedReference &) = default;
+  IndexedReference(T &value, size_t index) : value(&value), index(index) {}
 
-  // Creates an empty shape. Append dimensions to build a non-empty shape.
-  Shape();
+  operator T() const { return T(value->get(index)); }
 
-  // Creates a shape from MLIR shaped-type dimensions. `ShapedType::kDynamic`
-  // dimensions become dynamic DimValues. Static dimensions must be >= 1.
-  // Invalid input creates an error Shape.
-  Shape(llvm::ArrayRef<int64_t> values);
+  IndexedReference &operator=(T newValue) {
+    value->set(index, std::move(newValue));
+    return *this;
+  }
 
-  // Creates a scalar shape. Invalid input creates an error Shape.
-  explicit Shape(int64_t value);
+  IndexedReference &operator=(const IndexedReference &other) {
+    return *this = static_cast<T>(other);
+  }
 
-  // Creates an error shape.
-  explicit Shape(CgErrorT);
-
-  // This method is composable with cutegen's string representation of shapes.
-  std::string toString() const;
-
-  // This method is composable with cutegen's string representation of shapes.
-  // If the input string is invalid, std::nullopt is returned.
-  static std::optional<Shape> fromString(mlir::StringRef str);
-
-  // Cutegen-like scalar API. Non-scalar shapes cause a crash.
-  std::int64_t as_int() const;
-
-  // Append a static dimension. Static dimensions must be >= 1.
-  void append(int64_t value);
-
-  // Append a nested shape mode.
-  void append(Shape value);
-
-  // Append a dynamic dimension. Divisibility must be positive and width must be
-  // a cutegen-supported integer width.
-  void appendDynamic(int64_t divisibility = 1, int32_t width = 32);
-
-  // Get the dimension at the given index. Index must be in [0, rank()).
-  const detail::RecursiveDimValue &get(size_t index) const;
-
-  // Get the dimension at the given index. Index must be in [0, rank()).
-  const detail::RecursiveDimValue &operator[](size_t index) const;
-
-  // Get the array of values.
-  ArrayRef<detail::RecursiveDimValue> getValues() const { return values; }
-
-  // Iterate over sub-shapes in storage order.
-  iterator begin();
-  iterator end();
-  const_iterator begin() const;
-  const_iterator end() const;
-  const_iterator cbegin() const;
-  const_iterator cend() const;
-
-  // Equality operators.
-  friend bool operator==(const Shape &lhs, const Shape &rhs);
-  friend bool operator!=(const Shape &lhs, const Shape &rhs);
-  friend bool operator==(const Shape &lhs, int64_t rhs);
-  friend bool operator!=(const Shape &lhs, int64_t rhs);
-  friend bool operator==(int64_t lhs, const Shape &rhs);
-  friend bool operator!=(int64_t lhs, const Shape &rhs);
+  std::string toString() const { return static_cast<T>(*this).toString(); }
 
 private:
-  // These mirror cutegen free-function APIs and are intentionally private on
-  // the TensorIR replacement type.
-  size_t rank() const;
-  int64_t getDivisibility() const;
+  void reset(T &newValue, size_t newIndex) {
+    value = &newValue;
+    index = newIndex;
+  }
 
-  Shape(SmallVector<detail::DimValue> values);
-  Shape(detail::RecursiveDimValues values);
-  explicit Shape(detail::RecursiveDimValue value);
-  void set(size_t index, Shape value);
+  template <typename, bool>
+  friend class SequenceIterator;
 
-  friend class detail::IndexedReference<Shape>;
-  friend class detail::IndexedIterator<Shape>;
-  friend class Layout;
-  friend class Stride;
-  friend Layout coalesce(const Layout &layout);
-  friend Shape flatten(const Shape &shape);
-  friend Layout make_layout(std::vector<Layout> lys);
-  friend Shape reverse(const Shape &shape);
-  friend Shape take(int begin, int end, const Shape &shape);
-  friend Coord idx2crd(int64_t index, const Shape &shape);
-  friend size_t depth(const Shape &shape);
-  friend int64_t get_divisibility(const Shape &shape);
-  friend bool has_error(const Shape &shape);
-  friend bool is_static(const Shape &shape);
-  friend size_t rank(const Shape &shape);
-  template <typename Lhs, typename Rhs,
-            std::enable_if_t<detail::isTensorIRCutegenValue<Lhs> &&
-                                 detail::isTensorIRCutegenValue<Rhs>,
-                             bool>>
-  friend bool is_congruent(const Lhs &lhs, const Rhs &rhs);
-
-  detail::RecursiveDimValues values;
-  bool scalarRoot = false;
-  bool has_error_ = false;
+  T *value = nullptr;
+  size_t index = 0;
 };
 
-// Potentially recursive sequence of DimValues representing a stride.
-class Stride {
+/// Index-based traversal shared by value and mutable-proxy iterators.
+template <typename T, bool Mutable>
+class SequenceIterator {
 public:
-  using iterator = detail::MutableIndexedIterator<Stride>;
-  using const_iterator = detail::IndexedIterator<Stride>;
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = T;
+  using difference_type = std::ptrdiff_t;
+  using pointer = void;
+  using reference = std::conditional_t<Mutable, IndexedReference<T> &, T>;
+  using Container = std::conditional_t<Mutable, T, const T>;
 
-  // Creates an empty stride. Append dimensions to build a non-empty stride.
-  Stride();
-
-  // Creates a scalar stride. Invalid input creates an error Stride.
-  explicit Stride(int64_t value);
-
-  // Creates an error stride.
-  explicit Stride(CgErrorT);
-
-  // This method is composable with cutegen's string representation of strides.
-  std::string toString() const;
-
-  // This method is composable with cutegen's string representation of strides.
-  // If the input string is invalid, std::nullopt is returned.
-  static std::optional<Stride> fromString(mlir::StringRef str);
-
-  // Creates the compact logical stride for \p shape. The last dimension is
-  // contiguous and nested modes follow the same convention recursively.
-  static Stride getDefault(const Shape &shape);
-
-  // Cutegen-like scalar API. Non-scalar strides cause a crash.
-  std::int64_t as_int() const;
-
-  // Append a static dimension.
-  void append(int64_t value);
-
-  // Append a nested stride mode.
-  void append(Stride value);
-
-  // Append a dynamic dimension. Divisibility must be positive and width must be
-  // a cutegen-supported integer width.
-  void appendDynamic(int64_t divisibility = 1, int32_t width = 32);
-
-  // Get the dimension at the given index. Index must be in [0, rank()).
-  const detail::RecursiveDimValue &get(size_t index) const;
-
-  // Get the dimension at the given index. Index must be in [0, rank()).
-  const detail::RecursiveDimValue &operator[](size_t index) const;
-
-  // Get the array of values.
-  ArrayRef<detail::RecursiveDimValue> getValues() const { return values; }
-
-  // Iterate over sub-strides in storage order.
-  iterator begin();
-  iterator end();
-  const_iterator begin() const;
-  const_iterator end() const;
-  const_iterator cbegin() const;
-  const_iterator cend() const;
-
-  // Equality operators.
-  friend bool operator==(const Stride &lhs, const Stride &rhs);
-  friend bool operator!=(const Stride &lhs, const Stride &rhs);
-  friend bool operator==(const Stride &lhs, int64_t rhs);
-  friend bool operator!=(const Stride &lhs, int64_t rhs);
-  friend bool operator==(int64_t lhs, const Stride &rhs);
-  friend bool operator!=(int64_t lhs, const Stride &rhs);
+  SequenceIterator() = default;
+  SequenceIterator(Container &value, size_t index)
+      : value(&value), index(index) {}
+  reference operator*() const {
+    if constexpr (Mutable) {
+      current.reset(*value, index);
+      return current;
+    } else {
+      return T(value->get(index));
+    }
+  }
+  SequenceIterator &operator++() {
+    ++index;
+    return *this;
+  }
+  SequenceIterator operator++(int) {
+    auto copy = *this;
+    ++*this;
+    return copy;
+  }
+  friend bool operator==(const SequenceIterator &lhs,
+                         const SequenceIterator &rhs) {
+    return lhs.value == rhs.value && lhs.index == rhs.index;
+  }
+  friend bool operator!=(const SequenceIterator &lhs,
+                         const SequenceIterator &rhs) {
+    return !(lhs == rhs);
+  }
 
 private:
-  // These mirror cutegen free-function APIs and are intentionally private on
-  // the TensorIR replacement type.
-  size_t rank() const;
+  Container *value = nullptr;
+  size_t index = 0;
+  mutable IndexedReference<T> current;
+};
+
+} // namespace detail
+/// A recursive sequence with role-specific validation. Shapes require positive
+/// static dimensions; strides and coordinates allow zero. Scalar roots remain
+/// distinct from singleton tuples throughout parsing, iteration and comparison.
+template <SequenceKind Kind>
+class DimSequence {
+public:
+  using const_iterator = detail::IndexedIterator<DimSequence>;
+  using iterator =
+      std::conditional_t<Kind == SequenceKind::Coord, const_iterator,
+                         detail::MutableIndexedIterator<DimSequence>>;
+
+  /// Empty shapes/strides are valid; default coordinates are errors until
+  /// populated. Parsing an empty tuple preserves its explicit tuple root.
+  DimSequence();
+  explicit DimSequence(int64_t value);
+  explicit DimSequence(CgErrorT);
+  DimSequence(llvm::ArrayRef<int64_t> values);
+  explicit DimSequence(detail::RecursiveDimValue value);
+  explicit DimSequence(detail::RecursiveDimValues values);
+
+  static std::optional<DimSequence> fromString(mlir::StringRef str);
+  static Stride getDefault(const Shape &shape);
+  std::string toString() const;
+  int64_t as_int() const;
   int64_t getDivisibility() const;
+  void append(int64_t value);
+  void append(DimSequence value);
+  void appendDynamic(int64_t divisibility = 1, int32_t width = 32);
+  void set(size_t index, DimSequence value);
 
-  Stride(SmallVector<detail::DimValue> values);
-  Stride(detail::RecursiveDimValues values);
-  explicit Stride(detail::RecursiveDimValue value);
-  void set(size_t index, Stride value);
+  const detail::RecursiveDimValue &get(size_t index) const {
+    return values[index];
+  }
+  const detail::RecursiveDimValue &operator[](size_t index) const {
+    return get(index);
+  }
+  ArrayRef<detail::RecursiveDimValue> getValues() const { return values; }
+  bool isScalar() const { return scalarRoot; }
+  bool hasError() const;
+  bool isStatic() const;
+  size_t getDepth() const;
+  int64_t staticSize() const;
+  DimSequence flattened() const;
+  DimSequence reversed() const;
+  DimSequence taken(int begin, int end) const;
 
-  friend class detail::IndexedReference<Stride>;
-  friend class detail::IndexedIterator<Stride>;
-  friend class Layout;
-  friend Layout coalesce(const Layout &layout);
-  friend Stride flatten(const Stride &stride);
-  friend Layout make_layout(std::vector<Layout> lys);
-  friend Stride reverse(const Stride &stride);
-  friend Stride take(int begin, int end, const Stride &stride);
+  iterator begin() { return iterator(*this, 0); }
+  iterator end() { return iterator(*this, values.size()); }
+  const_iterator begin() const { return const_iterator(*this, 0); }
+  const_iterator end() const { return const_iterator(*this, values.size()); }
+  const_iterator cbegin() const { return begin(); }
+  const_iterator cend() const { return end(); }
 
-  friend size_t depth(const Stride &stride);
-  friend int64_t get_divisibility(const Stride &stride);
-  friend bool has_error(const Stride &stride);
-  friend bool is_static(const Stride &stride);
-  friend size_t rank(const Stride &stride);
-  template <typename Lhs, typename Rhs,
-            std::enable_if_t<detail::isTensorIRCutegenValue<Lhs> &&
-                                 detail::isTensorIRCutegenValue<Rhs>,
-                             bool>>
-  friend bool is_congruent(const Lhs &lhs, const Rhs &rhs);
+  friend bool operator==(const DimSequence &lhs, const DimSequence &rhs) {
+    if (lhs.hasError() || rhs.hasError()) {
+      return lhs.hasError() == rhs.hasError();
+    }
+    return lhs.scalarRoot == rhs.scalarRoot && lhs.values == rhs.values;
+  }
+  friend bool operator!=(const DimSequence &lhs, const DimSequence &rhs) {
+    return !(lhs == rhs);
+  }
+  friend bool operator==(const DimSequence &lhs, int64_t rhs) {
+    return !lhs.hasError() && lhs.scalarRoot && lhs.values.front() == rhs;
+  }
+  friend bool operator!=(const DimSequence &lhs, int64_t rhs) {
+    return !(lhs == rhs);
+  }
+  friend bool operator==(int64_t lhs, const DimSequence &rhs) {
+    return rhs == lhs;
+  }
+  friend bool operator!=(int64_t lhs, const DimSequence &rhs) {
+    return !(lhs == rhs);
+  }
 
+private:
+  bool validDimensions() const;
+  detail::RecursiveDimValue asRecursiveValue() &&;
+  const detail::RecursiveDimValue &requireScalar(const char *action) const;
   detail::RecursiveDimValues values;
   bool scalarRoot = false;
   bool has_error_ = false;
@@ -394,10 +360,10 @@ public:
   static std::optional<Layout> fromString(mlir::StringRef str);
 
   // Gets the shape of the layout.
-  const Shape &shape() const;
+  const Shape &shape() const { return shapeValue; }
 
   // Gets the stride of the layout.
-  const Stride &stride() const;
+  const Stride &stride() const { return strideValue; }
 
   // Computes the linear layout offset for a coordinate congruent with this
   // layout's shape.
@@ -412,12 +378,12 @@ public:
   // Iterate over sub-layouts in storage order.
   const_iterator begin() const;
   const_iterator end() const;
-  const_iterator cbegin() const;
-  const_iterator cend() const;
+  const_iterator cbegin() const { return begin(); }
+  const_iterator cend() const { return end(); }
 
   // Returns true if this layout was constructed with non-congruent shape and
   // stride inputs.
-  bool has_error() const;
+  bool has_error() const { return has_error_; }
 
   // Equality operators.
   friend bool operator==(const Layout &lhs, const Layout &rhs);
@@ -433,252 +399,69 @@ private:
   bool has_error_ = false;
 };
 
-// Potentially recursive sequence of coordinate values. The structure mirrors a
-// Shape and can be used as the domain coordinate for a Layout.
-class Coord {
-public:
-  using const_iterator = detail::IndexedIterator<Coord>;
-
-  // Creates an empty error coordinate. Append coordinates to build a valid
-  // coordinate.
-  Coord();
-
-  // Creates a scalar coordinate. Invalid input creates an error Coord.
-  explicit Coord(int64_t value);
-
-  // Creates an error coordinate.
-  explicit Coord(CgErrorT);
-
-  // This method is composable with cutegen's string representation of
-  // coordinates.
-  std::string toString() const;
-
-  // This method is composable with cutegen's string representation of
-  // coordinates. If the input string is invalid, std::nullopt is returned.
-  static std::optional<Coord> fromString(mlir::StringRef str);
-
-  // Cutegen-like scalar API. Non-scalar coordinates cause a crash.
-  std::int64_t as_int() const;
-
-  // Append a static coordinate value. Static coordinates must be non-negative.
-  void append(int64_t value);
-
-  // Append a nested coordinate mode.
-  void append(Coord value);
-
-  // Get the coordinate at the given index. Index must be in [0, rank()).
-  const detail::RecursiveDimValue &get(size_t index) const;
-
-  // Get the coordinate at the given index. Index must be in [0, rank()).
-  const detail::RecursiveDimValue &operator[](size_t index) const;
-
-  // Iterate over sub-coordinates in storage order.
-  const_iterator begin() const;
-  const_iterator end() const;
-  const_iterator cbegin() const;
-  const_iterator cend() const;
-
-  // Equality operators.
-  friend bool operator==(const Coord &lhs, const Coord &rhs);
-  friend bool operator!=(const Coord &lhs, const Coord &rhs);
-
-private:
-  size_t rank() const;
-
-  Coord(detail::RecursiveDimValues values);
-  explicit Coord(detail::RecursiveDimValue value);
-
-  friend class detail::IndexedIterator<Coord>;
-  friend detail::DimValue Layout::operator()(const Coord &coord) const;
-  friend bool has_error(const Coord &coord);
-  friend Coord idx2crd(int64_t index, const Shape &shape);
-  friend size_t depth(const Coord &coord);
-  friend bool is_static(const Coord &coord);
-  friend size_t rank(const Coord &coord);
-  template <typename Lhs, typename Rhs,
-            std::enable_if_t<detail::isTensorIRCutegenValue<Lhs> &&
-                                 detail::isTensorIRCutegenValue<Rhs>,
-                             bool>>
-  friend bool is_congruent(const Lhs &lhs, const Rhs &rhs);
-
-  detail::RecursiveDimValues values;
-  bool scalarRoot = false;
-  bool has_error_ = false;
-};
-
-namespace detail {
-
-template <typename T>
-class IndexedReference {
-public:
-  IndexedReference() = default;
-  IndexedReference(const IndexedReference &) = default;
-  IndexedReference(T &value, size_t index) : value(&value), index(index) {}
-
-  operator T() const { return T(value->get(index)); }
-
-  IndexedReference &operator=(T newValue) {
-    value->set(index, std::move(newValue));
-    return *this;
-  }
-
-  IndexedReference &operator=(const IndexedReference &other) {
-    return *this = static_cast<T>(other);
-  }
-
-  std::string toString() const { return static_cast<T>(*this).toString(); }
-
-private:
-  void reset(T &newValue, size_t newIndex) {
-    value = &newValue;
-    index = newIndex;
-  }
-
-  template <typename>
-  friend class MutableIndexedIterator;
-
-  T *value = nullptr;
-  size_t index = 0;
-};
-
-template <typename T>
-class MutableIndexedIterator {
-public:
-  using iterator_category = std::forward_iterator_tag;
-  using value_type = T;
-  using difference_type = std::ptrdiff_t;
-  using pointer = void;
-  using reference = IndexedReference<T> &;
-
-  MutableIndexedIterator() = default;
-  MutableIndexedIterator(T &value, size_t index)
-      : value(&value), index(index) {}
-
-  reference operator*() const {
-    current.reset(*value, index);
-    return current;
-  }
-
-  MutableIndexedIterator &operator++() {
-    ++index;
-    return *this;
-  }
-
-  MutableIndexedIterator operator++(int) {
-    MutableIndexedIterator copy = *this;
-    ++*this;
-    return copy;
-  }
-
-  friend bool operator==(const MutableIndexedIterator &lhs,
-                         const MutableIndexedIterator &rhs) {
-    return lhs.value == rhs.value && lhs.index == rhs.index;
-  }
-
-  friend bool operator!=(const MutableIndexedIterator &lhs,
-                         const MutableIndexedIterator &rhs) {
-    return !(lhs == rhs);
-  }
-
-private:
-  T *value = nullptr;
-  size_t index = 0;
-  mutable IndexedReference<T> current;
-};
-
-template <typename T>
-class IndexedIterator {
-public:
-  using iterator_category = std::forward_iterator_tag;
-  using value_type = T;
-  using difference_type = std::ptrdiff_t;
-  using pointer = void;
-  using reference = T;
-
-  IndexedIterator() = default;
-  IndexedIterator(const T &value, size_t index) : value(&value), index(index) {}
-
-  T operator*() const {
-    if constexpr (std::is_same_v<T, Layout>) {
-      return value->get(index);
-    } else {
-      return T(value->get(index));
-    }
-  }
-
-  IndexedIterator &operator++() {
-    ++index;
-    return *this;
-  }
-
-  IndexedIterator operator++(int) {
-    IndexedIterator copy = *this;
-    ++*this;
-    return copy;
-  }
-
-  friend bool operator==(const IndexedIterator &lhs,
-                         const IndexedIterator &rhs) {
-    return lhs.value == rhs.value && lhs.index == rhs.index;
-  }
-
-  friend bool operator!=(const IndexedIterator &lhs,
-                         const IndexedIterator &rhs) {
-    return !(lhs == rhs);
-  }
-
-private:
-  const T *value = nullptr;
-  size_t index = 0;
-};
-
-} // namespace detail
-
 // Custom definitions of functions to be used with Shape, Stride and Layout
 // defined above.
-size_t depth(const Shape &shape);
-size_t depth(const Stride &stride);
 size_t depth(const Layout &layout);
-size_t depth(const Coord &coord);
 size_t depth(const detail::RecursiveDimValue &value);
 int64_t get_divisibility(const detail::DimValue &dim);
-int64_t get_divisibility(const Shape &shape);
-int64_t get_divisibility(const Stride &stride);
 int64_t get_divisibility(const detail::RecursiveDimValue &value);
-bool has_error(const Shape &shape);
-bool has_error(const Stride &stride);
 bool has_error(const Layout &layout);
-bool has_error(const Coord &coord);
 bool is_static(const detail::DimValue &dim);
-bool is_static(const Shape &shape);
-bool is_static(const Stride &stride);
 bool is_static(const Layout &layout);
-bool is_static(const Coord &coord);
 bool is_static(const detail::RecursiveDimValue &value);
-size_t rank(const Shape &shape);
-size_t rank(const Stride &stride);
 size_t rank(const Layout &layout);
-size_t rank(const Coord &coord);
 size_t rank(const detail::RecursiveDimValue &value);
 int64_t static_size(const detail::RecursiveDimValue &value);
-int64_t static_size(const Shape &shape);
-int64_t static_size(const Shape &shape, size_t index);
-int64_t static_size(const Stride &stride);
-int64_t static_size(const Stride &stride, size_t index);
 int64_t static_size(const Layout &layout);
 int64_t static_size(const Layout &layout, size_t index);
 Layout coalesce(const Layout &layout);
-Shape flatten(const Shape &shape);
-Stride flatten(const Stride &stride);
 Layout flatten(const Layout &layout);
 Layout make_layout(std::vector<Layout> lys);
-Shape reverse(const Shape &shape);
-Stride reverse(const Stride &stride);
 Layout reverse(const Layout &layout);
-Shape take(int begin, int end, const Shape &shape);
-Stride take(int begin, int end, const Stride &stride);
 Layout take(int begin, int end, const Layout &layout);
 Coord idx2crd(int64_t index, const Shape &shape);
+
+template <SequenceKind K>
+size_t depth(const DimSequence<K> &v) {
+  return v.getDepth();
+}
+template <SequenceKind K>
+int64_t get_divisibility(const DimSequence<K> &v) {
+  return v.getDivisibility();
+}
+template <SequenceKind K>
+bool has_error(const DimSequence<K> &v) {
+  return v.hasError();
+}
+template <SequenceKind K>
+bool is_static(const DimSequence<K> &v) {
+  return v.isStatic();
+}
+template <SequenceKind K>
+size_t rank(const DimSequence<K> &v) {
+  return v.getValues().size();
+}
+template <SequenceKind K>
+int64_t static_size(const DimSequence<K> &v) {
+  return v.staticSize();
+}
+template <SequenceKind K>
+int64_t static_size(const DimSequence<K> &v, size_t index) {
+  assert(index < rank(v));
+  return static_size(v[index]);
+}
+template <SequenceKind K>
+DimSequence<K> flatten(const DimSequence<K> &v) {
+  return v.flattened();
+}
+template <SequenceKind K>
+DimSequence<K> reverse(const DimSequence<K> &v) {
+  return v.reversed();
+}
+template <SequenceKind K>
+DimSequence<K> take(int begin, int end, const DimSequence<K> &v) {
+  return v.taken(begin, end);
+}
 
 namespace detail {
 bool has_error(const DimValue &dim);
@@ -725,12 +508,13 @@ bool is_congruent(const Lhs &lhs, const Rhs &rhs) {
 
   const auto &lhsProfile = getProfile(lhs);
   const auto &rhsProfile = getProfile(rhs);
-  if (lhsProfile.scalarRoot != rhsProfile.scalarRoot ||
-      lhsProfile.values.size() != rhsProfile.values.size()) {
+  if (lhsProfile.isScalar() != rhsProfile.isScalar() ||
+      lhsProfile.getValues().size() != rhsProfile.getValues().size()) {
     return false;
   }
-  for (size_t i = 0, e = lhsProfile.values.size(); i < e; ++i) {
-    if (!detail::is_congruent(lhsProfile.values[i], rhsProfile.values[i])) {
+  for (size_t i = 0, e = lhsProfile.getValues().size(); i < e; ++i) {
+    if (!detail::is_congruent(lhsProfile.getValues()[i],
+                              rhsProfile.getValues()[i])) {
       return false;
     }
   }

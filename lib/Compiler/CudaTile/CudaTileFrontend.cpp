@@ -3,7 +3,7 @@
 
 #include "tensor_ir/Compiler/CudaTile/CudaTileFrontend.h"
 
-#include "tensor_ir/Compiler/CudaTile/KernelArgLayout.h"
+#include "tensor_ir/Compiler/CudaTile/KernelMetadataExtraction.h"
 #include "tensor_ir/Compiler/CudaTile/Pipelines.h"
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTile.h"
 #include "tensor_ir/Dialect/TensorIR.h"
@@ -16,12 +16,14 @@
 #include "mlir/Pass/PassManager.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 
 namespace tcg = mlir::nv_tensor_ir::tcutegen;
@@ -62,9 +64,9 @@ static bool isSupportedTensorIrOp(mlir::Operation *op) {
       arith::ConstantOp>(op);
 }
 
-static bool runStaticPreChecks(
-    mlir::nv_tensor_ir::GraphOp graphOp,
-    const mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions &options) {
+static bool
+runStaticPreChecks(mlir::nv_tensor_ir::GraphOp graphOp,
+                   const mlir::nv_tensor_ir::CompilerInvocation &options) {
   bool supported = true;
   graphOp.walk([&](mlir::Operation *op) {
     if (!isSupportedTensorIrOp(op)) {
@@ -77,21 +79,25 @@ static bool runStaticPreChecks(
     return false;
   }
 
-  if (options.numCTAs < 1 || options.numCTAs > 8) {
+  if (options.codegen.ctaCount < 1 || options.codegen.ctaCount > 8) {
     return false;
   }
-  if (options.numWarps < 1) {
+  if (options.cudaTile.warpCount < 1) {
     return false;
   }
-  if (options.maxCandidates < 0) {
+  if (options.cudaTile.maxTileCandidates < 0) {
     return false;
   }
   return true;
 }
 
-static bool usesRuntimeGrid(const ::tensor_ir::rt::KernelArgLayout &layout) {
-  for (const auto &desc : layout.tensorDescs) {
-    for (int64_t dim : desc.staticShape) {
+static bool usesRuntimeGrid(llvm::ArrayRef<::tensor_ir::rt::ArgDesc> args) {
+  for (const auto &arg : args) {
+    const auto *desc = std::get_if<::tensor_ir::rt::TensorArgDesc>(&arg);
+    if (!desc) {
+      continue;
+    }
+    for (int64_t dim : desc->shape()) {
       if (dim == ::tensor_ir::rt::TensorArgDesc::kDynamic) {
         return true;
       }
@@ -100,13 +106,19 @@ static bool usesRuntimeGrid(const ::tensor_ir::rt::KernelArgLayout &layout) {
   return false;
 }
 
-static bool isStaticPersistenceActive(
-    llvm::ArrayRef<int64_t> iterationShape, llvm::ArrayRef<int32_t> tileSizes,
-    const mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions &options) {
+static bool usesRuntimeGrid(const ::tensor_ir::rt::KernelMetadata &layout) {
+  return usesRuntimeGrid(layout.args);
+}
+
+static bool
+isStaticPersistenceActive(llvm::ArrayRef<int64_t> iterationShape,
+                          llvm::ArrayRef<int32_t> tileSizes,
+                          const mlir::nv_tensor_ir::CudaTileOptions &options) {
   using namespace mlir::nv_tensor_ir;
 
-  if (options.persistence != PersistenceMode::Static || options.smCount <= 0 ||
-      options.occupancy <= 0 || iterationShape.size() != tileSizes.size()) {
+  if (options.persistenceMode != PersistenceMode::Static ||
+      options.smCount <= 0 || options.occupancy <= 0 ||
+      iterationShape.size() != tileSizes.size()) {
     return false;
   }
   if (llvm::any_of(iterationShape, [](int64_t dim) {
@@ -139,9 +151,9 @@ static bool isStaticPersistenceActive(
 
 static mlir::LogicalResult configureLayoutPropGridMetadata(
     mlir::nv_tensor_ir::GraphOp graphOp,
-    ::tensor_ir::rt::KernelArgLayout &argLayout,
+    ::tensor_ir::rt::KernelMetadataBuilder &argLayout,
     llvm::SmallVectorImpl<int64_t> &resolvedIterationSpaceShape,
-    const mlir::nv_tensor_ir::TensorToCudaTilePipelineOptions &options) {
+    const mlir::nv_tensor_ir::CudaTileOptions &options) {
   using namespace mlir::nv_tensor_ir;
   using ::tensor_ir::rt::TensorArgDesc;
 
@@ -175,7 +187,7 @@ static mlir::LogicalResult configureLayoutPropGridMetadata(
     argLayout.occupancy = options.occupancy;
   }
 
-  if (!usesRuntimeGrid(argLayout)) {
+  if (!usesRuntimeGrid(argLayout.args)) {
     return mlir::success();
   }
 
@@ -186,11 +198,11 @@ static mlir::LogicalResult configureLayoutPropGridMetadata(
         "failed to read output descriptors for runtime grid computation");
   }
 
-  int32_t tensorDescIdx = argLayout.outputTensorStartIdx();
-  TensorType outputType;
+  int32_t tensorDescIdx = argLayout.numInputs;
+  mlir::RankedTensorType outputType;
   const TensorDescriptor *outputDesc = nullptr;
   for (auto [idx, type] : llvm::enumerate(graphOp.getResultTypes())) {
-    auto tensorType = mlir::dyn_cast<TensorType>(type);
+    auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
     if (!tensorType) {
       if (type.isIntOrFloat()) {
         ++tensorDescIdx;
@@ -205,7 +217,7 @@ static mlir::LogicalResult configureLayoutPropGridMetadata(
     break;
   }
   if (!outputType || !outputDesc ||
-      tensorDescIdx >= static_cast<int32_t>(argLayout.tensorDescs.size())) {
+      tensorDescIdx >= static_cast<int32_t>(argLayout.args.size())) {
     return graphOp.emitError(
         "runtime grid computation requires a ranked output tensor");
   }
@@ -233,9 +245,13 @@ static mlir::LogicalResult configureLayoutPropGridMetadata(
         "failed to map the output shape to the runtime iteration space");
   }
 
-  const auto &shapeDesc = argLayout.tensorDescs[tensorDescIdx];
+  const auto *shapeDesc =
+      std::get_if<TensorArgDesc>(&argLayout.args[tensorDescIdx]);
+  if (!shapeDesc) {
+    return graphOp.emitError("grid shape requires a tensor argument");
+  }
   llvm::SmallVector<int32_t> dynamicShapeDims;
-  for (auto [dim, size] : llvm::enumerate(shapeDesc.staticShape)) {
+  for (auto [dim, size] : llvm::enumerate(shapeDesc->shape())) {
     if (size == TensorArgDesc::kDynamic) {
       dynamicShapeDims.push_back(static_cast<int32_t>(dim));
     }
@@ -292,8 +308,7 @@ getCudaTileEntryFunctionName(mlir::Operation *op,
 
 static void configureDebugInstrumentation(
     mlir::ModuleOp module, mlir::PassManager &pm,
-    const mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendDebugOptions
-        &debug,
+    const ::mlir::nv_tensor_ir::CompilerDebugOptions &debug,
     llvm::StringRef pipelineName) {
   if (debug.printIRAfterAll || !debug.printIRTreeDir.empty()) {
     module->getContext()->disableMultithreading();
@@ -352,18 +367,20 @@ static void configureDebugInstrumentation(
 }
 
 template <typename PopulatePipeline>
-static mlir::LogicalResult runPipeline(
-    mlir::ModuleOp module,
-    const mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions
-        &options,
-    llvm::StringRef pipelineName, PopulatePipeline &&populatePipeline) {
+static mlir::LogicalResult
+runPipeline(mlir::ModuleOp module,
+            const mlir::nv_tensor_ir::CompilerInvocation &options,
+            mlir::TimingScope *timingParent, llvm::StringRef timingName,
+            PopulatePipeline &&populatePipeline) {
   mlir::TimingScope timing =
-      options.timing ? options.timing->nest(pipelineName) : mlir::TimingScope();
+      timingParent ? timingParent->nest(timingName) : mlir::TimingScope();
   mlir::PassManager pm(module->getContext());
-  populatePipeline(pm);
-
-  configureDebugInstrumentation(module, pm, options.debug, pipelineName);
-  if (options.timing) {
+  auto status = populatePipeline(pm);
+  if (!status.ok()) {
+    return module.emitError(status.message());
+  }
+  configureDebugInstrumentation(module, pm, options.debug, timingName);
+  if (timingParent) {
     pm.enableTiming(timing);
   } else if (options.debug.enableTiming) {
     pm.enableTiming();
@@ -371,14 +388,12 @@ static mlir::LogicalResult runPipeline(
   return pm.run(module);
 }
 
-static mlir::FailureOr<mlir::nv_tensor_ir::GraphOp> getSupportedGraph(
-    mlir::ModuleOp module,
-    const mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions
-        &options) {
+static mlir::FailureOr<mlir::nv_tensor_ir::GraphOp>
+getSupportedGraph(mlir::ModuleOp module,
+                  const mlir::nv_tensor_ir::CompilerInvocation &options) {
   llvm::SmallVector<mlir::nv_tensor_ir::GraphOp> graphOps;
   module.walk([&](mlir::nv_tensor_ir::GraphOp op) { graphOps.push_back(op); });
-  if (graphOps.size() != 1 ||
-      !runStaticPreChecks(graphOps.front(), options.pipelineOptions)) {
+  if (graphOps.size() != 1 || !runStaticPreChecks(graphOps.front(), options)) {
     return mlir::failure();
   }
   return graphOps.front();
@@ -386,71 +401,77 @@ static mlir::FailureOr<mlir::nv_tensor_ir::GraphOp> getSupportedGraph(
 
 static mlir::LogicalResult runLayoutPropagationLowering(
     mlir::ModuleOp module,
-    const mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions
-        &options) {
+    const mlir::nv_tensor_ir::CompilerInvocation &options,
+    mlir::TimingScope *timing,
+    const std::function<void(mlir::ModuleOp)> &onTensorIRReady) {
   using namespace mlir::nv_tensor_ir;
 
-  if (failed(runPipeline(module, options, "Analyze TensorIR graph",
+  if (failed(runPipeline(module, options, timing, "Analyze TensorIR graph",
                          [&](mlir::PassManager &pm) {
-                           buildGraphAnalysisPipeline(pm,
-                                                      options.pipelineOptions);
+                           return buildGraphAnalysisPipeline(pm, options);
                          }))) {
     return mlir::failure();
   }
-  if (failed(runPipeline(
-          module, options, "Select tile", [&](mlir::PassManager &pm) {
-            buildTileSelectionPipeline(pm, options.pipelineOptions);
-          }))) {
+  if (failed(runPipeline(module, options, timing, "Select tile",
+                         [&](mlir::PassManager &pm) {
+                           buildTileSelectionPipeline(pm, options);
+                           return mlir::nv_tensor_ir::Status::Ok();
+                         }))) {
     return mlir::failure();
   }
 
-  if (options.onTensorIRReady) {
-    options.onTensorIRReady(module);
+  if (onTensorIRReady) {
+    onTensorIRReady(module);
   }
-  if (failed(runPipeline(module, options, "Form TensorIR tiled program",
+  if (failed(runPipeline(module, options, timing, "Form TensorIR tiled program",
                          [&](mlir::PassManager &pm) {
-                           buildTensorIRTiledProgramFormationPipeline(
-                               pm, options.pipelineOptions);
+                           buildTensorIRTiledProgramFormationPipeline(pm,
+                                                                      options);
+                           return mlir::nv_tensor_ir::Status::Ok();
                          }))) {
     return mlir::failure();
   }
-  if (failed(runPipeline(module, options, "Outline TensorIR kernel",
+  if (failed(runPipeline(module, options, timing, "Outline TensorIR kernel",
                          [&](mlir::PassManager &pm) {
                            buildTensorIRKernelOutliningPipeline(pm);
+                           return mlir::nv_tensor_ir::Status::Ok();
                          }))) {
     return mlir::failure();
   }
-  return runPipeline(module, options, "Lower TensorIR to CudaTile",
+  return runPipeline(module, options, timing, "Lower TensorIR to CudaTile",
                      [&](mlir::PassManager &pm) {
-                       buildTensorToCudaTileConversionOnlyPipeline(
-                           pm, options.pipelineOptions);
+                       buildTensorToCudaTileConversionOnlyPipeline(pm, options);
+                       return mlir::nv_tensor_ir::Status::Ok();
                      });
 }
 
 static mlir::LogicalResult runAffineMapLowering(
     mlir::ModuleOp module,
-    const mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions
-        &options) {
-  if (options.onTensorIRReady) {
-    options.onTensorIRReady(module);
+    const mlir::nv_tensor_ir::CompilerInvocation &options,
+    mlir::TimingScope *timing,
+    const std::function<void(mlir::ModuleOp)> &onTensorIRReady) {
+  if (onTensorIRReady) {
+    onTensorIRReady(module);
   }
   return runPipeline(
-      module, options, "Lower TensorIR to CudaTile",
+      module, options, timing, "Lower TensorIR to CudaTile",
       [&](mlir::PassManager &pm) {
-        mlir::nv_tensor_ir::buildTensorToCudaTileConversionPipeline(
-            pm, options.pipelineOptions);
+        return mlir::nv_tensor_ir::buildTensorToCudaTileConversionPipeline(
+            pm, options);
       });
 }
 
 static mlir::LogicalResult runTensorIRLowering(
     mlir::ModuleOp module,
-    const mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendOptions
-        &options) {
-  if (options.pipelineOptions.codegenStrategy ==
+    const mlir::nv_tensor_ir::CompilerInvocation &options,
+    mlir::TimingScope *timing,
+    const std::function<void(mlir::ModuleOp)> &onTensorIRReady) {
+  if (options.cudaTile.codegenStrategy ==
       mlir::nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation) {
-    return runLayoutPropagationLowering(module, options);
+    return runLayoutPropagationLowering(module, options, timing,
+                                        onTensorIRReady);
   }
-  return runAffineMapLowering(module, options);
+  return runAffineMapLowering(module, options, timing, onTensorIRReady);
 }
 
 static std::string getRuntimeKernelName(mlir::ModuleOp module) {
@@ -459,20 +480,20 @@ static std::string getRuntimeKernelName(mlir::ModuleOp module) {
   return moduleName ? moduleName.getValue().str() : "tensor_ir_rtk";
 }
 
-static void resolveFrontendMetadata(
-    mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendResult &result) {
+static void
+resolveFrontendMetadata(mlir::ModuleOp module,
+                        ::tensor_ir::rt::KernelMetadataBuilder &argLayout) {
   using namespace mlir::nv_tensor_ir;
 
-  if (result.argLayout.tileSizes.empty()) {
-    if (auto tileSizeAttr = result.module->getOperation()
-                                ->getAttrOfType<mlir::DenseI32ArrayAttr>(
-                                    kResolvedTileSizeAttrName)) {
+  if (argLayout.tileSizes.empty()) {
+    if (auto tileSizeAttr = module->getAttrOfType<mlir::DenseI32ArrayAttr>(
+            kResolvedTileSizeAttrName)) {
       llvm::ArrayRef<int32_t> tileSizes = tileSizeAttr.asArrayRef();
-      result.argLayout.tileSizes.assign(tileSizes.begin(), tileSizes.end());
+      argLayout.tileSizes.assign(tileSizes.begin(), tileSizes.end());
     }
   }
 
-  result.module->getOperation()->removeAttr(kResolvedTileSizeAttrName);
+  module->removeAttr(kResolvedTileSizeAttrName);
 }
 
 static llvm::ArrayRef<int64_t> getStaticGridShape(
@@ -484,11 +505,12 @@ static llvm::ArrayRef<int64_t> getStaticGridShape(
 
   int32_t shapeTensorIdx = result.argLayout.gridShapeTensorIdx;
   if (shapeTensorIdx < 0 ||
-      shapeTensorIdx >=
-          static_cast<int32_t>(result.argLayout.tensorDescs.size())) {
+      shapeTensorIdx >= static_cast<int32_t>(result.argLayout.args.size())) {
     return {};
   }
-  return result.argLayout.tensorDescs[shapeTensorIdx].staticShape;
+  const auto *desc = std::get_if<::tensor_ir::rt::TensorArgDesc>(
+      &result.argLayout.args[shapeTensorIdx]);
+  return desc ? desc->shape() : llvm::ArrayRef<int64_t>();
 }
 
 static mlir::LogicalResult validateStaticGridMetadata(
@@ -504,10 +526,9 @@ static mlir::LogicalResult validateStaticGridMetadata(
   return mlir::success();
 }
 
-static void dumpCudaTileIR(
-    mlir::ModuleOp module,
-    const mlir::nv_tensor_ir::compiler::cuda_tile::CudaTileFrontendDebugOptions
-        &debug) {
+static void
+dumpCudaTileIR(mlir::ModuleOp module,
+               const ::mlir::nv_tensor_ir::CompilerDebugOptions &debug) {
   if (debug.printCudaTileIR) {
     llvm::errs() << "// -----// Dumped CudaTile IR //----- //\n";
     module.print(llvm::errs());
@@ -531,34 +552,33 @@ static void dumpCudaTileIR(
 namespace mlir::nv_tensor_ir::compiler::cuda_tile {
 
 bool isCudaTileFrontendSupported(ModuleOp module,
-                                 const CudaTileFrontendOptions &options) {
+                                 const CompilerInvocation &options) {
   return succeeded(getSupportedGraph(module, options));
 }
 
 FailureOr<CudaTileFrontendResult>
-lowerTensorIRToCudaTile(ModuleOp module,
-                        const CudaTileFrontendOptions &options) {
+lowerTensorIRToCudaTile(ModuleOp module, const CompilerInvocation &options,
+                        TimingScope *timing,
+                        std::function<void(ModuleOp)> onTensorIRReady) {
   FailureOr<GraphOp> graph = getSupportedGraph(module, options);
   if (failed(graph)) {
     return failure();
   }
 
-  FailureOr<::tensor_ir::rt::KernelArgLayout> argLayout =
-      ::tensor_ir::extractKernelArgLayout(*graph, options.pipelineOptions);
+  FailureOr<::tensor_ir::rt::KernelMetadata> argLayout =
+      extractKernelMetadata(*graph, options.codegen, options.cudaTile);
   if (failed(argLayout)) {
     return failure();
   }
 
-  CudaTileFrontendResult result;
-  result.runtimeKernelName = getRuntimeKernelName(module);
-  result.argLayout = *argLayout;
-  result.module = OwningOpRef<ModuleOp>(module.clone());
+  ::tensor_ir::rt::KernelMetadataBuilder layoutBuilder = argLayout->toBuilder();
+  OwningOpRef<ModuleOp> frontendModule(module.clone());
+  SmallVector<int64_t> resolvedIterationSpaceShape;
 
-  CudaTileFrontendOptions loweringOptions = options;
   LogicalResult gridMetadataStatus = success();
-  if (options.pipelineOptions.codegenStrategy ==
+  if (options.cudaTile.codegenStrategy ==
       CudaTileCodegenStrategy::LayoutPropagation) {
-    loweringOptions.onTensorIRReady = [&](ModuleOp analyzedModule) {
+    std::function<void(ModuleOp)> loweringHook = [&](ModuleOp analyzedModule) {
       auto graphOps = analyzedModule.getOps<GraphOp>();
       if (!llvm::hasSingleElement(graphOps)) {
         analyzedModule.emitError(
@@ -566,21 +586,37 @@ lowerTensorIRToCudaTile(ModuleOp module,
         gridMetadataStatus = failure();
       } else {
         gridMetadataStatus = configureLayoutPropGridMetadata(
-            *graphOps.begin(), result.argLayout,
-            result.resolvedIterationSpaceShape, options.pipelineOptions);
+            *graphOps.begin(), layoutBuilder, resolvedIterationSpaceShape,
+            options.cudaTile);
       }
-      if (options.onTensorIRReady) {
-        options.onTensorIRReady(analyzedModule);
+      if (onTensorIRReady) {
+        onTensorIRReady(analyzedModule);
       }
     };
-  }
-
-  if (failed(runTensorIRLowering(*result.module, loweringOptions)) ||
-      failed(gridMetadataStatus)) {
+    if (failed(runTensorIRLowering(*frontendModule, options, timing,
+                                   loweringHook))) {
+      return failure();
+    }
+  } else if (failed(runTensorIRLowering(*frontendModule, options, timing,
+                                        onTensorIRReady))) {
     return failure();
   }
 
-  resolveFrontendMetadata(result);
+  if (failed(gridMetadataStatus)) {
+    return failure();
+  }
+
+  resolveFrontendMetadata(*frontendModule, layoutBuilder);
+  auto validatedLayout =
+      ::tensor_ir::rt::KernelMetadata::create(std::move(layoutBuilder));
+  if (!validatedLayout.ok()) {
+    frontendModule->emitError() << validatedLayout.status().message();
+    return failure();
+  }
+  CudaTileFrontendResult result(std::move(*validatedLayout));
+  result.runtimeKernelName = getRuntimeKernelName(module);
+  result.module = std::move(frontendModule);
+  result.resolvedIterationSpaceShape = std::move(resolvedIterationSpaceShape);
   dumpCudaTileIR(*result.module, options.debug);
   result.useRuntimeGrid = usesRuntimeGrid(result.argLayout);
   if (!result.useRuntimeGrid && failed(validateStaticGridMetadata(result))) {

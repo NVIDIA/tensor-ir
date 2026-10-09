@@ -95,14 +95,14 @@ static FailureOr<DimSize> getElementSizeBytesForSource(GraphOp graphOp,
     auto resTypes = graphOp.getResultTypes();
     size_t resIdx = static_cast<size_t>(tid) - argTypes.size();
     if (resIdx < resTypes.size()) {
-      if (auto tensorType = dyn_cast<TensorType>(resTypes[resIdx])) {
+      if (auto tensorType = dyn_cast<RankedTensorType>(resTypes[resIdx])) {
         unsigned bits = tensorType.getElementType().getIntOrFloatBitWidth();
         return static_cast<DimSize>(std::max(1u, bits / CHAR_BIT));
       }
     }
     return failure();
   }
-  auto tensorType = dyn_cast<TensorType>(argTypes[tid]);
+  auto tensorType = dyn_cast<RankedTensorType>(argTypes[tid]);
   if (!tensorType) {
     return failure();
   }
@@ -283,7 +283,7 @@ FailureOr<IterationSpaceInfo> extractIterationSpace(GraphOp graphOp) {
     }
 
     if (!resTypes.empty() && !resultDescriptors->empty()) {
-      if (auto tensorType = dyn_cast<TensorType>(resTypes[0])) {
+      if (auto tensorType = dyn_cast<RankedTensorType>(resTypes[0])) {
         unsigned bits = tensorType.getElementType().getIntOrFloatBitWidth();
         DimSize outputElemBytes =
             static_cast<DimSize>(std::max(1u, bits / CHAR_BIT));

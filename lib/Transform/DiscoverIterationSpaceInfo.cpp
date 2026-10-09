@@ -136,7 +136,7 @@ void IterationSpaceDiscoverer::propagateIterSpaceIdsAndCanonicalDimDomains() {
   // iteration space dimensions.
   for (auto arg : graphOp.getArguments()) {
     valueToIterSpaceIds[arg] = 0;
-    auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(arg.getType());
+    auto tensorType = dyn_cast<RankedTensorType>(arg.getType());
     // Scalar graph arguments participate as values but have no tensor
     // dimensions to track.
     valueToDimStates[arg] = SmallVector<DimState>(
@@ -188,7 +188,7 @@ void IterationSpaceDiscoverer::propagateIterSpaceIdsAndCanonicalDimDomains() {
 
     // 2. Mark dimensions based on this operation's input shapes.
     for (auto [operandIdx, operand] : llvm::enumerate(op->getOperands())) {
-      auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(operand.getType());
+      auto tensorType = dyn_cast<RankedTensorType>(operand.getType());
       if (!tensorType) {
         continue;
       }
@@ -295,7 +295,7 @@ void IterationSpaceDiscoverer::discoverIterSpacesAndTransitions() {
   // assigned to the first iteration space since they're only used in results,
   // at best.
   for (auto [idx, arg] : llvm::enumerate(graphOp.getArguments())) {
-    auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(arg.getType());
+    auto tensorType = dyn_cast<RankedTensorType>(arg.getType());
     if (!tensorType) {
       continue;
     }
@@ -345,7 +345,7 @@ void IterationSpaceDiscoverer::refineDimensionDomains() {
   // maps.
   for (auto [idx, arg] : llvm::enumerate(graphOp.getArguments())) {
     // Only tensor arguments carry iteration-space attributes.
-    if (!isa<nv_tensor_ir::TensorType>(arg.getType())) {
+    if (!isa<RankedTensorType>(arg.getType())) {
       continue;
     }
 
@@ -410,7 +410,7 @@ void IterationSpaceDiscoverer::refineDimensionDomains() {
 
     // Then, check input shapes for dimensions this operation uses.
     for (auto [operandIdx, operand] : llvm::enumerate(op->getOperands())) {
-      auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(operand.getType());
+      auto tensorType = dyn_cast<RankedTensorType>(operand.getType());
       if (!tensorType) {
         continue;
       }
@@ -475,7 +475,7 @@ static void computeDefaultIterSpaceAttrsForEmptyGraphOp(GraphOp graphOp) {
   SmallVector<std::pair<unsigned, int64_t>> tensorArgs;
   int64_t maxRank = 0;
   for (auto [idx, arg] : llvm::enumerate(graphOp.getArguments())) {
-    if (auto tensorType = dyn_cast<nv_tensor_ir::TensorType>(arg.getType())) {
+    if (auto tensorType = dyn_cast<RankedTensorType>(arg.getType())) {
       tensorArgs.emplace_back(idx, tensorType.getRank());
       maxRank = std::max(maxRank, tensorType.getRank());
     }
@@ -535,7 +535,7 @@ static void propagateMapToValue(AffineMap map, Value value) {
   // Set attribute on block arguments.
   auto blockArg = cast<BlockArgument>(value);
   // Do not attach tensor iteration-space maps to scalar block arguments.
-  if (!isa<nv_tensor_ir::TensorType>(blockArg.getType())) {
+  if (!isa<RankedTensorType>(blockArg.getType())) {
     return;
   }
 
@@ -672,7 +672,7 @@ bool IterationSpaceDiscoverer::propagateForward() {
 /// Verify that all the block arguments have an iteration space map assigned.
 [[maybe_unused]] static LogicalResult verifyBlockArguments(GraphOp graphOp) {
   for (auto [i, arg] : llvm::enumerate(graphOp.getArguments())) {
-    if (!isa<nv_tensor_ir::TensorType>(arg.getType())) {
+    if (!isa<RankedTensorType>(arg.getType())) {
       continue;
     }
 

@@ -1,4 +1,4 @@
-// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,layout-propagation-annotation,layout-propagation-normalization,tile-selection,graph-splitting),tir-bufferize,func.func(tir-form-grid))' --split-input-file | FileCheck %s --implicit-check-not='layout =' --implicit-check-not='iteration_space' --implicit-check-not='tile_size' --implicit-check-not='result_views' --implicit-check-not='result_layouts' --implicit-check-not='nv_tensor_ir.iter_space'
+// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,layout-propagation-annotation,layout-propagation-normalization,tile-selection,graph-splitting),tir-bufferize,func.func(tir-form-grid))' --split-input-file | FileCheck %s --implicit-check-not='layout =' --implicit-check-not='iteration_space' --implicit-check-not='tile_size' --implicit-check-not='result_views' --implicit-check-not='result_layouts' --implicit-check-not='nv_tensor_ir.iter_space' --implicit-check-not='bufferization.'
 
 // CHECK-LABEL: func.func @pointwise_dispatch(
 //  CHECK-SAME: %[[LHS:[^:]+]]: memref<32x64xf32, strided<[64, 1]>, #ptr.generic_space>
@@ -207,40 +207,18 @@ func.func @dynamic_extent_from_later_output(
         #nv_tensor_ir.tensor_source<2, 0, "(?,32):(32,1)", [0]>],
       tile_size = array<i32: 4, 32>
     } {
-  %base_buffer, %offset, %sizes:2, %strides:2 =
-      memref.extract_strided_metadata %input
+  %tile = bufferization.to_tensor %input restrict
       : memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>
-      -> memref<f32, #ptr.generic_space>, index, index, index, index, index
-  %input_ptr = ptr.to_ptr %input
-      : memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>
-      -> <#ptr.generic_space>
-  %c0 = arith.constant 0 : index
-  %tile = nv_tensor_ir.load %input_ptr[%c0, %c0]
-      view offset: [0], sizes: [%sizes#0, 32], strides: [32, 1], alignment: 4
-      : !ptr.ptr<#ptr.generic_space> to tensor<?x32xf32>
+        to tensor<?x32xf32>
   %result = nv_tensor_ir.cos %tile {
       layout = #nv_tensor_ir.tensor_source<0, 0, "(?,32):(32,1)", [0]>,
       nv_tensor_ir.iter_space_id = 0 : i32} : tensor<?x32xf32>
-  %projected_base, %projected_offset, %projected_sizes:2,
-      %projected_strides:2 = memref.extract_strided_metadata %projected
-      : memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>
-      -> memref<f32, #ptr.generic_space>, index, index, index, index, index
-  %projected_ptr = ptr.to_ptr %projected
-      : memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>
-      -> <#ptr.generic_space>
-  nv_tensor_ir.store %result, %projected_ptr[%c0, %c0]
-      view offset: [0], sizes: [%projected_sizes#0, 32],
-      strides: [32, 1], alignment: 4
-      : tensor<?x32xf32>, !ptr.ptr<#ptr.generic_space>
-  %full_base, %full_offset, %full_sizes:2, %full_strides:2 =
-      memref.extract_strided_metadata %full
-      : memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>
-      -> memref<f32, #ptr.generic_space>, index, index, index, index, index
-  %full_ptr = ptr.to_ptr %full
-      : memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>
-      -> <#ptr.generic_space>
-  nv_tensor_ir.store %result, %full_ptr[%c0, %c0]
-      view offset: [0], sizes: [%full_sizes#0, 32], strides: [32, 1],
-      alignment: 4 : tensor<?x32xf32>, !ptr.ptr<#ptr.generic_space>
+  bufferization.materialize_in_destination %result in restrict writable
+      %projected : (tensor<?x32xf32>,
+                    memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>)
+                   -> ()
+  bufferization.materialize_in_destination %result in restrict writable %full
+      : (tensor<?x32xf32>,
+         memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>) -> ()
   return
 }

@@ -26,8 +26,7 @@ def TensorToCudaTileConversionPass : Pass<"convert-tensor-to-cuda-tile", "mlir::
         directly from the pass option.
 
     Option groups by strategy:
-      - Always read: `num-ctas`, `occupancy`, `num-warps`, and
-        `uniform-signature`.
+      - Always read: `num-ctas`, `occupancy`, `num-warps`.
       - `affine_map`-only: `tile-size`, `persistence`, and `sm-count`.
       - Tiling, reduction strip-mining, and layout-path persistence are owned by
         the preceding formation passes.
@@ -80,12 +79,6 @@ def TensorToCudaTileConversionPass : Pass<"convert-tensor-to-cuda-tile", "mlir::
            )}]>,
     Option<"sm_count", "sm-count", "int32_t", /*default=*/"0",
            "Runtime SM count for affine-map persistent kernels. Required for static persistence mode.">,
-    Option<"uniform_signature", "uniform-signature", "bool",
-           /*default=*/"false",
-           "When true, the kernel signature always includes arguments for "
-           "ALL tensor sizes and strides, even for statically-known "
-           "dimensions (uniform layout). When false, only dynamic dims "
-           "produce kernel arguments (original behavior).">,
     ListOption<"tile_size", "tile-size", "int32_t",
                "A list of integers for affine-map tile selection.">,
   ];

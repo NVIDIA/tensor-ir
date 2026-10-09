@@ -17,10 +17,11 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <random>
-#include <sstream>
+#include <utility>
 
 namespace mlir::nv_tensor_ir::reference {
 
@@ -37,16 +38,7 @@ static StatusOr<double> getScalarConstantValue(mlir::Attribute attr,
       return Status::InvalidArgument(
           "Only scalar or splat dense constants are supported");
     }
-    if (denseAttr.getElementType().isInteger()) {
-      const llvm::APInt &intValue = denseAttr.getSplatValue<llvm::APInt>();
-      return isUnsignedIntegerDataType(dtype)
-                 ? static_cast<double>(intValue.getZExtValue())
-                 : static_cast<double>(intValue.getSExtValue());
-    }
-    if (denseAttr.getElementType().isFloat()) {
-      return denseAttr.getSplatValue<llvm::APFloat>().convertToDouble();
-    }
-    return Status::InvalidArgument("Unsupported dense constant element type");
+    attr = denseAttr.getSplatValue<Attribute>();
   }
 
   if (auto floatAttr = llvm::dyn_cast<mlir::FloatAttr>(attr)) {
@@ -74,455 +66,215 @@ void ReferenceGraph::clear() {
 // Graph Construction
 // ============================================================================
 
-Status ReferenceGraph::buildFromMLIR(mlir::ModuleOp module) {
-  clear();
+namespace {
 
-  // First pass: Create input/output tensors from graph signature
-  Status status = createIOTensor(module);
-  if (!status.ok()) {
-    return status;
-  }
-
-  // Second pass: Walk through all operations to build the computational graph
-  Status buildStatus = Status::Ok();
-  auto walkResult = module.walk([&](mlir::Operation *op) {
-    // Skip module and function operations
-    if (llvm::isa<mlir::ModuleOp>(op)) {
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.graph (function-like operation)
-    if (llvm::isa<nv_tensor_ir::GraphOp>(op)) {
-      // This is the graph definition, skip it but process its body
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.constant
-    if (llvm::isa<nv_tensor_ir::ConstantOp>(op)) {
-      Status status = createConstantNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create constant node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.splat
-    if (llvm::isa<nv_tensor_ir::SplatOp>(op)) {
-      Status status = createSplatNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create splat node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.iota
-    if (llvm::isa<nv_tensor_ir::IotaOp>(op)) {
-      Status status = createIotaNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create iota node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.reduce
-    if (llvm::isa<nv_tensor_ir::ReduceOp>(op)) {
-      Status status = createReduceNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create reduce node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.matmul
-    if (llvm::isa<nv_tensor_ir::MatmulOp>(op)) {
-      Status status = createMatmulNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create matmul node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    auto handleBinaryPointwise = [&](BinaryPointwiseMode mode) {
-      Status status = createBinaryPointwiseNode(op, mode);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create "
-                     << op->getName().getStringRef().str()
-                     << " node: " << status.message() << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    };
-
-#define HANDLE_BINARY_PW(OpType, mode)                                         \
-  if (llvm::isa<nv_tensor_ir::OpType>(op))                                     \
-    return handleBinaryPointwise(BinaryPointwiseMode::mode);
-
-    HANDLE_BINARY_PW(AddOp, ADD)
-    HANDLE_BINARY_PW(SubOp, SUB)
-    HANDLE_BINARY_PW(MulOp, MUL)
-    HANDLE_BINARY_PW(DivOp, DIV)
-    HANDLE_BINARY_PW(MaxOp, MAX)
-    HANDLE_BINARY_PW(MinOp, MIN)
-    HANDLE_BINARY_PW(PowOp, POW)
-    HANDLE_BINARY_PW(Atan2Op, ATAN2)
-    HANDLE_BINARY_PW(ModOp, MOD)
-    HANDLE_BINARY_PW(RemOp, REM)
-    HANDLE_BINARY_PW(AddSquareOp, ADD_SQUARE)
-    HANDLE_BINARY_PW(ReluBwdOp, RELU_BWD)
-    HANDLE_BINARY_PW(GeluBwdOp, GELU_BWD)
-    HANDLE_BINARY_PW(SigmoidBwdOp, SIGMOID_BWD)
-    HANDLE_BINARY_PW(TanhBwdOp, TANH_BWD)
-    HANDLE_BINARY_PW(GeluApproxTanhBwdOp, GELU_APPROX_TANH_BWD)
-    HANDLE_BINARY_PW(LogicalAndOp, LOGICAL_AND)
-    HANDLE_BINARY_PW(LogicalOrOp, LOGICAL_OR)
-
-#undef HANDLE_BINARY_PW
-
-    auto handleUnaryPointwise = [&](UnaryPointwiseMode mode) {
-      Status status = createUnaryPointwiseNode(op, mode);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create "
-                     << op->getName().getStringRef().str()
-                     << " node: " << status.message() << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    };
-
-#define HANDLE_UNARY_PW(OpType, mode)                                          \
-  if (llvm::isa<nv_tensor_ir::OpType>(op))                                     \
-    return handleUnaryPointwise(UnaryPointwiseMode::mode);
-
-    HANDLE_UNARY_PW(AbsOp, ABS)
-    HANDLE_UNARY_PW(CeilOp, CEIL)
-    HANDLE_UNARY_PW(CosOp, COS)
-    HANDLE_UNARY_PW(ErfOp, ERF)
-    HANDLE_UNARY_PW(ExpOp, EXP)
-    HANDLE_UNARY_PW(FloorOp, FLOOR)
-    HANDLE_UNARY_PW(GeluFwdOp, GELU_FWD)
-    HANDLE_UNARY_PW(LogOp, LOG)
-    HANDLE_UNARY_PW(NegOp, NEG)
-    HANDLE_UNARY_PW(ReluFwdOp, RELU_FWD)
-    HANDLE_UNARY_PW(SinOp, SIN)
-    HANDLE_UNARY_PW(SqrtOp, SQRT)
-    HANDLE_UNARY_PW(RsqrtOp, RSQRT)
-    HANDLE_UNARY_PW(TanOp, TAN)
-    HANDLE_UNARY_PW(TanhFwdOp, TANH_FWD)
-    HANDLE_UNARY_PW(ReciprocalOp, RECIPROCAL)
-    HANDLE_UNARY_PW(SigmoidFwdOp, SIGMOID)
-    HANDLE_UNARY_PW(GeluApproxTanhFwdOp, GELU_APPROX_TANH)
-    HANDLE_UNARY_PW(LogicalNotOp, LOGICAL_NOT)
-
-#undef HANDLE_UNARY_PW
-
-    auto handleParametricUnaryPointwise = [&](ParametricUnaryPointwiseMode mode,
-                                              double beta) {
-      Status status = createParametricUnaryPointwiseNode(op, mode, beta);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create "
-                     << op->getName().getStringRef().str()
-                     << " node: " << status.message() << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    };
-
-#define HANDLE_PARAMETRIC_UNARY_PW(OpType, mode)                               \
-  if (auto typedOp = llvm::dyn_cast<nv_tensor_ir::OpType>(op))                 \
-    return handleParametricUnaryPointwise(                                     \
-        ParametricUnaryPointwiseMode::mode,                                    \
-        typedOp.getBeta().convertToDouble());
-
-    HANDLE_PARAMETRIC_UNARY_PW(SoftplusFwdOp, SOFTPLUS_FWD)
-    HANDLE_PARAMETRIC_UNARY_PW(SwishFwdOp, SWISH_FWD)
-    HANDLE_PARAMETRIC_UNARY_PW(EluFwdOp, ELU_FWD)
-
-#undef HANDLE_PARAMETRIC_UNARY_PW
-
-    auto handleParametricBinaryPointwise =
-        [&](ParametricBinaryPointwiseMode mode, double beta) {
-          Status status = createParametricBinaryPointwiseNode(op, mode, beta);
-          if (!status.ok()) {
-            buildStatus = status;
-            llvm::errs() << "Failed to create "
-                         << op->getName().getStringRef().str()
-                         << " node: " << status.message() << "\n";
-            return mlir::WalkResult::interrupt();
-          }
-          return mlir::WalkResult::advance();
-        };
-
-#define HANDLE_PARAMETRIC_BINARY_PW(OpType, mode)                              \
-  if (auto typedOp = llvm::dyn_cast<nv_tensor_ir::OpType>(op))                 \
-    return handleParametricBinaryPointwise(                                    \
-        ParametricBinaryPointwiseMode::mode,                                   \
-        typedOp.getBeta().convertToDouble());
-
-    HANDLE_PARAMETRIC_BINARY_PW(SoftplusBwdOp, SOFTPLUS_BWD)
-    HANDLE_PARAMETRIC_BINARY_PW(SwishBwdOp, SWISH_BWD)
-    HANDLE_PARAMETRIC_BINARY_PW(EluBwdOp, ELU_BWD)
-
-#undef HANDLE_PARAMETRIC_BINARY_PW
-
-    // Handle nv_tensor_ir.cmp
-    if (llvm::isa<nv_tensor_ir::CmpOp>(op)) {
-      Status status = createCompareNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create cmp node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.binary_select
-    if (llvm::isa<nv_tensor_ir::BinarySelectOp>(op)) {
-      Status status = createBinarySelectNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create binary_select node: "
-                     << status.message() << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.convert
-    if (llvm::isa<nv_tensor_ir::ConvertOp>(op)) {
-      Status status = createConvertNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create convert node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.concatenate
-    if (llvm::isa<nv_tensor_ir::ConcatenateOp>(op)) {
-      Status status = createConcatenateNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create concatenate node: "
-                     << status.message() << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.slice
-    if (llvm::isa<nv_tensor_ir::SliceOp>(op)) {
-      Status status = createSliceNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create slice node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.reshape
-    if (llvm::isa<nv_tensor_ir::ReshapeOp>(op)) {
-      Status status = createReshapeNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create reshape node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.broadcast
-    if (llvm::isa<nv_tensor_ir::BroadcastOp>(op)) {
-      Status status = createBroadcastNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create broadcast node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.transpose
-    if (llvm::isa<nv_tensor_ir::TransposeOp>(op)) {
-      Status status = createTransposeNode(op);
-      if (!status.ok()) {
-        buildStatus = status;
-        llvm::errs() << "Failed to create transpose node: " << status.message()
-                     << "\n";
-        return mlir::WalkResult::interrupt();
-      }
-      return mlir::WalkResult::advance();
-    }
-
-    // Handle nv_tensor_ir.results (return operation)
-    if (llvm::isa<nv_tensor_ir::ResultsOp>(op)) {
-      // No node needed, just marks outputs
-      return mlir::WalkResult::advance();
-    }
-
-    buildStatus =
-        Status::NotSupported("Unsupported operation in reference graph: " +
-                             op->getName().getStringRef().str());
-    return mlir::WalkResult::interrupt();
-  });
-
-  if (walkResult.wasInterrupted()) {
-    return buildStatus;
-  }
-
-  return Status::Ok();
-}
-
-// ============================================================================
-// Stride Helpers
-// ============================================================================
-
-std::vector<int64_t>
-ReferenceGraph::resolveStrides(llvm::ArrayRef<int64_t> dims,
-                               llvm::ArrayRef<int64_t> stridePattern,
-                               llvm::ArrayRef<int64_t> userStrides) {
+StatusOr<std::vector<int64_t>>
+resolveStrides(llvm::ArrayRef<int64_t> dims,
+               llvm::ArrayRef<int64_t> stridePattern,
+               llvm::ArrayRef<int64_t> userStrides) {
   if (stridePattern.empty() || dims.size() != stridePattern.size()) {
-    return {};
+    return std::vector<int64_t>{};
   }
 
   std::vector<int64_t> resolved(stridePattern.begin(), stridePattern.end());
 
-  if (!userStrides.empty()) {
-    // Use explicit user-provided values for dynamic stride entries.
-    for (size_t d = 0, e = resolved.size(); d != e; ++d) {
-      if (resolved[d] == mlir::ShapedType::kDynamic) {
-        size_t idx = std::min(d, userStrides.size() - 1);
-        resolved[d] = userStrides[idx];
+  // Work backwards so inferred strides use the already resolved inner mode.
+  int64_t runningStride = 1;
+  for (size_t d = resolved.size(); d-- > 0;) {
+    if (resolved[d] == ShapedType::kDynamic) {
+      if (!userStrides.empty() && d >= userStrides.size()) {
+        return Status::InvalidArgument(
+            "Dynamic stride at position " + std::to_string(d) +
+            " has no corresponding --dynamic-strides value");
       }
+      resolved[d] = userStrides.empty() ? runningStride : userStrides[d];
     }
-  } else {
-    // Fallback: deduce contiguous (packed) strides from dims.
-    // Work from the last dimension inward (row-major).
-    int64_t runningStride = 1;
-    for (size_t reverseIdx = resolved.size(); reverseIdx > 0; --reverseIdx) {
-      size_t d = reverseIdx - 1;
-      if (resolved[d] == mlir::ShapedType::kDynamic) {
-        resolved[d] = runningStride;
-      }
+    if (userStrides.empty()) {
       runningStride = resolved[d] * dims[d];
     }
   }
   return resolved;
 }
 
-// ============================================================================
-// I/O Tensor Creation
-// ============================================================================
+void printTensorShape(llvm::ArrayRef<int64_t> dims) {
+  llvm::outs() << "[";
+  for (size_t i = 0, e = dims.size(); i != e; ++i) {
+    if (i > 0) {
+      llvm::outs() << ", ";
+    }
+    if (dims[i] == mlir::ShapedType::kDynamic) {
+      llvm::outs() << "dynamic";
+    } else {
+      llvm::outs() << dims[i];
+    }
+  }
+  llvm::outs() << "]";
+}
+
+std::vector<int64_t> parseTensorShape(mlir::Type mlirType) {
+  std::vector<int64_t> dims;
+
+  if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(mlirType)) {
+    llvm::ArrayRef<int64_t> shape = tensorType.getShape();
+    dims.assign(shape.begin(), shape.end());
+  }
+  // Scalar constants are represented as one-element internal tensors in the
+  // reference graph because SimplifiedTensor does not model rank-0 buffers.
+  else if (mlirType.isIntOrFloat()) {
+    dims.push_back(1);
+  }
+  // Unhandled type
+  else {
+    llvm::errs() << "Warning: Unhandled tensor type in parseTensorShape"
+                 << "\n";
+    return {};
+  }
+
+  // Check for dynamic dimensions (common for both types)
+  for (size_t i = 0, e = dims.size(); i != e; ++i) {
+    if (dims[i] == mlir::ShapedType::kDynamic) {
+      llvm::errs() << "Warning: Dynamic dimension found at position " << i
+                   << ", keeping as dynamic"
+                   << "\n";
+    }
+  }
+
+  return dims;
+}
+
+StatusOr<DataType> parseDataType(mlir::Type mlirType) {
+  // Get element type
+  mlir::Type elementType;
+
+  if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(mlirType)) {
+    elementType = tensorType.getElementType();
+  } else {
+    elementType = mlirType;
+  }
+
+  // Map MLIR types to DataType enum.
+  if (elementType.isF32()) {
+    return DataType::FLOAT32;
+  }
+  if (elementType.isF16()) {
+    return DataType::FLOAT16;
+  }
+  if (elementType.isBF16()) {
+    return DataType::BFLOAT16;
+  }
+  if (llvm::isa<mlir::Float8E4M3FNType>(elementType)) {
+    return DataType::F8E4M3FN;
+  }
+  if (llvm::isa<mlir::Float8E5M2Type>(elementType)) {
+    return DataType::F8E5M2;
+  }
+  if (llvm::isa<mlir::Float4E2M1FNType>(elementType)) {
+    return DataType::F4E2M1FN;
+  }
+  if (elementType.isF64()) {
+    return DataType::DOUBLE;
+  }
+  if (auto integerType = llvm::dyn_cast<mlir::IntegerType>(elementType)) {
+    if (integerType.getWidth() == 1) {
+      return DataType::BOOL;
+    }
+    if (integerType.getWidth() == 8) {
+      return integerType.isUnsigned() ? DataType::UINT8 : DataType::INT8;
+    }
+    if (integerType.getWidth() == 32) {
+      return integerType.isUnsigned() ? DataType::UINT32 : DataType::INT32;
+    }
+  }
+
+  std::string elementTypeString;
+  llvm::raw_string_ostream os(elementTypeString);
+  os << elementType;
+  os.flush();
+  return Status::NotSupported("Unsupported MLIR element type " +
+                              elementTypeString);
+}
+
+} // namespace
+
+Status ReferenceGraph::buildFromMLIR(mlir::ModuleOp module) {
+  TIR_RETURN_IF_ERROR(buildIOTensorsFromMLIR(module));
+  Status status;
+  module.walk([&](Operation *op) {
+    if (isa<ModuleOp, GraphOp, ResultsOp>(op)) {
+      return WalkResult::advance();
+    }
+    status = createNode(op);
+    if (!status.ok()) {
+      llvm::errs() << "Failed to create " << op->getName()
+                   << " node: " << status.message() << "\n";
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return status;
+}
+
+Status ReferenceGraph::buildIOTensorsFromMLIR(mlir::ModuleOp module) {
+  clear();
+  return createIOTensor(module);
+}
 
 Status ReferenceGraph::createIOTensor(mlir::ModuleOp module) {
-  llvm::outs() << "\n=== Graph Signature Analysis ==="
-               << "\n";
-
-  // Find graph and results operations in one pass
-  mlir::Operation *graphOp = nullptr;
-  mlir::Operation *resultsOp = nullptr;
-
-  module.walk([&](mlir::Operation *op) {
-    if (llvm::isa<nv_tensor_ir::GraphOp>(op)) {
-      graphOp = op;
-    } else if (llvm::isa<nv_tensor_ir::ResultsOp>(op)) {
-      resultsOp = op;
+  GraphOp graph;
+  ResultsOp results;
+  module.walk([&](Operation *op) {
+    if (auto typed = dyn_cast<GraphOp>(op)) {
+      graph = typed;
+    } else if (auto typed = dyn_cast<ResultsOp>(op)) {
+      results = typed;
     }
-    return mlir::WalkResult::advance();
   });
-
-  if (!graphOp) {
+  if (!graph) {
     return Status::InvalidArgument("No nv_tensor_ir.graph operation found");
   }
+  llvm::outs() << "\n=== Graph Signature Analysis ===\nGraph name: "
+               << graph->getName() << "\n";
 
-  llvm::outs() << "Graph name: " << graphOp->getName().getStringRef().str()
-               << "\n";
-
-  auto graph = llvm::cast<nv_tensor_ir::GraphOp>(graphOp);
-
-  // Process input tensors
-  if (graphOp->getNumRegions() > 0 && !graphOp->getRegion(0).empty()) {
-    mlir::Block &block = graphOp->getRegion(0).front();
-    llvm::outs() << "\nInput Tensors (" << block.getNumArguments() << "):"
-                 << "\n";
-
-    auto argDescriptors =
-        getTensorDescriptors(graph.getArgumentTypes(), graph.getAllArgAttrs());
-
-    for (unsigned i = 0; i < block.getNumArguments(); ++i) {
-      const TensorDescriptor &descriptor = (*argDescriptors)[i];
+  auto collect =
+      [&](ValueRange values, ArrayRef<Type> types, ArrayAttr attrs,
+          std::vector<std::shared_ptr<SimplifiedTensor>> &destination,
+          StringRef role) -> Status {
+    auto descriptors = getTensorDescriptors(types, attrs);
+    if (failed(descriptors)) {
+      return Status::InvalidArgument(role.str() +
+                                     " tensor descriptor parsing failed");
+    }
+    if (descriptors->size() != values.size()) {
+      return Status::InvalidArgument(
+          role.str() + " tensor descriptor count mismatch: expected " +
+          std::to_string(values.size()) + ", got " +
+          std::to_string(descriptors->size()));
+    }
+    llvm::outs() << role << " Tensors (" << values.size() << "):\n";
+    for (auto [value, descriptor] : llvm::zip_equal(values, *descriptors)) {
       std::vector<int64_t> strides;
       for (const auto &stride : descriptor.strides) {
         strides.push_back(stride.staticValue);
       }
-
-      // SimplifiedTensor owns the host memory used by the interpreter.
-      TIR_ASSIGN_OR_RETURN(auto tensor,
-                           getOrCreateTensor(block.getArgument(i), strides));
-      inputTensors.push_back(tensor);
-      llvm::outs() << "Get input tensor: "
-                   << "\n";
+      TIR_ASSIGN_OR_RETURN(auto tensor, getOrCreateTensor(value, strides));
+      destination.push_back(tensor);
       tensor->print();
     }
+    return Status::Ok();
+  };
+  if (!graph->getRegion(0).empty()) {
+    TIR_RETURN_IF_ERROR(collect(graph->getRegion(0).front().getArguments(),
+                                graph.getArgumentTypes(),
+                                graph.getAllArgAttrs(), inputTensors, "Input"));
   }
-
-  // Process output tensors
-  llvm::outs() << "\nOutput Tensors:"
-               << "\n";
-  if (resultsOp) {
-    llvm::outs() << "  Found " << resultsOp->getNumOperands() << " output(s):"
-                 << "\n";
-
-    auto resDescriptors =
-        getTensorDescriptors(graph.getResultTypes(), graph.getAllResultAttrs());
-
-    for (unsigned i = 0; i < resultsOp->getNumOperands(); ++i) {
-      const TensorDescriptor &descriptor = (*resDescriptors)[i];
-      std::vector<int64_t> strides;
-      for (const auto &stride : descriptor.strides) {
-        strides.push_back(stride.staticValue);
-      }
-
-      // SimplifiedTensor owns the host memory used by the interpreter.
-      TIR_ASSIGN_OR_RETURN(
-          auto tensor, getOrCreateTensor(resultsOp->getOperand(i), strides));
-      outputTensors.push_back(tensor);
-      llvm::outs() << "Get output tensor: "
-                   << "\n";
-      tensor->print();
-    }
+  if (results) {
+    TIR_RETURN_IF_ERROR(collect(results.getOperands(), graph.getResultTypes(),
+                                graph.getAllResultAttrs(), outputTensors,
+                                "Output"));
   } else {
-    llvm::outs() << "  Warning: No nv_tensor_ir.results operation found"
-                 << "\n";
+    llvm::outs() << "  Warning: No nv_tensor_ir.results operation found\n";
   }
-
-  llvm::outs() << "=== End Graph Signature ==="
-               << "\n"
-               << "\n";
+  llvm::outs() << "=== End Graph Signature ===\n\n";
   return Status::Ok();
 }
 
@@ -530,622 +282,191 @@ Status ReferenceGraph::createIOTensor(mlir::ModuleOp module) {
 // Node Creation
 // ============================================================================
 
-Status ReferenceGraph::createMatmulNode(mlir::Operation *op) {
-  // Get operands (inputs)
-  if (op->getNumOperands() != 2) {
-    return Status::InvalidArgument("Matmul operation expects 2 operands");
-  }
+namespace {
 
-  mlir::Value lhs = op->getOperand(0);
-  mlir::Value rhs = op->getOperand(1);
+using TensorPtr = std::shared_ptr<SimplifiedTensor>;
+using NodeResult = StatusOr<std::unique_ptr<Node>>;
 
-  // Get result (output)
-  if (op->getNumResults() != 1) {
-    return Status::InvalidArgument("Matmul operation expects 1 result");
-  }
+/// Adapts an operation's inputs and single output to reference constructors.
+struct NodeFactory {
+  Operation *op;
+  ArrayRef<TensorPtr> tensors;
+  const std::string &operation;
 
-  mlir::Value result = op->getResult(0);
-
-  // Extract and print tensor shapes
-  llvm::outs() << "\n=== Creating Matmul Node ==="
-               << "\n";
-
-  std::vector<int64_t> shapeA = parseTensorShape(lhs.getType());
-  std::vector<int64_t> shapeB = parseTensorShape(rhs.getType());
-  std::vector<int64_t> shapeC = parseTensorShape(result.getType());
-
-  llvm::outs() << "Tensor A shape: ";
-  printTensorShape(shapeA);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Tensor B shape: ";
-  printTensorShape(shapeB);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Tensor C shape: ";
-  printTensorShape(shapeC);
-  llvm::outs() << "\n";
-
-  // Create or get tensors (tensor shapes come directly from types)
-  TIR_ASSIGN_OR_RETURN(auto tensorA, getOrCreateTensor(lhs));
-  TIR_ASSIGN_OR_RETURN(auto tensorB, getOrCreateTensor(rhs));
-  TIR_ASSIGN_OR_RETURN(auto tensorC, getOrCreateTensor(result));
-
-  // Get operation location as string (for debugging)
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  // Create MatmulNode
-  auto node = std::make_unique<MatmulNode>(tensorA, tensorB, tensorC, opStr);
-
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for matmul node: " +
-                                   status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
-}
-
-Status ReferenceGraph::createConstantNode(mlir::Operation *op) {
-  auto constantOp = llvm::cast<nv_tensor_ir::ConstantOp>(op);
-  std::string opName = op->getName().getStringRef().str();
-
-  if (op->getNumOperands() != 0) {
-    return Status::InvalidArgument(opName + " operation expects 0 operands");
-  }
-  if (op->getNumResults() != 1) {
-    return Status::InvalidArgument(opName + " operation expects 1 result");
-  }
-
-  mlir::Value output = op->getResult(0);
-
-  llvm::outs() << "\n=== Creating " << opName << " Node ===\n";
-  std::vector<int64_t> outputShape = parseTensorShape(output.getType());
-  llvm::outs() << "Output shape: ";
-  printTensorShape(outputShape);
-  llvm::outs() << "\n";
-
-  TIR_ASSIGN_OR_RETURN(auto outputTensor, getOrCreateTensor(output));
-
-  TIR_ASSIGN_OR_RETURN(double literalValue,
-                       getScalarConstantValue(constantOp.getValue(),
-                                              outputTensor->getDataType()));
-
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  op->print(os);
-
-  auto node = std::make_unique<ConstantNode>(outputTensor, literalValue, opStr);
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
-                                   " node: " + status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
-}
-
-Status ReferenceGraph::createSplatNode(mlir::Operation *op) {
-  auto splatOp = llvm::cast<nv_tensor_ir::SplatOp>(op);
-  std::string opName = op->getName().getStringRef().str();
-
-  if (op->getNumOperands() != 1) {
-    return Status::InvalidArgument(opName + " operation expects 1 operand");
-  }
-  if (op->getNumResults() != 1) {
-    return Status::InvalidArgument(opName + " operation expects 1 result");
-  }
-
-  mlir::Value input = splatOp.getInput();
-  mlir::Value output = splatOp.getOutput();
-
-  llvm::outs() << "\n=== Creating " << opName << " Node ===\n";
-  std::vector<int64_t> inputShape = parseTensorShape(input.getType());
-  std::vector<int64_t> outputShape = parseTensorShape(output.getType());
-
-  llvm::outs() << "Input shape: ";
-  printTensorShape(inputShape);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Output shape: ";
-  printTensorShape(outputShape);
-  llvm::outs() << "\n";
-
-  TIR_ASSIGN_OR_RETURN(auto inputTensor, getOrCreateTensor(input));
-  TIR_ASSIGN_OR_RETURN(auto outputTensor, getOrCreateTensor(output));
-
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  op->print(os);
-
-  auto node = std::make_unique<SplatNode>(inputTensor, outputTensor, opStr);
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
-                                   " node: " + status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
-}
-
-Status ReferenceGraph::createIotaNode(mlir::Operation *op) {
-  auto iotaOp = llvm::cast<nv_tensor_ir::IotaOp>(op);
-  std::string opName = op->getName().getStringRef().str();
-
-  if (op->getNumOperands() != 0) {
-    return Status::InvalidArgument(opName + " operation expects 0 operands");
-  }
-  if (op->getNumResults() != 1) {
-    return Status::InvalidArgument(opName + " operation expects 1 result");
-  }
-
-  mlir::Value output = iotaOp.getOutput();
-
-  llvm::outs() << "\n=== Creating " << opName << " Node ===\n";
-  std::vector<int64_t> outputShape = parseTensorShape(output.getType());
-  llvm::outs() << "Output shape: ";
-  printTensorShape(outputShape);
-  llvm::outs() << "\n";
-  llvm::outs() << "Iota dimension: " << iotaOp.getDimension() << "\n";
-
-  TIR_ASSIGN_OR_RETURN(auto outputTensor, getOrCreateTensor(output));
-
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  op->print(os);
-
-  auto node =
-      std::make_unique<IotaNode>(outputTensor, iotaOp.getDimension(), opStr);
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
-                                   " node: " + status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
-}
-
-Status ReferenceGraph::createReduceNode(mlir::Operation *op) {
-  auto reduceOp = llvm::cast<nv_tensor_ir::ReduceOp>(op);
-  std::vector<int64_t> dimensions(reduceOp.getDimensions().begin(),
-                                  reduceOp.getDimensions().end());
-  return createSingleResultNode(
-      op, /*expectedOperands=*/1,
-      [dimensions = std::move(dimensions), mode = reduceOp.getReductionMode()](
-          llvm::ArrayRef<std::shared_ptr<SimplifiedTensor>> tensors,
-          const std::string &opStr) -> std::unique_ptr<Node> {
-        return std::make_unique<ReduceNode>(tensors[0], tensors[1], dimensions,
-                                            mode, opStr);
-      });
-}
-
-Status ReferenceGraph::createSingleResultNode(
-    mlir::Operation *op, unsigned expectedOperands,
-    llvm::function_ref<std::unique_ptr<Node>(
-        llvm::ArrayRef<std::shared_ptr<SimplifiedTensor>>, const std::string &)>
-        nodeFactory) {
-  std::string opName = op->getName().getStringRef().str();
-
-  if (op->getNumOperands() != expectedOperands) {
-    return Status::InvalidArgument(opName + " operation expects " +
-                                   std::to_string(expectedOperands) +
-                                   " operands");
-  }
-  if (op->getNumResults() != 1) {
-    return Status::InvalidArgument(opName + " operation expects 1 result");
-  }
-
-  llvm::outs() << "\n=== Creating " << opName << " Node ==="
-               << "\n";
-
-  std::vector<mlir::Value> values;
-  values.reserve(expectedOperands + 1);
-  for (mlir::Value operand : op->getOperands()) {
-    values.push_back(operand);
-  }
-  values.push_back(op->getResult(0));
-
-  for (auto [idx, value] : llvm::enumerate(values)) {
-    std::string label;
-    if (expectedOperands == 1) {
-      label = idx == 0 ? "Input" : "Output";
-    } else {
-      label = "Tensor ";
-      label.push_back(static_cast<char>('A' + idx));
+  template <typename NodeT, size_t Inputs, typename... Args>
+  NodeResult make(Args &&...args) const {
+    if (tensors.size() != Inputs + 1) {
+      return Status::InvalidArgument(op->getName().getStringRef().str() +
+                                     " operation expects " +
+                                     std::to_string(Inputs) + " operands");
     }
-
-    llvm::outs() << label << " shape: ";
-    printTensorShape(parseTensorShape(value.getType()));
-    llvm::outs() << "\n";
+    return makeImpl<NodeT>(std::make_index_sequence<Inputs + 1>{},
+                           std::forward<Args>(args)...);
   }
 
-  std::vector<std::shared_ptr<SimplifiedTensor>> tensors;
-  tensors.reserve(values.size());
-  for (mlir::Value value : values) {
-    TIR_ASSIGN_OR_RETURN(auto tensor, getOrCreateTensor(value));
-    tensors.push_back(std::move(tensor));
+private:
+  template <typename NodeT, size_t... Indices, typename... Args>
+  NodeResult makeImpl(std::index_sequence<Indices...>, Args &&...args) const {
+    return std::unique_ptr<Node>(std::make_unique<NodeT>(
+        tensors[Indices]..., std::forward<Args>(args)..., operation));
   }
+};
 
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  op->print(os);
-  os.flush();
-
-  auto node = nodeFactory(tensors, opStr);
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
-                                   " node: " + status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
+template <typename Range>
+std::vector<int64_t> copyIndices(Range values) {
+  return {values.begin(), values.end()};
 }
 
-Status ReferenceGraph::createUnaryPointwiseNode(mlir::Operation *op,
-                                                UnaryPointwiseMode mode) {
-  return createSingleResultNode(
-      op, /*expectedOperands=*/1,
-      [mode](llvm::ArrayRef<std::shared_ptr<SimplifiedTensor>> tensors,
-             const std::string &opStr) -> std::unique_ptr<Node> {
-        return std::make_unique<UnaryPointwiseNode>(tensors[0], tensors[1],
-                                                    mode, opStr);
+NodeResult makeNode(Operation *op, const NodeFactory &factory) {
+  llvm::TypeSwitch<Operation *, NodeResult> result(op);
+#define BINARY_NODE(OpT, Mode)                                                 \
+  result.Case<OpT>([&](auto) {                                                 \
+    return factory.make<BinaryPointwiseNode, 2>(BinaryPointwiseMode::Mode);    \
+  })
+  BINARY_NODE(AddOp, ADD);
+  BINARY_NODE(SubOp, SUB);
+  BINARY_NODE(MulOp, MUL);
+  BINARY_NODE(DivOp, DIV);
+  BINARY_NODE(MaxOp, MAX);
+  BINARY_NODE(MinOp, MIN);
+  BINARY_NODE(PowOp, POW);
+  BINARY_NODE(Atan2Op, ATAN2);
+  BINARY_NODE(ModOp, MOD);
+  BINARY_NODE(RemOp, REM);
+  BINARY_NODE(AddSquareOp, ADD_SQUARE);
+  BINARY_NODE(ReluBwdOp, RELU_BWD);
+  BINARY_NODE(GeluBwdOp, GELU_BWD);
+  BINARY_NODE(SigmoidBwdOp, SIGMOID_BWD);
+  BINARY_NODE(TanhBwdOp, TANH_BWD);
+  BINARY_NODE(GeluApproxTanhBwdOp, GELU_APPROX_TANH_BWD);
+  BINARY_NODE(LogicalAndOp, LOGICAL_AND);
+  BINARY_NODE(LogicalOrOp, LOGICAL_OR);
+#undef BINARY_NODE
+#define UNARY_NODE(OpT, Mode)                                                  \
+  result.Case<OpT>([&](auto) {                                                 \
+    return factory.make<UnaryPointwiseNode, 1>(UnaryPointwiseMode::Mode);      \
+  })
+  UNARY_NODE(AbsOp, ABS);
+  UNARY_NODE(CeilOp, CEIL);
+  UNARY_NODE(CosOp, COS);
+  UNARY_NODE(ErfOp, ERF);
+  UNARY_NODE(ExpOp, EXP);
+  UNARY_NODE(FloorOp, FLOOR);
+  UNARY_NODE(GeluFwdOp, GELU_FWD);
+  UNARY_NODE(LogOp, LOG);
+  UNARY_NODE(NegOp, NEG);
+  UNARY_NODE(ReluFwdOp, RELU_FWD);
+  UNARY_NODE(SinOp, SIN);
+  UNARY_NODE(SqrtOp, SQRT);
+  UNARY_NODE(RsqrtOp, RSQRT);
+  UNARY_NODE(TanOp, TAN);
+  UNARY_NODE(TanhFwdOp, TANH_FWD);
+  UNARY_NODE(ReciprocalOp, RECIPROCAL);
+  UNARY_NODE(SigmoidFwdOp, SIGMOID);
+  UNARY_NODE(GeluApproxTanhFwdOp, GELU_APPROX_TANH);
+  UNARY_NODE(LogicalNotOp, LOGICAL_NOT);
+#undef UNARY_NODE
+#define PARAMETRIC_UNARY_NODE(OpT, Mode)                                       \
+  result.Case<OpT>([&](auto typedOp) {                                         \
+    return factory.make<ParametricUnaryPointwiseNode, 1>(                      \
+        ParametricUnaryPointwiseMode::Mode,                                    \
+        typedOp.getBeta().convertToDouble());                                  \
+  })
+  PARAMETRIC_UNARY_NODE(SoftplusFwdOp, SOFTPLUS_FWD);
+  PARAMETRIC_UNARY_NODE(SwishFwdOp, SWISH_FWD);
+  PARAMETRIC_UNARY_NODE(EluFwdOp, ELU_FWD);
+#undef PARAMETRIC_UNARY_NODE
+#define PARAMETRIC_BINARY_NODE(OpT, Mode)                                      \
+  result.Case<OpT>([&](auto typedOp) {                                         \
+    return factory.make<ParametricBinaryPointwiseNode, 2>(                     \
+        ParametricBinaryPointwiseMode::Mode,                                   \
+        typedOp.getBeta().convertToDouble());                                  \
+  })
+  PARAMETRIC_BINARY_NODE(SoftplusBwdOp, SOFTPLUS_BWD);
+  PARAMETRIC_BINARY_NODE(SwishBwdOp, SWISH_BWD);
+  PARAMETRIC_BINARY_NODE(EluBwdOp, ELU_BWD);
+#undef PARAMETRIC_BINARY_NODE
+
+  return result
+      .Case<MatmulOp>([&](auto) { return factory.make<MatmulNode, 2>(); })
+      .Case<SplatOp>([&](auto) { return factory.make<SplatNode, 1>(); })
+      .Case<ReshapeOp>([&](auto) { return factory.make<ReshapeNode, 1>(); })
+      .Case<BroadcastOp>([&](auto) { return factory.make<BroadcastNode, 1>(); })
+      .Case<ConvertOp>([&](auto) { return factory.make<ConvertNode, 1>(); })
+      .Case<BinarySelectOp>(
+          [&](auto) { return factory.make<BinarySelectNode, 3>(); })
+      .Case<ConstantOp>([&](auto constant) -> NodeResult {
+        TIR_ASSIGN_OR_RETURN(
+            double value,
+            getScalarConstantValue(constant.getValue(),
+                                   factory.tensors.back()->getDataType()));
+        return factory.make<ConstantNode, 0>(value);
+      })
+      .Case<IotaOp>([&](auto iota) {
+        return factory.make<IotaNode, 0>(iota.getDimension());
+      })
+      .Case<ReduceOp>([&](auto reduce) {
+        return factory.make<ReduceNode, 1>(copyIndices(reduce.getDimensions()),
+                                           reduce.getReductionMode());
+      })
+      .Case<CmpOp>([&](auto cmp) {
+        return factory.make<CompareNode, 2>(cmp.getComparator());
+      })
+      .Case<SliceOp>([&](auto slice) {
+        return factory.make<SliceNode, 1>(copyIndices(slice.getStarts()),
+                                          copyIndices(slice.getLimits()),
+                                          copyIndices(slice.getStrides()));
+      })
+      .Case<TransposeOp>([&](auto transpose) {
+        return factory.make<TransposeNode, 1>(
+            copyIndices(transpose.getPermutation()));
+      })
+      .Case<ConcatenateOp>([&](auto concat) -> NodeResult {
+        auto inputs = factory.tensors.drop_back();
+        return std::unique_ptr<Node>(std::make_unique<ConcatenateNode>(
+            std::vector<TensorPtr>(inputs.begin(), inputs.end()),
+            factory.tensors.back(), concat.getDimension(), factory.operation));
+      })
+      .Default([&](Operation *) -> NodeResult {
+        return Status::NotSupported(
+            "Unsupported operation in reference graph: " +
+            op->getName().getStringRef().str());
       });
 }
 
-Status ReferenceGraph::createParametricUnaryPointwiseNode(
-    mlir::Operation *op, ParametricUnaryPointwiseMode mode, double beta) {
-  return createSingleResultNode(
-      op, /*expectedOperands=*/1,
-      [mode, beta](llvm::ArrayRef<std::shared_ptr<SimplifiedTensor>> tensors,
-                   const std::string &opStr) -> std::unique_ptr<Node> {
-        return std::make_unique<ParametricUnaryPointwiseNode>(
-            tensors[0], tensors[1], mode, beta, opStr);
-      });
-}
+} // namespace
 
-Status ReferenceGraph::createParametricBinaryPointwiseNode(
-    mlir::Operation *op, ParametricBinaryPointwiseMode mode, double beta) {
-  return createSingleResultNode(
-      op, /*expectedOperands=*/2,
-      [mode, beta](llvm::ArrayRef<std::shared_ptr<SimplifiedTensor>> tensors,
-                   const std::string &opStr) -> std::unique_ptr<Node> {
-        return std::make_unique<ParametricBinaryPointwiseNode>(
-            tensors[0], tensors[1], tensors[2], mode, beta, opStr);
-      });
-}
-
-Status ReferenceGraph::createBinaryPointwiseNode(mlir::Operation *op,
-                                                 BinaryPointwiseMode mode) {
-  return createSingleResultNode(
-      op, /*expectedOperands=*/2,
-      [mode](llvm::ArrayRef<std::shared_ptr<SimplifiedTensor>> tensors,
-             const std::string &opStr) -> std::unique_ptr<Node> {
-        return std::make_unique<BinaryPointwiseNode>(tensors[0], tensors[1],
-                                                     tensors[2], mode, opStr);
-      });
-}
-
-Status ReferenceGraph::createCompareNode(mlir::Operation *op) {
-  auto cmpOp = llvm::cast<nv_tensor_ir::CmpOp>(op);
-  return createSingleResultNode(
-      op, /*expectedOperands=*/2,
-      [comparator = cmpOp.getComparator()](
-          llvm::ArrayRef<std::shared_ptr<SimplifiedTensor>> tensors,
-          const std::string &opStr) -> std::unique_ptr<Node> {
-        return std::make_unique<CompareNode>(tensors[0], tensors[1], tensors[2],
-                                             comparator, opStr);
-      });
-}
-
-Status ReferenceGraph::createBinarySelectNode(mlir::Operation *op) {
-  auto selectOp = llvm::cast<nv_tensor_ir::BinarySelectOp>(op);
-  std::string opName = op->getName().getStringRef().str();
-
-  llvm::outs() << "\n=== Creating " << opName << " Node ===\n";
-
-  mlir::Value selector = selectOp.getSelector();
-  mlir::Value lhs = selectOp.getLhs();
-  mlir::Value rhs = selectOp.getRhs();
-  mlir::Value output = selectOp.getOutput();
-
-  std::vector<int64_t> selectorShape = parseTensorShape(selector.getType());
-  std::vector<int64_t> lhsShape = parseTensorShape(lhs.getType());
-  std::vector<int64_t> rhsShape = parseTensorShape(rhs.getType());
-  std::vector<int64_t> outputShape = parseTensorShape(output.getType());
-
-  llvm::outs() << "Selector shape: ";
-  printTensorShape(selectorShape);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Tensor A shape: ";
-  printTensorShape(lhsShape);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Tensor B shape: ";
-  printTensorShape(rhsShape);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Output shape: ";
-  printTensorShape(outputShape);
-  llvm::outs() << "\n";
-
-  TIR_ASSIGN_OR_RETURN(auto selectorTensor, getOrCreateTensor(selector));
-  TIR_ASSIGN_OR_RETURN(auto tensorA, getOrCreateTensor(lhs));
-  TIR_ASSIGN_OR_RETURN(auto tensorB, getOrCreateTensor(rhs));
-  TIR_ASSIGN_OR_RETURN(auto outputTensor, getOrCreateTensor(output));
-
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  op->print(os);
-
-  auto node = std::make_unique<BinarySelectNode>(selectorTensor, tensorA,
-                                                 tensorB, outputTensor, opStr);
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
-                                   " node: " + status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
-}
-
-Status ReferenceGraph::createConcatenateNode(mlir::Operation *op) {
-  auto concatOp = llvm::cast<nv_tensor_ir::ConcatenateOp>(op);
-
-  std::string opName = op->getName().getStringRef().str();
-  llvm::outs() << "\n=== Creating " << opName << " Node ==="
-               << "\n";
-
-  std::vector<std::shared_ptr<SimplifiedTensor>> inputs;
-  inputs.reserve(concatOp.getInputs().size());
-  for (auto [idx, input] : llvm::enumerate(concatOp.getInputs())) {
-    std::vector<int64_t> shape = parseTensorShape(input.getType());
-    llvm::outs() << "Input " << idx << " shape: ";
-    printTensorShape(shape);
-    llvm::outs() << "\n";
-
-    TIR_ASSIGN_OR_RETURN(auto tensor, getOrCreateTensor(input));
-    inputs.push_back(tensor);
-  }
-
-  mlir::Value output = concatOp.getOutput();
-  std::vector<int64_t> outputShape = parseTensorShape(output.getType());
-  llvm::outs() << "Output shape: ";
-  printTensorShape(outputShape);
-  llvm::outs() << "\n";
-
-  TIR_ASSIGN_OR_RETURN(auto outputTensor, getOrCreateTensor(output));
-
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  op->print(os);
-
-  auto node = std::make_unique<ConcatenateNode>(std::move(inputs), outputTensor,
-                                                concatOp.getDimension(), opStr);
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
-                                   " node: " + status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
-}
-
-Status ReferenceGraph::createSliceNode(mlir::Operation *op) {
-  auto sliceOp = llvm::cast<nv_tensor_ir::SliceOp>(op);
-  std::string opName = op->getName().getStringRef().str();
-
-  llvm::outs() << "\n=== Creating " << opName << " Node ==="
-               << "\n";
-
-  mlir::Value input = sliceOp.getInput();
-  mlir::Value output = sliceOp.getOutput();
-
-  std::vector<int64_t> inputShape = parseTensorShape(input.getType());
-  std::vector<int64_t> outputShape = parseTensorShape(output.getType());
-
-  llvm::outs() << "Input shape: ";
-  printTensorShape(inputShape);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Output shape: ";
-  printTensorShape(outputShape);
-  llvm::outs() << "\n";
-
-  TIR_ASSIGN_OR_RETURN(auto inputTensor, getOrCreateTensor(input));
-  TIR_ASSIGN_OR_RETURN(auto outputTensor, getOrCreateTensor(output));
-
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  op->print(os);
-
-  auto starts = sliceOp.getStarts();
-  auto limits = sliceOp.getLimits();
-  auto strides = sliceOp.getStrides();
-  auto node = std::make_unique<SliceNode>(
-      inputTensor, outputTensor,
-      std::vector<int64_t>(starts.begin(), starts.end()),
-      std::vector<int64_t>(limits.begin(), limits.end()),
-      std::vector<int64_t>(strides.begin(), strides.end()), opStr);
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
-                                   " node: " + status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
-}
-
-Status ReferenceGraph::createReshapeNode(mlir::Operation *op) {
-  auto reshapeOp = llvm::cast<nv_tensor_ir::ReshapeOp>(op);
-  std::string opName = op->getName().getStringRef().str();
-
-  llvm::outs() << "\n=== Creating " << opName << " Node ==="
-               << "\n";
-
-  mlir::Value input = reshapeOp.getInput();
-  mlir::Value output = reshapeOp.getOutput();
-
-  std::vector<int64_t> inputShape = parseTensorShape(input.getType());
-  std::vector<int64_t> outputShape = parseTensorShape(output.getType());
-
-  llvm::outs() << "Input shape: ";
-  printTensorShape(inputShape);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Output shape: ";
-  printTensorShape(outputShape);
-  llvm::outs() << "\n";
-
-  TIR_ASSIGN_OR_RETURN(auto inputTensor, getOrCreateTensor(input));
-  TIR_ASSIGN_OR_RETURN(auto outputTensor, getOrCreateTensor(output));
-
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  op->print(os);
-
-  auto node = std::make_unique<ReshapeNode>(inputTensor, outputTensor, opStr);
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
-                                   " node: " + status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
-}
-
-Status ReferenceGraph::createBroadcastNode(mlir::Operation *op) {
-  auto broadcastOp = llvm::cast<nv_tensor_ir::BroadcastOp>(op);
-  std::string opName = op->getName().getStringRef().str();
-
-  llvm::outs() << "\n=== Creating " << opName << " Node ==="
-               << "\n";
-
-  mlir::Value input = broadcastOp.getInput();
-  mlir::Value output = broadcastOp.getOutput();
-
-  std::vector<int64_t> inputShape = parseTensorShape(input.getType());
-  std::vector<int64_t> outputShape = parseTensorShape(output.getType());
-
-  llvm::outs() << "Input shape: ";
-  printTensorShape(inputShape);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Output shape: ";
-  printTensorShape(outputShape);
-  llvm::outs() << "\n";
-
-  TIR_ASSIGN_OR_RETURN(auto inputTensor, getOrCreateTensor(input));
-  TIR_ASSIGN_OR_RETURN(auto outputTensor, getOrCreateTensor(output));
-
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  op->print(os);
-
-  auto node = std::make_unique<BroadcastNode>(inputTensor, outputTensor, opStr);
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
-                                   " node: " + status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
-}
-
-Status ReferenceGraph::createTransposeNode(mlir::Operation *op) {
-  auto transposeOp = llvm::cast<nv_tensor_ir::TransposeOp>(op);
-  std::string opName = op->getName().getStringRef().str();
-
-  llvm::outs() << "\n=== Creating " << opName << " Node ==="
-               << "\n";
-
-  mlir::Value input = transposeOp.getInput();
-  mlir::Value output = transposeOp.getOutput();
-
-  std::vector<int64_t> inputShape = parseTensorShape(input.getType());
-  std::vector<int64_t> outputShape = parseTensorShape(output.getType());
-
-  llvm::outs() << "Input shape: ";
-  printTensorShape(inputShape);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Output shape: ";
-  printTensorShape(outputShape);
-  llvm::outs() << "\n";
-
-  TIR_ASSIGN_OR_RETURN(auto inputTensor, getOrCreateTensor(input));
-  TIR_ASSIGN_OR_RETURN(auto outputTensor, getOrCreateTensor(output));
-
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
-  op->print(os);
-
-  auto permutation = transposeOp.getPermutation();
-  auto node = std::make_unique<TransposeNode>(
-      inputTensor, outputTensor,
-      std::vector<int64_t>(permutation.begin(), permutation.end()), opStr);
-  Status status = node->validate();
-  if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
-                                   " node: " + status.message());
-  }
-  nodes.push_back(std::move(node));
-
-  return Status::Ok();
-}
-
-Status ReferenceGraph::createConvertNode(mlir::Operation *op) {
-  std::string opName = op->getName().getStringRef().str();
-
-  if (op->getNumOperands() != 1) {
-    return Status::InvalidArgument(opName + " operation expects 1 operand");
-  }
+Status ReferenceGraph::createNode(Operation *op) {
   if (op->getNumResults() != 1) {
-    return Status::InvalidArgument(opName + " operation expects 1 result");
+    return Status::NotSupported("Unsupported operation in reference graph: " +
+                                op->getName().getStringRef().str());
   }
+  llvm::outs() << "\n=== Creating " << op->getName() << " Node ===\n";
+  SmallVector<TensorPtr> nodeTensors;
+  auto collect = [&](ValueRange values, StringRef role) -> Status {
+    for (auto [index, value] : llvm::enumerate(values)) {
+      llvm::outs() << role << " " << index << " shape: ";
+      printTensorShape(parseTensorShape(value.getType()));
+      llvm::outs() << "\n";
+      TIR_ASSIGN_OR_RETURN(auto tensor, getOrCreateTensor(value));
+      nodeTensors.push_back(std::move(tensor));
+    }
+    return Status::Ok();
+  };
+  TIR_RETURN_IF_ERROR(collect(op->getOperands(), "Input"));
+  TIR_RETURN_IF_ERROR(collect(op->getResults(), "Output"));
 
-  mlir::Value input = op->getOperand(0);
-  mlir::Value output = op->getResult(0);
-
-  llvm::outs() << "\n=== Creating " << opName << " Node ==="
-               << "\n";
-
-  std::vector<int64_t> inputShape = parseTensorShape(input.getType());
-  std::vector<int64_t> outputShape = parseTensorShape(output.getType());
-
-  llvm::outs() << "Input shape: ";
-  printTensorShape(inputShape);
-  llvm::outs() << "\n";
-
-  llvm::outs() << "Output shape: ";
-  printTensorShape(outputShape);
-  llvm::outs() << "\n";
-
-  TIR_ASSIGN_OR_RETURN(auto inputTensor, getOrCreateTensor(input));
-  TIR_ASSIGN_OR_RETURN(auto outputTensor, getOrCreateTensor(output));
-
-  std::string opStr;
-  llvm::raw_string_ostream os(opStr);
+  std::string operation;
+  llvm::raw_string_ostream os(operation);
   op->print(os);
-
-  auto node = std::make_unique<ConvertNode>(inputTensor, outputTensor, opStr);
+  TIR_ASSIGN_OR_RETURN(auto node, makeNode(op, {op, nodeTensors, operation}));
   Status status = node->validate();
   if (!status.ok()) {
-    return Status::InvalidArgument("Invalid arguments for " + opName +
+    return Status::InvalidArgument("Invalid arguments for " +
+                                   op->getName().getStringRef().str() +
                                    " node: " + status.message());
   }
   nodes.push_back(std::move(node));
-
   return Status::Ok();
 }
 
@@ -1180,62 +501,21 @@ ReferenceGraph::getOrCreateTensor(mlir::Value value,
 }
 
 std::string ReferenceGraph::generateUniqueTensorName(mlir::Value value) {
-  // Try to get the name from block argument
-  if (auto blockArg = llvm::dyn_cast<mlir::BlockArgument>(value)) {
-    std::ostringstream oss;
-    oss << "arg" << blockArg.getArgNumber();
-    return oss.str();
+  if (auto arg = dyn_cast<BlockArgument>(value)) {
+    return "arg" + std::to_string(arg.getArgNumber());
   }
-
-  // For operation results, use result number
-  if (auto opResult = llvm::dyn_cast<mlir::OpResult>(value)) {
-    mlir::Operation *defOp = opResult.getOwner();
-
-    // Try to get a meaningful name from the operation
-    std::string opName = defOp->getName().getStringRef().str();
-
-    // Remove "nv_tensor_ir." prefix if present
-    if (opName.find("nv_tensor_ir.") == 0) {
-      opName = opName.substr(13); // Length of "nv_tensor_ir."
+  if (auto result = dyn_cast<OpResult>(value)) {
+    StringRef opName = result.getOwner()->getName().getStringRef();
+    opName.consume_front("nv_tensor_ir.");
+    std::string base =
+        opName.str() + "Result" + std::to_string(result.getResultNumber());
+    std::string name = base;
+    for (unsigned suffix = 0; tensors.count(name); ++suffix) {
+      name = base + std::to_string(suffix);
     }
-
-    // Generate base name with result number
-    std::ostringstream oss;
-    oss << opName << "Result" << opResult.getResultNumber();
-    std::string baseName = oss.str();
-
-    // Check if name already exists, if so add a unique suffix
-    std::string uniqueName = baseName;
-    int suffix = 0;
-    for (const auto tensorsEnd = tensors.end();
-         tensors.find(uniqueName) != tensorsEnd; ++suffix) {
-      std::ostringstream uniqueOss;
-      uniqueOss << baseName << suffix;
-      uniqueName = uniqueOss.str();
-    }
-
-    return uniqueName;
+    return name;
   }
-
-  // Fallback: generate unique name
-  std::ostringstream oss;
-  oss << "tensor" << tensorNameCounter++;
-  return oss.str();
-}
-
-void ReferenceGraph::printTensorShape(llvm::ArrayRef<int64_t> dims) const {
-  llvm::outs() << "[";
-  for (size_t i = 0, e = dims.size(); i != e; ++i) {
-    if (i > 0) {
-      llvm::outs() << ", ";
-    }
-    if (dims[i] == mlir::ShapedType::kDynamic) {
-      llvm::outs() << "dynamic";
-    } else {
-      llvm::outs() << dims[i];
-    }
-  }
-  llvm::outs() << "]";
+  return "tensor" + std::to_string(tensorNameCounter++);
 }
 
 StatusOr<std::shared_ptr<SimplifiedTensor>>
@@ -1245,7 +525,9 @@ ReferenceGraph::createTensorFromMLIRType(
   // Parse shape and data type directly from MLIR type
   std::vector<int64_t> dims = parseTensorShape(mlirType);
 
-  if (dims.empty()) {
+  // An empty shape is valid for a ranked rank-zero tensor. For other types,
+  // parseTensorShape returning empty still means the type is unsupported.
+  if (dims.empty() && !llvm::isa<mlir::RankedTensorType>(mlirType)) {
     return Status::InvalidArgument(
         "Unsupported MLIR type for reference tensor " + name);
   }
@@ -1272,8 +554,10 @@ ReferenceGraph::createTensorFromMLIRType(
   // Dynamic stride entries are computed assuming contiguous memory layout.
   std::vector<int64_t> resolvedStrides;
   if (!stridePattern.empty()) {
-    resolvedStrides = resolveStrides(
-        dims, {stridePattern.begin(), stridePattern.end()}, dynamicStrides);
+    TIR_ASSIGN_OR_RETURN(
+        resolvedStrides,
+        resolveStrides(dims, {stridePattern.begin(), stridePattern.end()},
+                       dynamicStrides));
     if (!resolvedStrides.empty()) {
       llvm::outs() << "  Resolved strides for " << name << ": [";
       for (size_t i = 0, e = resolvedStrides.size(); i != e; ++i) {
@@ -1300,86 +584,6 @@ ReferenceGraph::createTensorFromMLIRType(
   }
 
   return tensor;
-}
-
-std::vector<int64_t> ReferenceGraph::parseTensorShape(mlir::Type mlirType) {
-  std::vector<int64_t> dims;
-
-  if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(mlirType)) {
-    llvm::ArrayRef<int64_t> shape = tensorType.getShape();
-    dims.assign(shape.begin(), shape.end());
-  }
-  // Scalar constants are represented as one-element internal tensors in the
-  // reference graph because SimplifiedTensor does not model rank-0 buffers.
-  else if (mlirType.isIntOrFloat()) {
-    dims.push_back(1);
-  }
-  // Unhandled type
-  else {
-    llvm::errs() << "Warning: Unhandled tensor type in parseTensorShape"
-                 << "\n";
-    return {};
-  }
-
-  // Check for dynamic dimensions (common for both types)
-  for (size_t i = 0, e = dims.size(); i != e; ++i) {
-    if (dims[i] == mlir::ShapedType::kDynamic) {
-      llvm::errs() << "Warning: Dynamic dimension found at position " << i
-                   << ", keeping as dynamic"
-                   << "\n";
-    }
-  }
-
-  return dims;
-}
-
-StatusOr<DataType> ReferenceGraph::parseDataType(mlir::Type mlirType) {
-  // Get element type
-  mlir::Type elementType;
-
-  if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(mlirType)) {
-    elementType = tensorType.getElementType();
-  } else {
-    elementType = mlirType;
-  }
-
-  // Map MLIR types to DataType enum.
-  if (elementType.isF32()) {
-    return DataType::FLOAT32;
-  }
-  if (elementType.isF16()) {
-    return DataType::FLOAT16;
-  }
-  if (elementType.isBF16()) {
-    return DataType::BFLOAT16;
-  }
-  if (llvm::isa<mlir::Float8E4M3FNType>(elementType)) {
-    return DataType::F8E4M3FN;
-  }
-  if (llvm::isa<mlir::Float8E5M2Type>(elementType)) {
-    return DataType::F8E5M2;
-  }
-  if (elementType.isF64()) {
-    return DataType::DOUBLE;
-  }
-  if (auto integerType = llvm::dyn_cast<mlir::IntegerType>(elementType)) {
-    if (integerType.getWidth() == 1) {
-      return DataType::BOOL;
-    }
-    if (integerType.getWidth() == 8) {
-      return integerType.isUnsigned() ? DataType::UINT8 : DataType::INT8;
-    }
-    if (integerType.getWidth() == 32) {
-      return integerType.isUnsigned() ? DataType::UINT32 : DataType::INT32;
-    }
-  }
-
-  std::string elementTypeString;
-  llvm::raw_string_ostream os(elementTypeString);
-  os << elementType;
-  os.flush();
-  return Status::NotSupported("Unsupported MLIR element type " +
-                              elementTypeString);
 }
 
 // ============================================================================

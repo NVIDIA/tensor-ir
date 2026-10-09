@@ -53,7 +53,8 @@ static FailureOr<LayoutSourceAttrInterface> getGraphResultLayout(Value value) {
 /// are kept in result_views and are not added to the root input-source union.
 static FailureOr<TensorSourceAttr>
 buildPhysicalResultSource(GraphOp graphOp, size_t resultIndex) {
-  auto resultType = dyn_cast<TensorType>(graphOp.getResultTypes()[resultIndex]);
+  auto resultType =
+      dyn_cast<RankedTensorType>(graphOp.getResultTypes()[resultIndex]);
   if (!resultType) {
     return graphOp.emitError() << "multi-output layout propagation requires "
                                   "tensor result "
@@ -169,7 +170,7 @@ static void collectAncestors(Value value, llvm::DenseSet<Value> &ancestors) {
 }
 
 static bool isCarrierAnchor(Value value) {
-  auto type = dyn_cast<TensorType>(value.getType());
+  auto type = dyn_cast<RankedTensorType>(value.getType());
   if (!type || type.getRank() == 0) {
     return false;
   }
@@ -283,7 +284,7 @@ liftResultToCarrier(Value result, Value carrierAnchor,
             return;
           }
           ArrayRef<int64_t> operandShape =
-              cast<TensorType>(operand.getType()).getShape();
+              cast<RankedTensorType>(operand.getType()).getShape();
           auto operandLayout = currentLayout.reshape(operandShape);
           auto operandView = currentView.reshape(operandShape);
           if (!operandLayout ||
@@ -299,7 +300,7 @@ liftResultToCarrier(Value result, Value carrierAnchor,
                            !isa<BroadcastOp>(definingOp);
         bool transportOperands = transportCoordinates && transparent;
         for (Value operand : definingOp->getOperands()) {
-          if (!isa<TensorType>(operand.getType()) ||
+          if (!isa<RankedTensorType>(operand.getType()) ||
               !hasAncestor(operand, carrierAnchor)) {
             continue;
           }
@@ -371,7 +372,7 @@ deriveCommonCarrier(GraphOp graphOp,
     }
 
     ArrayRef<int64_t> candidateShape =
-        cast<TensorType>(candidate.getType()).getShape();
+        cast<RankedTensorType>(candidate.getType()).getShape();
     bool compatible = true;
     for (auto [result, layout, source] :
          llvm::zip_equal(graphResults, resultLayouts, resultSources)) {
@@ -394,13 +395,13 @@ deriveCommonCarrier(GraphOp graphOp,
 
   int64_t maxElements = 0;
   for (Value value : commonValues) {
-    int64_t elements = cast<TensorType>(value.getType()).getNumElements();
+    int64_t elements = cast<RankedTensorType>(value.getType()).getNumElements();
     maxElements = std::max(maxElements, elements);
   }
 
   std::map<SmallVector<int64_t>, SmallVector<Value>> maximalByShape;
   for (Value value : commonValues) {
-    auto type = cast<TensorType>(value.getType());
+    auto type = cast<RankedTensorType>(value.getType());
     if (type.getNumElements() == maxElements) {
       maximalByShape[SmallVector<int64_t>(type.getShape())].push_back(value);
     }
@@ -412,7 +413,7 @@ deriveCommonCarrier(GraphOp graphOp,
 
   std::optional<CarrierCandidate> selected;
   for (Value candidate : commonValues) {
-    auto candidateType = cast<TensorType>(candidate.getType());
+    auto candidateType = cast<RankedTensorType>(candidate.getType());
     if (candidateType.getNumElements() != maxElements) {
       continue;
     }
@@ -461,7 +462,7 @@ LogicalResult processOperation(Operation *op) {
   }
 
   // Only tensor results have layout propagation data.
-  auto tensorTy = dyn_cast<TensorType>(op->getResultTypes()[0]);
+  auto tensorTy = dyn_cast<RankedTensorType>(op->getResultTypes()[0]);
   if (!tensorTy) {
     return success();
   }
@@ -626,7 +627,7 @@ struct LayoutPropagationNormalizationPass
     // Build the output layout from res_attrs directly.  For copy/passthrough
     // graphs the result value is the block argument, so getStrideFromGraph
     // would return the input stride (value identity matches arg_attrs first).
-    auto resultTy = cast<TensorType>(graphResults.front().getType());
+    auto resultTy = cast<RankedTensorType>(graphResults.front().getType());
     std::optional<tcg::Stride> outputStride;
     if (auto resAttrs = graphOp.getAllResultAttrs()) {
       if (auto dictAttr = dyn_cast<DictionaryAttr>(resAttrs[0])) {

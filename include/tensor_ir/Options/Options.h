@@ -4,11 +4,11 @@
 #ifndef TENSOR_IR_OPTIONS_OPTIONS_H
 #define TENSOR_IR_OPTIONS_OPTIONS_H
 
-#include "tensor_ir/Options/OptionsDetail.h"
-#include "tensor_ir/Options/OptionsEnums.h"
+#include "tensor_ir/Options/OptionsEnums.h" // IWYU pragma: keep
 #include "tensor_ir/Support/Status.h"
 #include "tensor_ir/Utils/ComputeCapability.h"
 
+#include "llvm/ADT/ArrayRef.h"  // IWYU pragma: keep
 #include "llvm/ADT/StringRef.h" // IWYU pragma: keep
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -61,6 +61,25 @@ struct CompilerInvocation : CompilerInvocationComponents {
 
   /// Validates cross-component option combinations.
   [[nodiscard]] Status validate() const;
+
+  /// Returns the CUDA toolkit path to be used during compilation when
+  /// it is necessary to lookup dynamic libraries or tools supplied
+  /// via CUDA Toolkit installation (e.g. `tileiras`).
+  ///
+  /// It is a convention in CUDA that tools/libraries will look for
+  /// other required tools or dynamic libraries typically shipped with
+  /// a CTK installation by searching (1) relative to a supplied
+  /// 'cuda-toolkit-path' flag, (2) relative to a suppied override
+  /// given through the 'CUDA_ROOT' environment variable, (3) relative to
+  /// their installation path.
+  ///
+  /// TensorIR also tries to follow this convention. This function
+  /// will return in priority order:
+  /// (1) `codegen.cudaToolkitPath` if set,
+  /// (2) the value of the `CUDA_ROOT` environment if set,
+  /// (3) empty string indicating that the caller should look for the tool
+  ///     on the PATH or relative to their installation path.
+  [[nodiscard]] std::string getCudaToolkitPath() const;
 };
 
 } // namespace mlir::nv_tensor_ir

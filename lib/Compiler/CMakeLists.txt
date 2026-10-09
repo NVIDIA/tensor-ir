@@ -28,17 +28,18 @@ add_tensor_ir_library(NVTensorIRCompiler STATIC
   Compiler.cpp
   CudaTile/CudaTileCompiler.cpp
   CudaTile/CudaTileFrontend.cpp
+  CudaTile/KernelMetadataExtraction.cpp
   PARTIAL_SOURCES_INTENDED
 
   LINK_LIBS PUBLIC
     NVTensorIR::CudaTilePipelines
     NVTensorIR::Registration
     NVTensorIR::Dialect
+    NVTensorIR::Analysis
     MLIRParser
     MLIRIR
     MLIRPass
-    NVTensorIR::Runtime
+    NVTensorIR::Artifact
     NVTensorIR::CompilerOptions
     NVTensorIRTileIRAssembly
 )
-

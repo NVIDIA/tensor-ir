@@ -12,7 +12,7 @@ if(LLVM_TARGET_IS_CROSSCOMPILE_HOST)
   return()
 endif()
 
-project(TensorIRCompiler VERSION 0.1.4 LANGUAGES C CXX)
+project(TensorIRCompiler VERSION 0.1.5 LANGUAGES C CXX)
 
 # ==============================================================================
 # Project Options
@@ -202,6 +202,7 @@ if(TENSOR_IR_ENABLE_BINDINGS_PYTHON)
   add_subdirectory(python)
 endif()
 if(TENSOR_IR_INCLUDE_TESTS)
+  add_subdirectory(unittests)
   add_subdirectory(test)
 endif()
 

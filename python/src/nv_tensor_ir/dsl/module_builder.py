@@ -253,9 +253,16 @@ def _comparator(comparator: object, nv_tensor_ir):
 
 
 def _tensor_attr(info: TensorInfo, ir):
-    return ir.DictAttr.get(
-        {"nv_tensor_ir.stride": ir.StringAttr.get(_shape_string(_ir_stride(info)))}
-    )
+    attrs = {
+        "nv_tensor_ir.stride": ir.StringAttr.get(
+            _stride_string(_ir_stride(info), info.stride_divisibility)
+        )
+    }
+    if info.alignment is not None:
+        attrs["nv_tensor_ir.alignment"] = ir.IntegerAttr.get(
+            ir.IntegerType.get_signless(64), info.alignment
+        )
+    return ir.DictAttr.get(attrs)
 
 
 def _tensor_info(
@@ -288,8 +295,18 @@ def _ir_stride(info: TensorInfo) -> tuple[int | None, ...]:
     return tuple(1 if stride == 1 else None for stride in info.stride)
 
 
-def _shape_string(values: tuple[int | None, ...]) -> str:
-    return f"({','.join('?' if value is None else str(value) for value in values)})"
+def _stride_string(
+    values: tuple[int | None, ...],
+    divisibility: tuple[int | None, ...] | None = None,
+) -> str:
+    elements = []
+    for index, value in enumerate(values):
+        if value is not None:
+            elements.append(str(value))
+            continue
+        divisor = None if divisibility is None else divisibility[index]
+        elements.append("?" if divisor is None else f"?{{div={divisor}}}")
+    return f"({','.join(elements)})"
 
 
 def _binary_op(op: BinaryOp, nv_tensor_ir):

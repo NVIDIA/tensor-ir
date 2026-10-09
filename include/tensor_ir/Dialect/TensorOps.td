@@ -1,37 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef TENSOR_OPS
-#define TENSOR_OPS
+#ifndef TENSORIR_DIALECT_TENSOROPS_TD
+#define TENSORIR_DIALECT_TENSOROPS_TD
 
-include "tensor_ir/Dialect/TensorDialect.td"
-include "tensor_ir/Dialect/TensorTypes.td"
-include "tensor_ir/Dialect/TensorAttrs.td"
-include "tensor_ir/Dialect/TensorInterfaces.td"
-
-include "mlir/IR/OpAsmInterface.td"
-include "mlir/IR/OpBase.td"
-include "mlir/Dialect/GPU/IR/GPUBase.td"
-include "mlir/IR/RegionKindInterface.td"
-include "mlir/Interfaces/ControlFlowInterfaces.td"
-include "mlir/Interfaces/FunctionInterfaces.td"
-include "mlir/Interfaces/InferTypeOpInterface.td"
-include "mlir/Interfaces/SideEffectInterfaces.td"
-
-include "mlir/IR/BuiltinAttributeInterfaces.td"
-
-//===----------------------------------------------------------------------===//
-// Op Base
-//===----------------------------------------------------------------------===//
-
-class TensorIR_Op<string mnemonic, list<Trait> traits = []> :
-    Op<TensorIR_Dialect, mnemonic, traits> {
-}
-
-def LaunchIndx : AnyTypeOf<[Index, I32, I64]>;
-
-def TensorIR_TypedAttrArray
-    : TypedArrayAttrBase<TypedAttrInterface, "array of typed attributes">;
+include "tensor_ir/Dialect/TensorOpsBase.td"
 
 //===----------------------------------------------------------------------===//
 // Graph Operations
@@ -42,7 +15,7 @@ def TensorIR_GraphOp : TensorIR_Op<"graph",
      FunctionOpInterface, IsolatedFromAbove, OpAsmOpInterface]> {
   let summary = "Define a flat graph of TensorIR operations";
   let description = [{
-    This operation is modeling a unordered list of operations forming a
+    This operation models an unordered list of operations forming a
     graph. The body is a single block in a "graph region", that is the
     ordering of the nodes does not matter.
 
@@ -58,16 +31,8 @@ def TensorIR_GraphOp : TensorIR_Op<"graph",
   );
   let regions = (region SizedRegion<1>:$graphBody);
   let extraClassDeclaration = [{
-    TensorIRDialect *getDialect() {
-      return cast<TensorIRDialect>(static_cast<OpState *>(this)->getOperation()->getDialect());
-    }
-
-    //===------------------------------------------------------------------===//
-    // OpAsmOpInterface
-    //===------------------------------------------------------------------===//
-
-    // This will filter the `nv_tensor_ir.` prefix in front of operations inside the
-    // graph body.
+    /// This will filter the `nv_tensor_ir.` prefix in front of operations inside the
+    /// graph body.
     static StringRef getDefaultDialect() {
       return TensorIRDialect::getDialectNamespace();
     }
@@ -75,13 +40,9 @@ def TensorIR_GraphOp : TensorIR_Op<"graph",
     /// Get a special name to use when printing block arguments.
     void getAsmBlockArgumentNames(Region &region, OpAsmSetValueNameFn set_name_fn);
 
-    //===------------------------------------------------------------------===//
-    // CallableOpInterface
-    //===------------------------------------------------------------------===//
-
-    // Returns the region on the current operation that is callable. This may
-    // return null in the case of an external callable object, e.g. an external
-    // function.
+    /// Returns the region on the current operation that is callable. This may
+    /// return null in the case of an external callable object, e.g. an external
+    /// function.
     Region *getCallableRegion() {
       return isExternal() ? nullptr : &this->getRegion();
     }
@@ -105,98 +66,30 @@ def TensorIR_ResultsOp : TensorIR_Op<"results",
   [Pure, ParentOneOf<["GraphOp"]>, ReturnLike, Terminator]> {
   let summary = "Define the result values for a TensorIR Graph.";
   let description = [{
-    The `results` operation capture the tensor results of the graph.
-    The operation takes variable number of operands and produces no results.
+    The `results` operation captures the tensor results of the graph.
+    The operation takes a variable number of operands and produces no results.
   }];
   let arguments = (ins Variadic<TensorIR_GraphResultType>:$results);
   let builders = [OpBuilder<(ins), [{ /* nothing to do */ }]>];
-  let assemblyFormat = "$results attr-dict-with-keyword ( `:` type($results)^)? ";
+  let assemblyFormat =
+      "$results attr-dict-with-keyword ( `:` type($results)^)? ";
 }
 
-include "tensor_ir/Dialect/CodegenOps.td"
-
-//===----------------------------------------------------------------------===//
-// Pointwise Operations
-//===----------------------------------------------------------------------===//
-
-// Class for pointwise operations.
-class TensorIR_PointWiseOpBase<string mnemonic, list<Trait> traits = []>
-    : TensorIR_Op<mnemonic,
-                  !listconcat(
-                      [
-                        IterationSpaceInfoInterface,
-                        Pure, OpAsmOpInterface,
-                        PointwiseOpInterface,
-                        LayoutPropInterface
-                      ],
-                      traits)> {
-  let results = (outs TensorIR_TensorType:$output);
-  string commonExtraClassDeclaration = [{
-    //===------------------------------------------------------------------===//
-    // OpAsmOpInterface
-    //===------------------------------------------------------------------===//
-    void getAsmResultNames(function_ref<void(Value, StringRef)> setNameFn) {
-      setNameFn(getResult(), getOperation()->getName().stripDialect());
-    }
-   }];
-  let extraClassDeclaration = commonExtraClassDeclaration;
-}
-
-class TensorIR_PointWiseOpUnary<string mnemonic, list<Trait> traits = []> :
-    TensorIR_PointWiseOpBase<mnemonic,
-        !listconcat([SameOperandsAndResultType, ElementwiseMappable], traits)> {
-  let summary = "Perform " # mnemonic # " operation pointwise on a tensor";
-  let description = [{
-    This operation takes one tensor and return a new tensor of the same
-    shape.
-
-    TODO: Document each of the operation.
-    - the signness aspect of division
-    - Invalid value behavior for pow or mod
-    - Overflow behavior.
-    - NaN propagation, infinity handling?
-  }];
-  let arguments = (ins
-    Arg<TensorIR_TensorType, "Input tensor of the operation">:$input
-  );
-  let assemblyFormat = "$input attr-dict `:` type($output)";
-}
-
-class TensorIR_PointWiseOpBinary<string mnemonic, list<Trait> traits = []> :
-    TensorIR_PointWiseOpBase<mnemonic,
-        !listconcat([SameOperandsAndResultType, ElementwiseMappable], traits)> {
-  let summary = "Perform " # mnemonic # " operation pointwise on two tensors";
-  let description = [{
-    This operation takes two tensors of the same shape and return a new
-    tensor of the same shape as the inputs.
-
-    TODO: Document each of the operation.
-    - the signness aspect of division
-    - Invalid value behavior for pow or mod
-    - Overflow behavior.
-    - NaN propagation, infinity handling?
-  }];
-  let arguments = (ins
-    Arg<TensorIR_TensorType, "Left-hand side tensor of the operation">:$lhs,
-    Arg<TensorIR_TensorType, "Right-hand side tensor of the operation">:$rhs
-  );
-  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($output)";
-}
-
-// Binary Operations
 def TensorIR_AddOp : TensorIR_PointWiseOpBinary<"add", [Commutative]>;
-def TensorIR_SubOp : TensorIR_PointWiseOpBinary<"sub", []>;
+def TensorIR_SubOp : TensorIR_PointWiseOpBinary<"sub">;
 def TensorIR_MulOp : TensorIR_PointWiseOpBinary<"mul", [Commutative]>;
-def TensorIR_DivOp : TensorIR_PointWiseOpBinary<"div", []>;
-def TensorIR_ModOp : TensorIR_PointWiseOpBinary<"mod", []>;
-def TensorIR_RemOp : TensorIR_PointWiseOpBinary<"rem", []> {
-  let summary = "Perform truncated remainder operation pointwise on two tensors";
+def TensorIR_DivOp : TensorIR_PointWiseOpBinary<"div">;
+def TensorIR_ModOp : TensorIR_PointWiseOpBinary<"mod">;
+def TensorIR_RemOp : TensorIR_PointWiseOpBinary<"rem"> {
+  let summary =
+      "Perform truncated remainder operation pointwise on two tensors";
   let description = [{
     Computes `lhs - trunc(lhs / rhs) * rhs` elementwise.
     The result has the sign of the dividend (`lhs`), unlike `nv_tensor_ir.mod`
     which follows floored-remainder semantics.
   }];
 }
+
 def TensorIR_MaxOp : TensorIR_PointWiseOpBinary<"max", [Commutative]> {
   let summary = "Compute the pointwise maximum of two tensors";
   let description = [{
@@ -206,6 +99,7 @@ def TensorIR_MaxOp : TensorIR_PointWiseOpBinary<"max", [Commutative]> {
     ordering and are not affected by NaN semantics.
   }];
 }
+
 def TensorIR_MinOp : TensorIR_PointWiseOpBinary<"min", [Commutative]> {
   let summary = "Compute the pointwise minimum of two tensors";
   let description = [{
@@ -215,44 +109,15 @@ def TensorIR_MinOp : TensorIR_PointWiseOpBinary<"min", [Commutative]> {
     ordering and are not affected by NaN semantics.
   }];
 }
-def TensorIR_AddSquareOp : TensorIR_PointWiseOpBinary<"add_square", []>;
-def TensorIR_GeluBwdOp : TensorIR_PointWiseOpBinary<"gelu_bwd", [ResultsAreFloatLike]>;
 
-def TensorIR_SigmoidBwdOp : TensorIR_PointWiseOpBinary<"sigmoid_bwd", [ResultsAreFloatLike]>;
-def TensorIR_TanhBwdOp : TensorIR_PointWiseOpBinary<"tanh_bwd", [ResultsAreFloatLike]>;
-def TensorIR_GeluApproxTanhBwdOp : TensorIR_PointWiseOpBinary<"gelu_approx_tanh_bwd", [ResultsAreFloatLike]>;
-def TensorIR_ReluBwdOp : TensorIR_PointWiseOpBinary<"relu_bwd", [ResultsAreFloatLike]>;
-
-// Unary Operations
-def TensorIR_AbsOp : TensorIR_PointWiseOpUnary<"abs", []>;
-def TensorIR_CeilOp : TensorIR_PointWiseOpUnary<"ceil", [ResultsAreFloatLike]>;
-def TensorIR_CosOp : TensorIR_PointWiseOpUnary<"cos", [ResultsAreFloatLike]>;
-def TensorIR_ExpOp : TensorIR_PointWiseOpUnary<"exp", [ResultsAreFloatLike]>;
-def TensorIR_FloorOp : TensorIR_PointWiseOpUnary<"floor", [ResultsAreFloatLike]>;
-def TensorIR_LogOp : TensorIR_PointWiseOpUnary<"log", [ResultsAreFloatLike]>;
-def TensorIR_NegOp : TensorIR_PointWiseOpUnary<"neg", [ResultsAreFloatLike]>;
-def TensorIR_RsqrtOp : TensorIR_PointWiseOpUnary<"rsqrt", [ResultsAreFloatLike]>;
-def TensorIR_SinOp : TensorIR_PointWiseOpUnary<"sin", [ResultsAreFloatLike]>;
-def TensorIR_SqrtOp : TensorIR_PointWiseOpUnary<"sqrt", [ResultsAreFloatLike]>;
-def TensorIR_TanOp : TensorIR_PointWiseOpUnary<"tan", [ResultsAreFloatLike]>;
-def TensorIR_Atan2Op : TensorIR_PointWiseOpBinary<"atan2", [ResultsAreFloatLike]>;
-def TensorIR_ErfOp : TensorIR_PointWiseOpUnary<"erf", [ResultsAreFloatLike]>;
-def TensorIR_ReciprocalOp : TensorIR_PointWiseOpUnary<"reciprocal", [ResultsAreFloatLike]>;
-def TensorIR_ReluFwdOp : TensorIR_PointWiseOpUnary<"relu_fwd", [ResultsAreFloatLike]> {
-  let summary = "Apply the rectified linear unit pointwise";
-  let description = [{
-    Computes `max(0, input)` for each floating-point element. NaNs propagate:
-    a NaN input produces a NaN result.
-  }];
-}
-def TensorIR_TanhFwdOp : TensorIR_PointWiseOpUnary<"tanh_fwd", [ResultsAreFloatLike]>;
-def TensorIR_SigmoidFwdOp : TensorIR_PointWiseOpUnary<"sigmoid_fwd", [ResultsAreFloatLike]>;
-def TensorIR_GeluFwdOp : TensorIR_PointWiseOpUnary<"gelu_fwd", [ResultsAreFloatLike]>;
-def TensorIR_GeluApproxTanhFwdOp : TensorIR_PointWiseOpUnary<"gelu_approx_tanh_fwd", [ResultsAreFloatLike]>;
+def TensorIR_AddSquareOp : TensorIR_PointWiseOpBinary<"add_square">;
+def TensorIR_Atan2Op
+    : TensorIR_PointWiseOpBinary<"atan2", [ResultsAreFloatLike]>;
 
 def TensorIR_PowOp : TensorIR_PointWiseOpBase<"pow",
   [AllTypesMatch<["lhs", "output"]>, AllShapesMatch<["lhs", "rhs"]>]> {
-  let summary = "Compute the power of a tensor by raising each element to an exponent";
+  let summary =
+      "Compute the power of a tensor by raising each element to an exponent";
   let description = [{
     This operation raises each element of the tensor $lhs to the power
     specified by the corresponding element in the tensor $rhs.
@@ -268,54 +133,63 @@ def TensorIR_PowOp : TensorIR_PointWiseOpBase<"pow",
     Arg<TensorIR_TensorType, "The exponent of the power operation">:$rhs
   );
   let hasVerifier = 1;
-  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($output)";
+  let assemblyFormat =
+      "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` "
+      "type($output)";
 }
 
+// Unary Operations
+def TensorIR_AbsOp : TensorIR_PointWiseOpUnary<"abs">;
+def TensorIR_CeilOp : TensorIR_PointWiseOpUnary<"ceil", [ResultsAreFloatLike]>;
+def TensorIR_CosOp : TensorIR_PointWiseOpUnary<"cos", [ResultsAreFloatLike]>;
+def TensorIR_ExpOp : TensorIR_PointWiseOpUnary<"exp", [ResultsAreFloatLike]>;
+def TensorIR_FloorOp
+    : TensorIR_PointWiseOpUnary<"floor", [ResultsAreFloatLike]>;
+def TensorIR_LogOp : TensorIR_PointWiseOpUnary<"log", [ResultsAreFloatLike]>;
+def TensorIR_NegOp : TensorIR_PointWiseOpUnary<"neg", [ResultsAreFloatLike]>;
+def TensorIR_RsqrtOp
+    : TensorIR_PointWiseOpUnary<"rsqrt", [ResultsAreFloatLike]>;
+def TensorIR_SinOp : TensorIR_PointWiseOpUnary<"sin", [ResultsAreFloatLike]>;
+def TensorIR_SqrtOp : TensorIR_PointWiseOpUnary<"sqrt", [ResultsAreFloatLike]>;
+def TensorIR_TanOp : TensorIR_PointWiseOpUnary<"tan", [ResultsAreFloatLike]>;
+def TensorIR_ErfOp : TensorIR_PointWiseOpUnary<"erf", [ResultsAreFloatLike]>;
+def TensorIR_ReciprocalOp
+    : TensorIR_PointWiseOpUnary<"reciprocal", [ResultsAreFloatLike]>;
+
 // Activation Operations
-// Base class for activation forward ops with beta parameter (Softplus, Swish, ELU)
-class TensorIR_ActivationFwdWithBetaOp<string mnemonic, list<Trait> traits = [ResultsAreFloatLike]> :
-    TensorIR_PointWiseOpBase<mnemonic,
-        !listconcat([SameOperandsAndResultType], traits)> {
-  let summary = "Perform " # mnemonic # " op.";
+def TensorIR_ReluFwdOp : TensorIR_PointWiseOpUnary<"relu_fwd", [ResultsAreFloatLike]> {
+  let summary = "Apply the rectified linear unit pointwise";
   let description = [{
-    This operation takes a tensor and return a new tensor of the same
-    shape. The beta parameter controls the shape of the activation function.
-    Beta can be any TensorIR floating-point value (f16, bf16, f32, f64).
+    Computes `max(0, input)` for each floating-point element. NaNs propagate:
+    a NaN input produces a NaN result.
   }];
-  let arguments = (ins
-    TensorIR_TensorType:$x,
-    TensorIR_FloatAttr:$beta
-  );
-  let assemblyFormat = " `<` `beta` `=` $beta `>` $x attr-dict `:` type($output)";
 }
+
+def TensorIR_TanhFwdOp
+    : TensorIR_PointWiseOpUnary<"tanh_fwd", [ResultsAreFloatLike]>;
+def TensorIR_SigmoidFwdOp
+    : TensorIR_PointWiseOpUnary<"sigmoid_fwd", [ResultsAreFloatLike]>;
+def TensorIR_GeluFwdOp
+    : TensorIR_PointWiseOpUnary<"gelu_fwd", [ResultsAreFloatLike]>;
+def TensorIR_GeluApproxTanhFwdOp
+    : TensorIR_PointWiseOpUnary<"gelu_approx_tanh_fwd", [ResultsAreFloatLike]>;
+
+def TensorIR_GeluBwdOp
+    : TensorIR_PointWiseOpBinary<"gelu_bwd", [ResultsAreFloatLike]>;
+def TensorIR_SigmoidBwdOp
+    : TensorIR_PointWiseOpBinary<"sigmoid_bwd", [ResultsAreFloatLike]>;
+def TensorIR_TanhBwdOp
+    : TensorIR_PointWiseOpBinary<"tanh_bwd", [ResultsAreFloatLike]>;
+def TensorIR_GeluApproxTanhBwdOp
+    : TensorIR_PointWiseOpBinary<"gelu_approx_tanh_bwd", [ResultsAreFloatLike]>;
+def TensorIR_ReluBwdOp
+    : TensorIR_PointWiseOpBinary<"relu_bwd", [ResultsAreFloatLike]>;
 
 def TensorIR_SoftplusFwdOp : TensorIR_ActivationFwdWithBetaOp<"softplus_fwd">;
 
 def TensorIR_SwishFwdOp : TensorIR_ActivationFwdWithBetaOp<"swish_fwd">;
 
 def TensorIR_EluFwdOp : TensorIR_ActivationFwdWithBetaOp<"elu_fwd">;
-
-// Base class for activation backward ops with beta parameter (Softplus, Swish, ELU)
-class TensorIR_ActivationBwdWithBetaOp<string mnemonic, list<Trait> traits = [ResultsAreFloatLike]> :
-    TensorIR_PointWiseOpBase<mnemonic,
-        !listconcat([SameOperandsAndResultType], traits)> {
-  let summary = "Perform " # mnemonic # " op.";
-  let description = [{
-    This operation takes three tensors and returns a new tensor of the same
-    shape as the inputs. The 'x' and 'dL_by_dy' tensors must have the same type.
-    The 'beta' parameter controls the shape of the activation function.
-    Beta can be any TensorIR floating-point value (f16, bf16, f32, f64).
-
-    Computes the gradient of the corresponding forward activation function
-    with respect to the input, scaled by the upstream gradient dL_by_dy.
-  }];
-  let arguments = (ins
-    TensorIR_TensorType:$x,
-    TensorIR_TensorType:$dL_by_dy,
-    TensorIR_FloatAttr:$beta
-  );
-  let assemblyFormat = " `<` `beta` `=` $beta `>` $x `,` $dL_by_dy attr-dict `:` type($output) ";
-}
 
 def TensorIR_SoftplusBwdOp : TensorIR_ActivationBwdWithBetaOp<"softplus_bwd">;
 
@@ -327,7 +201,7 @@ def TensorIR_BinarySelectOp : TensorIR_PointWiseOpBase<"binary_select",
   [AllTypesMatch<["lhs", "rhs", "output"]>,
   TypesMatchWith<
     "selector type has i1 element type and same shape as other operands",
-    "lhs", "selector", "::llvm::cast<TensorType>($_self).clone("
+    "lhs", "selector", "::llvm::cast<RankedTensorType>($_self).clone("
     "::mlir::IntegerType::get($_self.getContext(), 1))">]> {
   let summary = "Use a selector tensor to select between two inputs.";
   let description = [{
@@ -340,16 +214,14 @@ def TensorIR_BinarySelectOp : TensorIR_PointWiseOpBase<"binary_select",
     Arg<TensorIR_TensorType, "Left-hand side tensor of the select">:$lhs,
     Arg<TensorIR_TensorType, "Right-hand side tensor of the select">:$rhs
   );
-  let results = (outs
-    TensorIR_TensorType:$output
-  );
-  let assemblyFormat = "$selector `` `,` $lhs `` `,` $rhs attr-dict `:` type($lhs)";
+  let assemblyFormat =
+      "$selector `` `,` $lhs `` `,` $rhs attr-dict `:` type($lhs)";
 }
 
 def TensorIR_CmpOp : TensorIR_PointWiseOpBase<"cmp",
   [SameTypeOperands, TypesMatchWith<
     "result type has i1 element type and same shape as operands",
-    "lhs", "output", "::llvm::cast<TensorType>($_self).clone("
+    "lhs", "output", "::llvm::cast<RankedTensorType>($_self).clone("
     "::mlir::IntegerType::get($_self.getContext(), 1))">]> {
   let summary = "Compare two tensors and produce the result in a new tensor.";
   let description = [{
@@ -387,33 +259,9 @@ def TensorIR_CmpOp : TensorIR_PointWiseOpBase<"cmp",
   let hasVerifier = 1;
 }
 
-// Boolean Operations
-
-class TensorIR_PointWiseOpBoolean<string mnemonic, list<Trait> traits = []> :
-    TensorIR_PointWiseOpBase<mnemonic,
-        !listconcat(traits, [SameTypeOperands, TypesMatchWith<
-    "result type has i1 element type and same shape as operands",
-    "lhs", "output", "::llvm::cast<TensorType>($_self).clone("
-    "::mlir::IntegerType::get($_self.getContext(), 1))">,
-    ])> {
-  let summary = "Compare two tensors using the boolean operator " # mnemonic;
-  let description = [{
-    This operation takes two tensors of the same shape and return a new
-    boolean tensor of the same shape as the inputs.
-  }];
-  let arguments = (ins
-    TensorIR_TensorType:$lhs,
-    TensorIR_TensorType:$rhs
-  );
-  let results = (outs
-    TensorIR_BoolTensor:$output
-  );
-  let assemblyFormat = "$lhs `` `,` $rhs attr-dict `:` type($lhs)";
-}
-
 def TensorIR_LogicalAndOp : TensorIR_PointWiseOpBoolean<"and", [Commutative]>;
 def TensorIR_LogicalOrOp : TensorIR_PointWiseOpBoolean<"or", [Commutative]>;
-def TensorIR_LogicalNotOp : TensorIR_PointWiseOpUnary<"not", []>;
+def TensorIR_LogicalNotOp : TensorIR_PointWiseOpUnary<"not">;
 
 def TensorIR_ConvertOp : TensorIR_PointWiseOpBase<"convert",
         [SameOperandsAndResultShape]> {
@@ -461,14 +309,14 @@ def TensorIR_ConvertOp : TensorIR_PointWiseOpBase<"convert",
   let hasFolder = 1;
 }
 
-//===----------------------------------------------------------------------===//
-// Reduce Operations
-//===----------------------------------------------------------------------===//
-
 def TensorIR_ReduceOp
     : TensorIR_Op<
-          "reduce", [Pure, OpAsmOpInterface, IterationSpaceInfoInterface,
-                     AllRanksMatch<["input", "output"]>,
+          "reduce", [Pure, OpAsmOpInterface,
+                     DeclareOpInterfaceMethods<
+                         IterationSpaceInfoInterface,
+                         ["computeCanonicalOutputIterSpaceMap",
+                          "inferInputFromOutputIterSpaceMap",
+                          "inferOutputFromInputIterSpaceMaps"]>,
                      DeclareOpInterfaceMethods<
                          LayoutPropInterface, ["inferResultLayout"]>]> {
   let summary = "Reduce operator";
@@ -497,11 +345,11 @@ def TensorIR_ReduceOp
     `broadcast` that expands the reduced dimension back to non-unit is
     what triggers a transition.
 
-    Every non-reduced result dimension is inherited from the corresponding
-    input dimension, including its static/dynamic type information. At
-    runtime, inherited dynamic extents equal their input extents. A result may
-    leave a statically known reduced extent dynamic when it crosses a graph
-    signature that has not yet been shape-refined; that runtime extent is 1.
+    The result either retains every reduced dimension with static extent 1 or
+    drops every reduced dimension. Every non-reduced result dimension is
+    inherited from the corresponding input dimension, including its
+    static/dynamic type information. At runtime, inherited dynamic extents
+    equal their input extents.
   }];
   let arguments = (ins
     TensorIR_TensorType:$input,
@@ -513,9 +361,20 @@ def TensorIR_ReduceOp
                          `dimensions` `=` $dimensions `,`
                          `reduction_mode` `=` $reduction_mode `>`
                          attr-dict `:` type($input) `->` type($output)}];
+  let extraClassDeclaration = [{
+    /// Returns true when the result omits every reduced dimension.
+    bool dropsReducedDimensions();
+
+    /// Returns a mask indexed by input dimension. A set bit is a reduced
+    /// dimension.
+    llvm::SmallBitVector getReductionDimMask();
+  }];
   let hasFolder = 1;
   let hasVerifier = 1;
 }
+
+def TensorIR_TypedAttrArray
+    : TypedArrayAttrBase<TypedAttrInterface, "array of typed attributes">;
 
 def TensorIR_ReduceUDOp : TensorIR_Op<"reduce_ud",
   [Pure, SingleBlockImplicitTerminator<"YieldOp">, OpAsmOpInterface,
@@ -570,8 +429,9 @@ def TensorIR_ReduceUDOp : TensorIR_Op<"reduce_ud",
     keep the eagerly evaluated candidate arithmetic finite, then selects the
     nonempty summary unchanged. A nonzero denominator handles two empty
     summaries, which combine to the identity tuple.
-    All inputs have the same shape. Each result has the same shape as its
-    corresponding input except that reduced dimensions have extent 1.
+    All input shapes equal-merge. The results either retain every reduced
+    dimension with static extent 1 or drop every reduced dimension, and all
+    results use the same convention.
     ```mlir
     %reduce0, %reduce1, %reduce2 = nv_tensor_ir.reduce_ud(%input, %m2, %weight)<
     dimensions = [1],
@@ -617,21 +477,30 @@ def TensorIR_ReduceUDOp : TensorIR_Op<"reduce_ud",
     custom<ReductionBody>($body)
     attr-dict `:` type($inputs) `->` type($output)
   }];
+  let extraClassDeclaration = [{
+    /// Returns true when every result omits every reduced dimension.
+    bool dropsReducedDimensions();
+
+    /// Returns a mask indexed by input dimension. A set bit is a reduced
+    /// dimension.
+    llvm::SmallBitVector getReductionDimMask();
+  }];
   let hasVerifier = 1;
   let hasRegionVerifier = 1;
 }
 
-def TensorIR_YieldOp: TensorIR_Op<"yield",
-                            [ParentOneOf<["ReduceUDOp"
-                            ]>,
-                            Pure, Terminator, ReturnLike]> {
+def TensorIR_YieldOp
+    : TensorIR_Op<"yield", [
+        ParentOneOf<["ReduceUDOp"
+                    ]>,
+        Pure, Terminator, ReturnLike]> {
   let summary = "Yield operation";
 
   let description = [{
     `nv_tensor_ir.yield` is a special terminator operation for blocks inside regions
     in `nv_tensor_ir` ops. It returns values to the immediately enclosing `nv_tensor_ir` op.
 
-    The operation takes variable number of operands and produces no results.
+    The operation takes a variable number of operands and produces no results.
 
     Example:
 
@@ -644,9 +513,97 @@ def TensorIR_YieldOp: TensorIR_Op<"yield",
   let assemblyFormat = "$result attr-dict `:` type($result)";
 }
 
-//===----------------------------------------------------------------------===//
-// Matmul Operations
-//===----------------------------------------------------------------------===//
+def TensorIR_ContractionOp : TensorIR_Op<"contraction", [Pure]> {
+  let summary =
+      "Tensor contraction with multiple product and reduction dimensions";
+  let description = [{
+    Computes `C = A * B`, or `C = Acc + A * B` with an accumulator,
+    summing over each contraction dimension. As with `matmul`, multiplication
+    uses the input element types before conversion to C's element type and
+    accumulation. The accumulator must have exactly C's type.
+
+    `indexing_maps` contains three affine maps, for A, B, and C respectively,
+    from a shared logical iteration domain to tensor dimension indices, as
+    in Linalg. Each map must be a symbol-free projected permutation with one
+    result per tensor dimension. Input dimensions can appear in any order.
+    The optional accumulator uses C's map.
+
+    Every domain dimension must be one of:
+    * batch: appears in A, B, and C;
+    * lhs product: appears in A and C only;
+    * rhs product: appears in B and C only;
+    * contraction: appears in A and B only, and is summed over.
+
+    C's map must list dimensions in [batch..., lhs-product..., rhs-product...]
+    order. Within each group the order is unrestricted. Domain dimensions
+    need not follow any particular order. Empty product groups allow dot
+    products; an empty contraction group gives an outer product.
+
+    For example, a transposed lhs matrix product uses:
+    ```mlir
+    maps (m, n, k) -> (k, m), (k, n), (m, n)
+    ```
+    The custom syntax shares the domain across the three maps. Generic syntax
+    stores them as the `indexing_maps` array of affine map attributes.
+
+    Corresponding batch extents broadcast using the same rules as `matmul`:
+    unit extents broadcast, and a dynamic extent paired with a non-unit static
+    extent is constrained to broadcast to that extent. C's batch extents must
+    equal the inferred broadcast shape. Product extents are inherited exactly
+    from their input, including dynamic extents. Corresponding contraction
+    extents must agree at runtime; unequal static extents are rejected.
+
+    This operation does not yet have a lowering.
+  }];
+  let arguments = (ins
+    TensorIR_TensorType:$a,
+    TensorIR_TensorType:$b,
+    Optional<TensorIR_TensorType>:$acc,
+    ConfinedAttr<AffineMapArrayAttr, [ArrayCount<3>]>:$indexing_maps
+  );
+  let results = (outs TensorIR_TensorType:$c);
+  let assemblyFormat = [{
+    `(` $a `,` $b `)`
+    (`accum` `(` $acc^ `:` type($acc) `)`)?
+    `maps` custom<ContractionIndexingMaps>($indexing_maps)
+    prop-dict attr-dict `:` `(` type($a) `,` type($b) `)` `->` type($c)
+  }];
+  let extraClassDeclaration = [{
+    /// These accessors require verified indexing maps.
+    AffineMap getLhsIndexingMap() {
+      return cast<AffineMapAttr>(getIndexingMaps()[0]).getValue();
+    }
+    AffineMap getRhsIndexingMap() {
+      return cast<AffineMapAttr>(getIndexingMaps()[1]).getValue();
+    }
+    AffineMap getResultIndexingMap() {
+      return cast<AffineMapAttr>(getIndexingMaps()[2]).getValue();
+    }
+
+    /// Domain dimensions absent from the result are contraction dimensions.
+    unsigned getNumContractingDims() {
+      AffineMap map = getResultIndexingMap();
+      return map.getNumDims() - map.getNumResults();
+    }
+
+    /// Domain dimensions absent from one input are the other input's products.
+    unsigned getNumLhsProductDims() {
+      AffineMap map = getRhsIndexingMap();
+      return map.getNumDims() - map.getNumResults();
+    }
+    unsigned getNumRhsProductDims() {
+      AffineMap map = getLhsIndexingMap();
+      return map.getNumDims() - map.getNumResults();
+    }
+
+    /// Result dimensions that are not products are batch dimensions.
+    unsigned getNumBatchDims() {
+      return getResultIndexingMap().getNumResults() -
+             getNumLhsProductDims() - getNumRhsProductDims();
+    }
+  }];
+  let hasVerifier = 1;
+}
 
 def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
     Pure, OpAsmOpInterface, AnchorOpInterface, IterationSpaceInfoInterface,
@@ -671,13 +628,11 @@ def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
 
     The other outer dimensions specify a batch matrix multiplication.
 
-    Result batch dimensions are the broadcasted shape of the corresponding
-    dimensions of `A` and `B`. Unit dimensions broadcast to the other extent,
-    including when that extent is dynamic. A dynamic dimension paired with a
-    non-unit static dimension is constrained to broadcast to that static
-    extent. The result `M` dimension is inherited exactly from `A`, the result
-    `N` dimension is inherited exactly from `B`, and the two runtime `K`
-    extents must be equal.
+    Corresponding batch dimensions of `A` and `B` must be equal. A static
+    extent may refine a dynamic extent, and the result batch dimension must
+    equal the merged extent. The result `M` dimension is inherited exactly
+    from `A`, the result `N` dimension is inherited exactly from `B`, and the
+    two runtime `K` extents must be equal.
 
     Examples of valid dimensions for A, B are -
     A - [m, k] and B - [k, n] producing C - [m, n]
@@ -700,17 +655,13 @@ def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
   ];
 
   let extraClassDeclaration = [{
-    //===------------------------------------------------------------------===//
-    // OpAsmOpInterface
-    //===------------------------------------------------------------------===//
+    /// Uses operation name as the base for SSA result value names in the
+    /// printed textual IR.
     void getAsmResultNames(function_ref<void(Value, StringRef)> setNameFn) {
       setNameFn(getResult(), getOperation()->getName().stripDialect());
     }
 
 
-    //===------------------------------------------------------------------===//
-    // IterationSpaceInfoInterface.
-    //===------------------------------------------------------------------===//
     unsigned getNumIterSpaceDims();
 
     AffineMap computeCanonicalInputIterSpaceMap(unsigned inputIndex,
@@ -730,10 +681,6 @@ def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
   let hasVerifier = 1;
 }
 
-//===----------------------------------------------------------------------===//
-// Tensor Manipulation Operations
-//===----------------------------------------------------------------------===//
-
 def TensorIR_DimOp : TensorIR_Op<"dim", [Pure, OpAsmOpInterface]> {
   let summary = "Return a tensor dimension extent";
   let description = [{
@@ -752,9 +699,8 @@ def TensorIR_DimOp : TensorIR_Op<"dim", [Pure, OpAsmOpInterface]> {
   let hasVerifier = 1;
 }
 
-// SplatOp inherits from TensorIR_Op directly (not TensorIR_PointWiseOpBase)
-// because it takes a scalar input, not a tensor. This requires overriding
-// several IterationSpaceInfoInterface methods that assume tensor operands.
+// SplatOp takes a scalar input rather than a tensor, so it overrides the
+// IterationSpaceInfoInterface methods that assume tensor operands.
 def TensorIR_SplatOp : TensorIR_PointWiseOpBase<"splat", [
     DynamicDimsOpInterface,
     DeclareOpInterfaceMethods<IterationSpaceInfoInterface, [
@@ -766,8 +712,8 @@ def TensorIR_SplatOp : TensorIR_PointWiseOpBase<"splat", [
     ]>,
     TypesMatchWith<"input type matches data type of output",
                    "output", "input",
-                   "::llvm::isa<nv_tensor_ir::TensorType>($_self) ? "
-                   "::llvm::cast<nv_tensor_ir::TensorType>($_self).getElementType() : $_self">
+                   "::llvm::isa<RankedTensorType>($_self) ? "
+                   "::llvm::cast<RankedTensorType>($_self).getElementType() : $_self">
   ]> {
   let summary = "Create tensor filled with a scalar value";
   let description = [{
@@ -830,7 +776,6 @@ def TensorIR_BroadcastOp : TensorIR_PointWiseOpBase<"broadcast", [
     Arg<TensorIR_TensorType, "Input tensor to broadcast">:$input,
     Variadic<Index>:$dynamic_sizes
   );
-  let results = (outs TensorIR_TensorType:$output);
   let assemblyFormat = [{
     $input
     (`dynamic_dims` `(` $dynamic_sizes^ `)`)?
@@ -965,7 +910,9 @@ def TensorIR_TransposeOp
     Arg<TensorIR_TensorType, "Transposed output tensor">:$output
   );
 
-  let assemblyFormat = "$input `permutation` `=` $permutation attr-dict `:` type($input) `->` type($output)";
+  let assemblyFormat =
+      "$input `permutation` `=` $permutation attr-dict `:` type($input) "
+      "`->` type($output)";
   let hasCanonicalizer = 1;
   let hasFolder = 1;
   let hasVerifier = 1;
@@ -1014,7 +961,9 @@ def TensorIR_SliceOp
     Arg<TensorIR_TensorType, "Sliced output tensor">:$output
   );
 
-  let assemblyFormat = "$input `starts` `=` $starts `limits` `=` $limits `strides` `=` $strides attr-dict `:` type($input) `->` type($output)";
+  let assemblyFormat =
+      "$input `starts` `=` $starts `limits` `=` $limits `strides` `=` "
+      "$strides attr-dict `:` type($input) `->` type($output)";
   let hasCanonicalizer = 1;
   let hasFolder = 1;
   let hasVerifier = 1;
@@ -1064,7 +1013,9 @@ def TensorIR_ConcatenateOp : TensorIR_Op<"concatenate", [
     TensorIR_TensorType:$output
   );
 
-  let assemblyFormat = "$inputs `dimension` `=` $dimension attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat =
+      "$inputs `dimension` `=` $dimension attr-dict `:` "
+      "functional-type(operands, results)";
   let hasFolder = 1;
   let hasVerifier = 1;
 }
@@ -1114,17 +1065,17 @@ def TensorIR_IotaOp : TensorIR_Op<"iota", [
   }];
   let hasVerifier = 1;
   let extraClassDeclaration = [{
-    //===------------------------------------------------------------------===//
-    // OpAsmOpInterface
-    //===------------------------------------------------------------------===//
+    /// Uses operation name as the base for SSA result value names in the
+    /// printed textual IR.
     void getAsmResultNames(function_ref<void(Value, StringRef)> setNameFn) {
       setNameFn(
         getResult(),
         "iota_" + std::to_string(static_cast<int64_t>(getDimension())));
     }
   }];
-
 }
 
+include "tensor_ir/Dialect/CodegenOps.td"
 
-#endif // TENSOR_OPS
+
+#endif // TENSORIR_DIALECT_TENSOROPS_TD
