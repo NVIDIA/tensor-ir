@@ -56,6 +56,10 @@ struct CompilerInvocation : CompilerInvocationComponents {
   [[nodiscard]] FailureOr<ComputeCapability>
   getCodegenComputeCapability() const;
 
+  /// Resolves Auto to Native for OSS CUDA Tile layout propagation and to
+  /// Interpreter otherwise. Explicit targets are returned unchanged.
+  [[nodiscard]] HostTarget getEffectiveHostTarget() const;
+
   /// Returns a compact, filesystem-safe description for shader names.
   [[nodiscard]] std::string toShaderNameSuffix() const;
 

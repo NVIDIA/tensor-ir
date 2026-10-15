@@ -9,6 +9,9 @@
 
 #include "llvm/ADT/SmallVector.h"
 
+#include "NativeHostModule.h"
+#include <array>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -18,6 +21,13 @@ using mlir::nv_tensor_ir::SmTarget;
 
 /// Inline buffer size for SmallVectors holding kernel arguments.
 static constexpr unsigned kMaxInlineKernelArgs = 128;
+
+CudaTileRuntimeKernel::CudaTileRuntimeKernel(
+    std::unique_ptr<const TensorIRArtifact> artifact)
+    : artifact_(std::move(artifact)),
+      argPacker_(artifact_->getLaunchMetadata()) {}
+
+CudaTileRuntimeKernel::~CudaTileRuntimeKernel() { (void)unloadRuntimeState(); }
 
 StatusOr<IRuntimeKernelPtr>
 CudaTileRuntimeKernel::create(std::unique_ptr<TensorIRArtifact> artifact) {
@@ -95,6 +105,22 @@ static StatusOr<int> getCurrentDeviceComputeCapability() {
 }
 
 Status CudaTileRuntimeKernel::initializeRuntimeState() const {
+  std::unique_lock lock(stateMutex_);
+  if (kernel_) {
+    return Status::Ok();
+  }
+  std::unique_ptr<NativeHostModule> host;
+  if (artifact_->getHostModule()) {
+    TIR_ASSIGN_OR_RETURN(
+        host, NativeHostModule::load(*artifact_->getHostModule(),
+                                     artifact_->getEntrypointName()));
+  }
+  TIR_RETURN_IF_ERROR(initializeDeviceState());
+  hostModule_ = std::move(host);
+  return Status::Ok();
+}
+
+Status CudaTileRuntimeKernel::initializeDeviceState() const {
   llvm::ArrayRef<char> code = activeDeviceCode();
   if (code.empty()) {
     return Status::NotSupported("No device code available");
@@ -155,6 +181,7 @@ Status CudaTileRuntimeKernel::initializeRuntimeState() const {
 }
 
 Status CudaTileRuntimeKernel::unloadRuntimeState() const {
+  std::unique_lock lock(stateMutex_);
   if (lib_) {
     Status status = ::mlir::nv_tensor_ir::cuda::driver::unloadLibrary(lib_);
     if (!status.ok()) {
@@ -163,12 +190,16 @@ Status CudaTileRuntimeKernel::unloadRuntimeState() const {
     lib_ = nullptr;
     kernel_ = nullptr;
   }
+  hostModule_.reset();
 
   return Status::Ok();
 }
 
-Status CudaTileRuntimeKernel::checkSupport(PackedArgs /*args*/) const {
-  // TODO: Validate arguments match kernel signature
+Status CudaTileRuntimeKernel::checkSupport(PackedArgs args) const {
+  if (artifact_->getHostModule()) {
+    return packNativeHostArgs(artifact_->getLaunchMetadata(), args).status();
+  }
+  // TODO: Validate interpreter arguments match kernel signature
   return Status::Ok();
 }
 
@@ -177,9 +208,87 @@ size_t CudaTileRuntimeKernel::queryWorkspaceSize(PackedArgs /*args*/) const {
   return 0;
 }
 
+namespace {
+Status launchCudaKernel(CUkernel kernel, Stream stream,
+                        const TensorIRLaunchConfigV1 &launch, void **params,
+                        bool usesPDL) {
+  CUlaunchConfig config = {};
+  config.gridDimX = launch.grid[0];
+  config.gridDimY = launch.grid[1];
+  config.gridDimZ = launch.grid[2];
+  config.blockDimX = launch.block[0];
+  config.blockDimY = launch.block[1];
+  config.blockDimZ = launch.block[2];
+  config.sharedMemBytes = launch.dynamicSharedMemoryBytes;
+  config.hStream = stream;
+  std::array<CUlaunchAttribute, 2> launchAttrs{};
+  unsigned numAttrs = 0;
+  launchAttrs[numAttrs].id =
+      CU_LAUNCH_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE;
+  launchAttrs[numAttrs].value.clusterSchedulingPolicyPreference =
+      CU_CLUSTER_SCHEDULING_POLICY_SPREAD;
+  ++numAttrs;
+  // Programmatic stream serialization lets this grid start while the previous
+  // grid in the stream is still finishing. It is only requested for kernels
+  // that wait on the preceding grid (griddepcontrol.wait) before touching
+  // global memory, which is what keeps the early start free of races.
+  if (usesPDL) {
+    launchAttrs[numAttrs].id =
+        CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+    launchAttrs[numAttrs].value.programmaticStreamSerializationAllowed = 1;
+    ++numAttrs;
+  }
+  config.attrs = launchAttrs.data();
+  config.numAttrs = numAttrs;
+  return cuda::driver::launchKernel(config, kernel, params);
+}
+
+struct NativeLaunchContext {
+  CUkernel kernel;
+  Stream stream;
+  bool usesPDL;
+  Status status;
+};
+
+int32_t launchNative(void *userData, uint32_t ordinal,
+                     const TensorIRLaunchConfigV1 *config,
+                     void *const *params) noexcept {
+  auto &context = *static_cast<NativeLaunchContext *>(userData);
+  if (ordinal != 0 || !config) {
+    context.status = Status::InvalidArgument(
+        "Invalid native host kernel ordinal or launch configuration");
+  } else {
+    context.status =
+        launchCudaKernel(context.kernel, context.stream, *config,
+                         const_cast<void **>(params), context.usesPDL);
+  }
+  return context.status.ok() ? 0 : -3;
+}
+} // namespace
+
 Status CudaTileRuntimeKernel::launch(PackedArgs args, Workspace workspace,
                                      Stream stream) const {
   (void)workspace;
+  std::shared_lock lock(stateMutex_);
+  if (!kernel_) {
+    return Status::NotInitialized("CudaTileRuntimeKernel is not initialized");
+  }
+  if (hostModule_) {
+    TIR_ASSIGN_OR_RETURN(
+        auto packed, packNativeHostArgs(artifact_->getLaunchMetadata(), args));
+    NativeLaunchContext context{kernel_, stream, artifact_->usesPDL(),
+                                Status::Ok()};
+    TensorIRHostRuntimeV1 runtime{sizeof(TensorIRHostRuntimeV1),
+                                  TENSOR_IR_HOST_ABI_VERSION_1, &context,
+                                  launchNative};
+    int32_t result = hostModule_->invoke(runtime, packed);
+    TIR_RETURN_IF_ERROR(context.status);
+    if (result != 0) {
+      return Status::InvalidArgument("Native host entry failed with status " +
+                                     std::to_string(result));
+    }
+    return Status::Ok();
+  }
 
   if (activeDeviceCode().empty()) {
     return Status::NotSupported("No device code available");
@@ -204,32 +313,19 @@ Status CudaTileRuntimeKernel::launch(PackedArgs args, Workspace workspace,
   // Compute grid via strategy.
   ::tensor_ir::rt::GridDims grid = gridComputer_->computeGrid(acc);
 
-  // Configure launch parameters.
-  CUlaunchConfig config = {};
-  config.gridDimX = grid.x;
-  config.gridDimY = grid.y;
-  config.gridDimZ = grid.z;
-  config.blockDimX = 1;
-  config.blockDimY = 1;
-  config.blockDimZ = 1;
-  config.sharedMemBytes = 0;
-  config.hStream = stream;
-
-  CUlaunchAttribute launchAttr[1];
-  launchAttr[0].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE;
-  launchAttr[0].value.clusterSchedulingPolicyPreference =
-      CU_CLUSTER_SCHEDULING_POLICY_SPREAD;
-  config.attrs = launchAttr;
-  config.numAttrs = 1;
-
   // Build the pointer-to-arg array required by cuLaunchKernelEx.
   llvm::SmallVector<void *, kMaxInlineKernelArgs> kernelParams(numArgs);
   for (int32_t i = 0; i < numArgs; ++i) {
     kernelParams[i] = &argValues[i];
   }
 
-  return ::mlir::nv_tensor_ir::cuda::driver::launchKernel(config, kernel_,
-                                                          kernelParams.data());
+  TensorIRLaunchConfigV1 config{{static_cast<uint32_t>(grid.x),
+                                 static_cast<uint32_t>(grid.y),
+                                 static_cast<uint32_t>(grid.z)},
+                                {1, 1, 1},
+                                0};
+  return launchCudaKernel(kernel_, stream, config, kernelParams.data(),
+                          artifact_->usesPDL());
 }
 
 } // namespace tensor_ir::rt

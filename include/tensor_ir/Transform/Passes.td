@@ -42,41 +42,11 @@ def RemoveIterationSpaceMapsPass : Pass<"remove-iteration-space-maps", "nv_tenso
   }];
 }
 
-def LayoutPropagationAnnotationPass : Pass<"layout-propagation-annotation", "nv_tensor_ir::GraphOp"> {
-  let summary = "Add layout source annotations for graph operations";
-  let description = [{
-    This pass walks graph operations in forward SSA order and adds a `layout`
-    attribute that describes the tensor sources and layout transformations
-    needed to compute each operation result.
-
-    For operations that implement `LayoutPropInterface`, the pass collects one
-    layout source per operand, in operand order, and calls `inferResultLayout`.
-    Pointwise operations combine their distinct operand sources. Operand-free
-    tensor producers such as constants, splats, and iotas seed propagation with
-    an initial layout source.
-
-    Inferred result layouts retain their operand layout provenance. The later
-    graph-splitting phase uses that provenance to materialize operand layouts
-    while traversing from a requested result layout back toward graph inputs.
-    That traversal is backward; the result layout inference performed by this
-    pass is forward.
-  }];
-}
-
-def LayoutPropagationNormalizationPass : Pass<"layout-propagation-normalization", "nv_tensor_ir::GraphOp"> {
-  let summary = "Add iteration space annotations for graph operations";
-  let description = [{
-    This pass adds the "iteration_space" attribute to the graph operations that
-    define the iteration space: the graph output and any ops that modify the
-    iteration space (have hidden dimensions), i.e. reductions and matmuls.
-  }];
-}
-
 def TileAnalyzerPass : Pass<"tile-analyzer", "nv_tensor_ir::GraphOp"> {
   let summary = "Analyze iteration space and generate tile candidates";
   let description = [{
-    This pass reads normalized layout attributes (TensorSourceAttr/CompositeSourceAttr),
-    extracts the common iteration space, and generates tile candidates.
+    This pass computes the normalized layout-propagation iteration space,
+    extracts its shape and source strides, and generates tile candidates.
 
     Candidate generation is skipped when a tile shape is already available:
     - "tile_size" attribute already exists on GraphOp (tile from tensor-ir)
@@ -118,8 +88,8 @@ def TileSelectionPass : Pass<"tile-selection", "nv_tensor_ir::GraphOp"> {
     3. "tile_candidates" attribute on GraphOp (from TileAnalyzerPass)
     If none of the above are available, the pass emits an error.
 
-    Verifies the selected tile against the iteration space (rank match and
-    validity). On failure, emits an error including the selected tile shape
+    Verifies the selected tile against the normalized layout-propagation
+    iteration space (rank match and validity). On failure, emits an error including the selected tile shape
     and the current iteration space shape.
 
     Removes "tile_candidates" (if present), and sets "tile_size" as a
@@ -134,16 +104,6 @@ def TileSelectionPass : Pass<"tile-selection", "nv_tensor_ir::GraphOp"> {
   ];
 }
 
-def GraphSplittingPass : Pass<"graph-splitting", "nv_tensor_ir::GraphOp"> {
-  let summary = "Split reconvergent graphs into layout-specialized trees";
-  let description = [{
-    This pass rewrites a TensorIR graph into an equivalent tree by cloning
-    operations for each required layout. The pass is intended to run after
-    layout propagation/annotation so that every tensor-producing operation has
-    a "layout" attribute.
-  }];
-}
-
 def BufferizePass : Pass<"tir-bufferize", "mlir::ModuleOp"> {
   let summary = "Create destination-passing TensorIR buffer boundaries";
   let description = [{
@@ -152,8 +112,8 @@ def BufferizePass : Pass<"tir-bufferize", "mlir::ModuleOp"> {
     `nv_tensor_ir.alignment` attributes. Restrict `bufferization.to_tensor` and
     `bufferization.materialize_in_destination` operations bridge these buffers
     to the unchanged tensor computation. The pass emits no memory accesses,
-    preserves layout and tile-selection metadata, and performs no tiling or
-    grid construction.
+    preserves tile-selection metadata, and performs no tiling or grid
+    construction.
   }];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
@@ -168,16 +128,17 @@ def BufferizePass : Pass<"tir-bufferize", "mlir::ModuleOp"> {
 def FormGridPass : Pass<"tir-form-grid", "mlir::func::FuncOp"> {
   let summary = "Tile a bufferized TensorIR function onto a GPU grid";
   let description = [{
-    Consumes a function produced by `tir-bufferize`, normalized
-    layout-propagation metadata, and the selected tile shape. The function
+    Consumes a function produced by `tir-bufferize` and the selected tile
+    shape, and computes the layout propagation and normalized iteration space
+    of its tensor computation from the bufferization boundary. The function
     signature remains unchanged. A rank-one `scf.forall` mapped to
     `#gpu.block<x>` delinearizes the block coordinate, loads fixed-shape tiles,
     computes graph results, and stores them. These tiled `nv_tensor_ir.load` and
     `nv_tensor_ir.store` operations replace the bufferization bridges.
 
     Layout-only reshape, transpose, broadcast, and slice operations are folded
-    into the explicit access metadata. Analysis-only layout, iteration-space,
-    result-view, and tile-selection attributes do not survive formation.
+    into the explicit access metadata. Tile-selection attributes do not
+    survive formation.
   }];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
@@ -242,6 +203,127 @@ def OutlineKernelPass : Pass<"outline-tensor-ir-kernel", "mlir::ModuleOp"> {
     "::mlir::gpu::GPUDialect",
     "::mlir::nv_tensor_ir::TensorIRDialect",
     "::mlir::scf::SCFDialect"
+  ];
+}
+
+def HostAbiBridgePass : Pass<"tir-host-abi-bridge", "ModuleOp"> {
+  let summary = "Build the native host ABI entry point";
+  let description = [{
+    Threads the host runtime context and an error status through host code.
+    Every defined top-level `func.func` receives a leading `!llvm.ptr` argument
+    marked `nv_tensor_ir.runtime_context` and a leading `i32` status result;
+    declarations and functions inside `gpu.module` keep their signatures.
+    Existing returns report success (0). Each call to a defined host function
+    forwards the caller's context; a nonzero callee status branches to a block
+    that returns it, with poison for the caller's other results.
+
+    Public functions must return nothing. Calls to defined host functions must
+    be directly in the caller's body, so SCF must be lowered to CF before this
+    pass.
+
+    The pass then exports a C entry point,
+    `func.func @tensor_ir_host_entry_<name>_v1`, for each public function. It
+    has the `TensorIRHostEntryV1` signature
+    `(runtime, packedArgs, packedArgCount) -> i32`, passes `runtime` as the
+    context, and decodes the remaining arguments in order from the `int64_t`
+    slots of `packedArgs`: a memref takes its base pointer, sizes, and strides
+    and gets a zero offset; a scalar takes one slot holding its value bits in
+    the low bytes. The entry point returns the function's status.
+  }];
+  let dependentDialects = [
+    "::mlir::nv_tensor_ir::TensorIRDialect",
+    "::mlir::LLVM::LLVMDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::cf::ControlFlowDialect",
+    "::mlir::func::FuncDialect",
+    "::mlir::ub::UBDialect"
+  ];
+}
+
+
+def HostToLLVMPass : Pass<"tir-host-to-llvm", "ModuleOp"> {
+  let summary = "Lower host operations to LLVM while preserving GPU modules";
+  let description = [{
+    Replaces host `gpu.launch_func` operations with indirect calls to the
+    `TensorIRHostRuntimeV1` launch callback and converts arith, cf, func, memref,
+    ptr, and ub operations to LLVM. Device `gpu.module` bodies remain intact for
+    subsequent device compilation. Unlowered host operations or unresolved
+    conversion casts cause pass failure.
+
+    Requires SCF to be lowered to CF and the ABI bridge's marked runtime pointer
+    argument and leading i32 status result. Launches must be synchronous and
+    have no cluster dimensions. Preserves explicit kernel ordinals and assigns
+    missing ordinals in host launch order.
+
+    Returns -3 on callback failure. Invalid launch configuration ranges return
+    -5; unrepresentable dynamic device sizes or strides return -2. Range checks
+    precede narrowing and callback invocation.
+  }];
+  let dependentDialects = [
+    "::mlir::nv_tensor_ir::TensorIRDialect",
+    "::mlir::LLVM::LLVMDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::cf::ControlFlowDialect",
+    "::mlir::func::FuncDialect",
+    "::mlir::ub::UBDialect"
+  ];
+}
+
+def CudaTileInsertGdcWaitPass : Pass<"tir-cuda-tile-insert-gdc-wait", "::mlir::cuda_tile::EntryOp"> {
+  let summary = "Conservatively insert a grid dependency wait into a CUDA Tile entry";
+  let description = [{
+    Makes a CUDA Tile kernel safe to launch with programmatic dependent launch
+    (PDL). A single `gdc_wait_tko` is inserted before the first top-level
+    operation of the entry that contains a global-memory access. The wait's
+    token is attached to every global-memory operation it dominates, including
+    operations nested in `for`/`if` regions: operations without a token
+    consume it directly, operations that already consume a token consume a
+    `join_tokens` of the wait token and their existing token.
+
+    No `gdc_launch_dependents_tko` is emitted; dependent grids are triggered
+    implicitly when the grid exits. Entries that already contain an explicit
+    `gdc_wait_tko`, and entries without any global-memory access, are left
+    unchanged. An explicit `gdc_launch_dependents_tko` alone does not prevent
+    the insertion, since it does not order the kernel's own memory accesses
+    after the preceding grid. The pass fails if a global-memory access nested
+    under another isolated-from-above operation would need the wait token.
+  }];
+  let dependentDialects = ["::mlir::cuda_tile::CudaTileDialect"];
+}
+
+def HostToObjectPass : Pass<"tir-host-to-object", "ModuleOp"> {
+  let summary = "Translate host program to a relocatable object";
+  let description = [{
+    This pass translates the host program to a native relocatable object
+    and embeds the ELF binary as an MLIR ASM Resource. The
+    ASM resource is referenced via an attribute,
+    'nv_tensor_ir.host_object', on the top-level ModuleOp.
+
+    By default, the pass retains the MLIR LLVMIR functions
+    in the ModuleOp. Set 'drop-host-ir=true' to drop the
+    functions after the host ELF image is assembled and
+    embedded.
+  }];
+  let options = [
+    Option<"hostArch", "host-arch",
+              "::mlir::nv_tensor_ir::HostArch",
+              [{::mlir::nv_tensor_ir::HostArch::Native}],
+              "Host architecture. Default is uses host architecture.",
+              [{::llvm::cl::values(
+               clEnumValN(::mlir::nv_tensor_ir::HostArch::Native, "native", "Host architecture"),
+               clEnumValN(::mlir::nv_tensor_ir::HostArch::X86_64, "x86_64", "X86_64 architecture"),
+               clEnumValN(::mlir::nv_tensor_ir::HostArch::AArch64, "aarch64", "AArch64 architecture")
+            )}]>,
+    Option<"hostOS", "host-os",
+              "::mlir::nv_tensor_ir::HostOS",
+              [{::mlir::nv_tensor_ir::HostOS::Linux}],
+              "Host OS. Ignored if 'host-arch=native'.",
+              [{::llvm::cl::values(
+               clEnumValN(::mlir::nv_tensor_ir::HostOS::Linux, "linux", "Linux OS"),
+               clEnumValN(::mlir::nv_tensor_ir::HostOS::Windows, "windows", "Windows OS")
+            )}]>,
+    Option<"dropHostIR", "drop-host-ir", "bool", "false",
+           "Drop the host IR after translation. Default is `false`">,
   ];
 }
 

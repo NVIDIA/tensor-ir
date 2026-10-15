@@ -24,6 +24,13 @@ include "mlir/IR/RegionKindInterface.td"
 class TensorIR_Op<string mnemonic, list<Trait> traits = []>
     : Op<TensorIR_Dialect, mnemonic, traits> {}
 
+/// SymbolTraits for operations implementing SymbolOpInterface.
+/// Older LLVM still provides these accessors through SymbolOpInterface defaults.
+/// NOTE: This can be simplified when all supported LLVM versions have incorporated
+/// change https://github.com/llvm/llvm-project/commit/979b72237338.
+defvar TensorIR_SymbolTraits = !if(!exists<Trait>("SymbolName"),
+    [!cast<Trait>("SymbolName"), !cast<Trait>("SymbolVisibility")], []<Trait>);
+
 class TensorIR_PointWiseOpBase<string mnemonic, list<Trait> traits = []>
     : TensorIR_Op<
           mnemonic,

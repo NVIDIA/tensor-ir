@@ -25,8 +25,9 @@ TEST_SIZE = 64
         ("relu_fwd", 1, torch.relu),
     ],
 )
+@pytest.mark.parametrize("analyze", [False, True])
 def test_pointwise_op_from_python_bindings(
-    op_name: str, num_inputs: int, reference
+    op_name: str, num_inputs: int, reference, analyze: bool
 ) -> None:
     torch.manual_seed(0)
     inputs = [
@@ -38,14 +39,28 @@ def test_pointwise_op_from_python_bindings(
     with ir.Context() as ctx, ir.Location.unknown(ctx):
         nv_tensor_ir.register_dialect(ctx, load=True)
         module = ir.Module.parse(_pointwise_mlir(op_name, num_inputs))
-        assert nv_tensor_ir.can_compile(module, tile_sizes=[TEST_SIZE // 2])
+        tile_sizes = [TEST_SIZE // 2]
+        if analyze:
+            candidates = nv_tensor_ir.analyze_module(module, max_tile_candidates=3)
+            assert candidates
+            tile_sizes = candidates[0]
+        assert nv_tensor_ir.can_compile(module, tile_sizes=tile_sizes)
         with nv_tensor_ir.compile(
             module,
-            tile_sizes=[TEST_SIZE // 2],
-        ) as program:
-            assert program.get_bytecode()
+            tile_sizes=tile_sizes,
+        ) as artifact:
+            assert artifact.get_bytecode()
             _require_runtime_launch()
-            program.launch(*inputs, output)
+            with artifact.load() as first, artifact.load() as second:
+                artifact.destroy()
+                first.launch(*inputs, output)
+                torch.cuda.synchronize()
+                torch.testing.assert_close(
+                    output, reference(*inputs), rtol=1e-3, atol=1e-3
+                )
+                first.destroy()
+                output.zero_()
+                second.launch(*inputs, output)
 
     torch.cuda.synchronize()
     torch.testing.assert_close(output, reference(*inputs), rtol=1e-3, atol=1e-3)

@@ -7,6 +7,16 @@
 include "mlir/IR/EnumAttr.td"
 include "tensor_ir/Dialect/TensorDialect.td"
 
+def ExpRoundingFull : I32EnumAttrCase<"Full", 0, "full">;
+def ExpRoundingApprox : I32EnumAttrCase<"Approx", 1, "approx">;
+
+def ExpRoundingMode : I32EnumAttr<"ExpRoundingMode",
+                                  "Accuracy policy for exponential evaluation",
+                                  [ExpRoundingFull, ExpRoundingApprox]> {
+  let cppNamespace = TensorIR_Dialect.cppNamespace;
+  let genSpecializedAttr = 0;
+}
+
 def TilePaddingZero : I32EnumAttrCase<"Zero", 0, "zero">;
 def TilePaddingNegZero : I32EnumAttrCase<"NegZero", 1, "neg_zero">;
 def TilePaddingNaN : I32EnumAttrCase<"NaN", 2, "nan">;

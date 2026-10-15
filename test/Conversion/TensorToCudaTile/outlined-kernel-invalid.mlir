@@ -14,15 +14,6 @@ module {
 // -----
 
 module {
-  // expected-error @below {{outlined TensorIR kernels must be nested in a gpu.module}}
-  func.func @top_level() attributes {gpu.kernel} {
-    return
-  }
-}
-
-// -----
-
-module {
   gpu.module @kernels {
     // expected-error @below {{outlined TensorIR gpu.module may contain only gpu.kernel func.func entry points}}
     func.func @helper() {
@@ -31,35 +22,6 @@ module {
     func.func @entry() attributes {gpu.kernel} {
       return
     }
-  }
-}
-
-// -----
-
-module {
-  gpu.module @kernels0 {
-    func.func @duplicate() attributes {gpu.kernel} {
-      return
-    }
-  }
-  gpu.module @kernels1 {
-    // expected-error @below {{duplicate outlined kernel name @duplicate}}
-    func.func @duplicate() attributes {gpu.kernel} {
-      return
-    }
-  }
-}
-
-// -----
-
-module {
-  gpu.module @kernels {
-  // expected-error @+2 {{outlined TensorIR kernels must return void}}
-  // expected-error @+1 {{failed to legalize operation 'func.func'}}
-  func.func @returns_value() -> i32 attributes {gpu.kernel} {
-    %zero = arith.constant 0 : i32
-    return %zero : i32
-  }
   }
 }
 
@@ -154,12 +116,6 @@ module {
       gpu.kernel, tile_size = array<i32: 4>} {
     return
   }
-}
-
-// -----
-
-// expected-error @+1 {{layout-propagation conversion requires at least one outlined gpu.kernel function nested in a gpu.module}}
-module {
 }
 
 // -----

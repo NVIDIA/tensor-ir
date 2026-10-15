@@ -15,8 +15,20 @@
 
 #include "llvm/ADT/SmallVector.h"
 
+#include <cstdint>
 #include <string>
 #include <utility>
+#include <vector>
+
+namespace tensor_ir {
+
+/// A tile shape candidate. Analysis returns candidates in best-first order
+/// according to the estimated cost.
+struct TileCandidate {
+  std::vector<int32_t> shape;
+};
+
+} // namespace tensor_ir
 
 namespace mlir::nv_tensor_ir::backend::cuda_tile {
 
@@ -35,6 +47,13 @@ public:
   // changing the signature or semantics.
   bool canCompile(mlir::ModuleOp module,
                   const CompilerInvocation &options) const override;
+
+  /// Analyze a graph in place and return tile-size candidates ordered best-first.
+  /// Requires exactly one graph and a positive maxTileCandidates or a tile hint.
+  /// Returns no candidates when options supplies an explicit tile size.
+  /// The module may also be modified on failure.
+  StatusOr<std::vector<::tensor_ir::TileCandidate>>
+  analyzeModule(mlir::ModuleOp module, const CompilerInvocation &options);
 };
 
 } // namespace mlir::nv_tensor_ir::backend::cuda_tile

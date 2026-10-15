@@ -1,5 +1,4 @@
 // RUN: tensor_ir-opt -materialize-default-strides \
-// RUN:   -layout-propagation-annotation -layout-propagation-normalization \
 // RUN:   -tile-analyzer -split-input-file \
 // RUN:   -verify-diagnostics=only-expected %s
 
@@ -57,4 +56,28 @@ nv_tensor_ir.graph @incompatible_concat_and_projection(
   %sum = reduce(%joined)<dimensions = [1], reduction_mode = <add>>
       : tensor<8x8xf32> -> tensor<8x1xf32>
   results %joined, %sum : tensor<8x8xf32>, tensor<8x1xf32>
+}
+
+// -----
+
+// The two paths to %x carry different coordinate mappings. Memoizing only the
+// SSA value would hide the incompatible transposed path.
+// expected-error @+1 {{multi-output results have no compatible nonconstant common SSA ancestor; split the results into multiple TensorIR graphs}}
+nv_tensor_ir.graph @shared_value_distinct_coordinates(%x: tensor<8x8xf32>) -> (tensor<8x8xf32>, tensor<8x8xf32>) {
+  %t = transpose %x permutation = [1, 0] : tensor<8x8xf32> -> tensor<8x8xf32>
+  %sum = add %x, %t : tensor<8x8xf32>
+  results %sum, %x : tensor<8x8xf32>, tensor<8x8xf32>
+}
+
+// -----
+
+// A reduction stops coordinate transport, while the direct pointwise path
+// continues through %t. The transport flag distinguishes these visits to %t.
+// expected-error @+1 {{multi-output results have no compatible nonconstant common SSA ancestor; split the results into multiple TensorIR graphs}}
+nv_tensor_ir.graph @shared_value_distinct_transport(%x: tensor<8x8xf32>) -> (tensor<8x8xf32>, tensor<8x8xf32>) {
+  %t = transpose %x permutation = [1, 0] : tensor<8x8xf32> -> tensor<8x8xf32>
+  %r = reduce(%t) <dimensions = [1], reduction_mode = <add>> : tensor<8x8xf32> -> tensor<8x1xf32>
+  %b = broadcast %r : tensor<8x1xf32> -> tensor<8x8xf32>
+  %sum = add %b, %t : tensor<8x8xf32>
+  results %sum, %x : tensor<8x8xf32>, tensor<8x8xf32>
 }

@@ -15,6 +15,7 @@ add_tensor_ir_dialect_library(NVTensorIRDialect
 
   LINK_LIBS PUBLIC
   NVTensorIR::Support
+  MLIRBufferizationDialect
   MLIRControlFlowInterfaces
   MLIRFunctionInterfaces
   MLIRGPUDialect

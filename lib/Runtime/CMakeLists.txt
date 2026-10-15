@@ -10,6 +10,7 @@ add_tensor_ir_library(NVTensorIRKernelLaunchHelpers STATIC
 
 add_library(NVTensorIRRuntime STATIC
   CudaTileRuntimeKernel.cpp
+  NativeHostModule.cpp
 )
 
 tensor_ir_register_library(NVTensorIRRuntime)
@@ -35,3 +36,9 @@ target_link_libraries(NVTensorIRRuntime
     LLVMSupport
     NVTensorIRTileIRAssembly
 )
+
+# Native host objects are relocated in process by LLVM ORC.
+llvm_map_components_to_libnames(_tensor_ir_host_llvm_libs
+  orcjit jitlink object support)
+target_link_libraries(NVTensorIRRuntime PRIVATE ${_tensor_ir_host_llvm_libs})
+llvm_update_compile_flags(NVTensorIRRuntime)

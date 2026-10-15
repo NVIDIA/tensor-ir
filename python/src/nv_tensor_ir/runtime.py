@@ -9,17 +9,27 @@ from nv_tensor_ir._mlir._mlir_libs import _tensor_ir as _tensor_ir_module
 
 CompileOptions = _tensor_ir_module.CompileOptions
 ArchPortability = _tensor_ir_module.ArchPortability
+AutoGdcInsertion = _tensor_ir_module.AutoGdcInsertion
 CodegenStrategy = _tensor_ir_module.CodegenStrategy
 BytecodeVersion = _tensor_ir_module.BytecodeVersion
 CudaTileArtifactKind = _tensor_ir_module.CudaTileArtifactKind
+HostTarget = _tensor_ir_module.HostTarget
+HostArch = _tensor_ir_module.HostArch
+HostOS = _tensor_ir_module.HostOS
 
 __all__ = [
     "ArchPortability",
+    "AutoGdcInsertion",
     "BytecodeVersion",
     "CodegenStrategy",
     "CompileOptions",
-    "Program",
+    "Artifact",
+    "RuntimeKernel",
     "CudaTileArtifactKind",
+    "analyze_module",
+    "HostTarget",
+    "HostArch",
+    "HostOS",
     "can_compile",
     "compile",
     "parse_compile_options",
@@ -59,104 +69,90 @@ def _make_workspace(size: int):
     return torch.empty((size,), device="cuda", dtype=torch.uint8)
 
 
-class Program:
-    """Executable TensorIR program returned by :func:`compile`.
-
-    ``Program`` owns native compiler/runtime state. Use it as a context manager
-    or call :meth:`destroy` when the compiled program is no longer needed.
-    """
-
-    def __init__(self, native_program):
-        self._native_program = native_program
+class _OwnedObject:
+    def __init__(self, native):
+        self._native = native
 
     @property
     def is_destroyed(self) -> bool:
-        return self._native_program is None or self._native_program.is_destroyed
+        return self._native is None
 
-    @property
-    def is_initialized(self) -> bool:
-        return self._native_program is not None and self._native_program.is_initialized
+    def _require_native(self):
+        if self.is_destroyed:
+            raise RuntimeError(f"{type(self).__name__} has been destroyed")
+        return self._native
 
     def __repr__(self) -> str:
-        if self.is_destroyed:
-            return "Program(state='destroyed')"
-        if self.is_initialized:
-            return "Program(state='initialized')"
-        return "Program(state='uninitialized')"
+        state = "destroyed" if self.is_destroyed else "ready"
+        return f"{type(self).__name__}(state='{state}')"
 
     def __enter__(self):
+        self._require_native()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.destroy()
 
-    def __del__(self) -> None:
-        try:
-            self.destroy()
-        except Exception:
-            pass
-
     def destroy(self) -> None:
-        """Release the native program state.
+        """Release this object's ownership. Repeated calls are allowed."""
+        self._native = None
 
-        Calling ``destroy`` more than once is allowed. Other methods raise after
-        the program has been destroyed.
-        """
-        self._native_program = None
 
-    def initialize(self) -> None:
-        """Initialize host-side runtime state for this program."""
-        self._native_program.initialize()
+class Artifact(_OwnedObject):
+    """Immutable compiled code and metadata, with no loaded runtime state.
 
-    def check_support(self, *args) -> bool:
-        """Return whether this program can run with the provided arguments.
-
-        Tensor arguments must be DLPack-compatible objects that provide
-        ``__dlpack__`` and ``__dlpack_device__``.
-        """
-        return self._native_program.check_support(args)
-
-    def query_workspace_size(self, *args) -> int:
-        """Return required workspace bytes for the provided runtime arguments.
-
-        Tensor arguments must be DLPack-compatible objects that provide
-        ``__dlpack__`` and ``__dlpack_device__``.
-        """
-        return self._native_program.query_workspace_size(args)
-
-    def launch(self, *args, workspace=None, stream=None) -> None:
-        """Launch the program.
-
-        Args:
-            *args: Runtime scalar and tensor arguments, followed by output
-                tensors. Tensor arguments must be DLPack-compatible objects.
-            workspace: Optional DLPack-compatible workspace buffer. If omitted,
-                the runtime queries the required size and allocates a torch CUDA
-                tensor.
-            stream: Optional CUDA stream object or integer stream pointer.
-        """
-        workspace_tensor = workspace
-        if workspace_tensor is None:
-            workspace_tensor = _make_workspace(self.query_workspace_size(*args))
-        self._native_program.launch(args, workspace_tensor, stream)
+    Compilation and deserialization do not load host or device code. Use
+    :meth:`load` to create an independently owned executable kernel.
+    """
 
     def get_bytecode(self) -> bytes:
-        """Return the selected TileIR bytecode or cuBin artifact as ``bytes``."""
-        return self._native_program.get_bytecode()
+        """Return the original TileIR bytecode or cubin device binary."""
+        return self._require_native().get_bytecode()
 
     def serialize(self) -> bytes:
-        """Return this program's device binary and launch metadata as ``bytes``.
-
-        Unlike :meth:`get_bytecode`, which returns only the binary, the
-        result here also carries the launch metadata needed to rebuild an
-        equivalent program via :meth:`Program.deserialize`.
-        """
-        return self._native_program.serialize()
+        """Serialize the device binary and launch metadata."""
+        return self._require_native().serialize()
 
     @staticmethod
-    def deserialize(data: bytes) -> "Program":
-        """Rebuild a program from bytes produced by :meth:`serialize`."""
-        return Program(_tensor_ir_module._Program.deserialize(data))
+    def deserialize(data: bytes) -> "Artifact":
+        """Restore an artifact without loading host or device code."""
+        return Artifact(_tensor_ir_module._Artifact.deserialize(data))
+
+    def load(self) -> "RuntimeKernel":
+        """Initialize runtime state and return a ready-to-launch kernel.
+
+        Loading can fail for an incompatible device. Each call creates
+        an independent kernel that remains usable after this artifact is
+        destroyed. Device bytecode may be compiled during loading.
+        """
+        return RuntimeKernel(self._require_native().load())
+
+
+class RuntimeKernel(_OwnedObject):
+    """Loaded executable state created by :meth:`Artifact.load`.
+
+    Use as a context manager or call :meth:`destroy` to unload the kernel.
+    """
+
+    def check_support(self, *args) -> bool:
+        """Check runtime arguments; tensors must support DLPack."""
+        return self._require_native().check_support(args)
+
+    def query_workspace_size(self, *args) -> int:
+        """Return required workspace bytes for these runtime arguments."""
+        return self._require_native().query_workspace_size(args)
+
+    def launch(self, *args, workspace=None, stream=None) -> None:
+        """Enqueue the kernel with inputs followed by output tensors.
+
+        Tensors and an optional workspace must support DLPack. If workspace
+        is omitted, allocate the required size as a torch CUDA tensor. Stream
+        may be a CUDA stream object or an integer stream pointer.
+        """
+        native = self._require_native()
+        if workspace is None:
+            workspace = _make_workspace(self.query_workspace_size(*args))
+        native.launch(args, workspace, stream)
 
 
 _COMPILE_OPTION_NAMES = frozenset(
@@ -166,6 +162,9 @@ _COMPILE_OPTION_NAMES = frozenset(
         "cta_count",
         "warp_count",
         "tile_sizes",
+        "host_target",
+        "host_arch",
+        "host_os",
         "codegen_strategy",
         "max_tile_candidates",
         "dump_cuda_tile_ir_path",
@@ -178,6 +177,20 @@ _COMPILE_OPTION_NAMES = frozenset(
         "artifact_kind",
     }
 )
+
+_HOST_OPTIONS_BY_NAME = {
+    "host_target": {
+        "auto": HostTarget.Auto,
+        "native": HostTarget.Native,
+        "interpreter": HostTarget.Interpreter,
+    },
+    "host_arch": {
+        "native": HostArch.Native,
+        "x86_64": HostArch.X86_64,
+        "aarch64": HostArch.AArch64,
+    },
+    "host_os": {"windows": HostOS.Windows, "linux": HostOS.Linux},
+}
 
 _ARCH_PORTABILITY_BY_VALUE = {value.value: value for value in ArchPortability}
 
@@ -219,6 +232,13 @@ def _make_compile_options(options=None, **kwargs) -> CompileOptions:
             value = _enum_by_value(name, _CODEGEN_STRATEGY_BY_VALUE, value)
         elif name == "artifact_kind" and isinstance(value, int):
             value = _enum_by_value(name, _CUDA_TILE_ARTIFACT_KIND_BY_VALUE, value)
+        elif name in _HOST_OPTIONS_BY_NAME and isinstance(value, str):
+            try:
+                value = _HOST_OPTIONS_BY_NAME[name][value]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Unknown TensorIR compile option {name}: {value}"
+                ) from exc
         elif name == "tile_sizes":
             value = list(value)
         setattr(options, name, value)
@@ -228,6 +248,19 @@ def _make_compile_options(options=None, **kwargs) -> CompileOptions:
 def parse_compile_options(text: str) -> CompileOptions:
     """Parse globally keyed compile options from a textual invocation string."""
     return CompileOptions.parse(text)
+
+
+def analyze_module(module, *, options=None, **kwargs) -> list[list[int]]:
+    """Analyze one graph in place and return tile shapes in best-first order.
+
+    Requires a positive ``max_tile_candidates`` or a tile hint. Explicit
+    ``tile_sizes`` yield an empty list. The module may change even on failure.
+    Pass either a ``CompileOptions`` object or individual option keywords,
+    as for :func:`compile`.
+    """
+    return _tensor_ir_module.analyze_module(
+        module, _make_compile_options(options, **kwargs)
+    )
 
 
 def can_compile(module, *, options=None, **kwargs) -> bool:
@@ -244,8 +277,8 @@ def can_compile(module, *, options=None, **kwargs) -> bool:
     )
 
 
-def compile(module, *, options=None, **kwargs) -> Program:
-    """Compile a TensorIR MLIR module to an executable :class:`Program`.
+def compile(module, *, options=None, **kwargs) -> Artifact:
+    """Compile a TensorIR MLIR module to an immutable :class:`Artifact`.
 
     Args:
         module: MLIR ``ir.Module`` object.
@@ -253,7 +286,7 @@ def compile(module, *, options=None, **kwargs) -> Program:
             option overrides are rejected.
         **kwargs: Individual ``CompileOptions`` field overrides.
     """
-    native_program = _tensor_ir_module.compile(
+    native_artifact = _tensor_ir_module.compile(
         module, _make_compile_options(options, **kwargs)
     )
-    return Program(native_program)
+    return Artifact(native_artifact)

@@ -42,6 +42,13 @@ bool isTensorType(Type type);
 /// Returns whether `type` is a scalar element type supported by TensorIR.
 bool isValidElementType(Type type);
 
+/// Map native scan_slice input dimensions to carry axes. Non-unit dimensions
+/// must match a prefix of the non-unit carry dimensions, in order. Unit slice
+/// dimensions map to -1. No dimensions are split or merged.
+FailureOr<SmallVector<int64_t>>
+getScanSliceInputAxes(ArrayRef<int64_t> carryShape,
+                      ArrayRef<int64_t> sliceShape);
+
 /// Returns true if `value` is a block argument of a TensorIR graph.
 bool isGraphInput(Value value);
 

@@ -6,8 +6,7 @@
 //===----------------------------------------------------------------------===//
 //
 // Pipeline position:
-//   LayoutPropagationAnnotation → LayoutPropagationNormalization
-//     → TileAnalyzerPass → **TileSelectionPass** → TensorToCudaTileConversion
+//   TileAnalyzerPass → **TileSelectionPass** → TensorToCudaTileConversion
 //
 // Purpose:
 //   Consumes tile hints from three sources (in priority order) and produces a
@@ -28,16 +27,15 @@
 //   If none of the above are available the pass emits an error.
 //
 // Validation:
-//   When the "iteration_space" attribute is present on the graph terminator
-//   (set by LayoutPropagationNormalizationPass), the selected tile is checked
-//   for rank match and per-dimension validity (power-of-2, within bounds).
-//   Invalid tiles cause the pass to emit a diagnostic and fail.
+//   The selected tile is checked against the normalized iteration space
+//   (LayoutNormalization) for rank match and per-dimension validity
+//   (power-of-2, within bounds). Invalid tiles cause the pass to emit a
+//   diagnostic and fail.
 //
 // Guarantees to downstream passes:
 //   • "tile_size" is always present on GraphOp after this pass succeeds.
 //   • "tile_candidates" is removed (cleanup — consumed by this pass).
-//   • The tile shape has been validated against the iteration space when that
-//     information is available.
+//   • The tile shape has been validated against the iteration space.
 //   • TensorToCudaTileConversionPass reads "tile_size" from the GraphOp
 //     attribute and does not need its own tile-size pass option for the
 //     LayoutPropagation codegen strategy.
@@ -50,6 +48,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "tensor_ir/Analysis/LayoutPropagation.h"
 #include "tensor_ir/Analysis/TileAnalyzer.h"
 #include "tensor_ir/Analysis/TileCandidateGenerator.h"
 #include "tensor_ir/Dialect/TensorIR.h"
@@ -71,27 +70,7 @@ namespace mlir::nv_tensor_ir {
 
 namespace {
 
-/// Extract the iteration space shape from the "iteration_space" attribute on
-/// the graph's terminator via LayoutSourceAttrInterface::getShape().
-/// Returns failure if the attribute is absent or does not implement the
-/// interface.
-static FailureOr<LayoutSourceAttrInterface>
-extractIterationSpace(GraphOp graphOp) {
-  Operation *terminator = graphOp.getBody()->getTerminator();
-  if (!terminator) {
-    return failure();
-  }
-
-  auto layoutSource = terminator->getAttrOfType<LayoutSourceAttrInterface>(
-      TensorIRDialect::getIterationSpaceAttrName());
-  if (!layoutSource) {
-    return failure();
-  }
-
-  return layoutSource;
-}
-
-/// Check if the iteration_space shape has any dynamic dimensions.
+/// Check if the iteration space shape has any dynamic dimensions.
 static bool hasDynamicDims(ArrayRef<DimSize> shape) {
   return llvm::any_of(shape, [](DimSize d) { return d <= 0; });
 }
@@ -104,6 +83,12 @@ struct TileSelectionPass
   void runOnOperation() override {
     GraphOp graphOp = getOperation();
     MLIRContext *ctx = graphOp.getContext();
+
+    FailureOr<LayoutNormalization> normalization =
+        LayoutNormalization::compute(graphOp);
+    if (failed(normalization)) {
+      return signalPassFailure();
+    }
 
     // ── Step 1: Resolve tile shape (priority order) ─────────────────
     SmallVector<int32_t> selectedTile;
@@ -152,54 +137,50 @@ struct TileSelectionPass
     }
 
     // ── Step 2: Verify tile against iteration space ─────────────────
-    auto rootLayout = extractIterationSpace(graphOp);
-    if (succeeded(rootLayout)) {
-      auto iterSpaceShape = rootLayout->getShape();
-      if (static_cast<int64_t>(selectedTile.size()) !=
-          static_cast<int64_t>(iterSpaceShape.size())) {
+    auto iterSpaceShape = normalization->iterationSpace.getShape();
+    if (static_cast<int64_t>(selectedTile.size()) !=
+        static_cast<int64_t>(iterSpaceShape.size())) {
+      graphOp.emitError() << "Selected tile " << vectorToString(selectedTile)
+                          << " is not valid for iteration space "
+                          << vectorToString(iterSpaceShape)
+                          << " — rank mismatch (tile rank "
+                          << selectedTile.size() << " vs iteration space rank "
+                          << iterSpaceShape.size() << ")";
+      return signalPassFailure();
+    }
+
+    auto fixedTileSizes =
+        deriveResultFixedTileSizes(normalization->resultViews, graphOp);
+    if (failed(fixedTileSizes)) {
+      return signalPassFailure();
+    }
+    if (!fixedTileSizes->empty() &&
+        fixedTileSizes->size() != iterSpaceShape.size()) {
+      graphOp.emitError() << "result view rank " << fixedTileSizes->size()
+                          << " does not match iteration space rank "
+                          << iterSpaceShape.size();
+      return signalPassFailure();
+    }
+    for (auto [dim, fixedSize] : llvm::enumerate(*fixedTileSizes)) {
+      if (fixedSize != 0 && selectedTile[dim] != fixedSize) {
         graphOp.emitError()
             << "Selected tile " << vectorToString(selectedTile)
-            << " is not valid for iteration space "
-            << vectorToString(iterSpaceShape) << " — rank mismatch (tile rank "
-            << selectedTile.size() << " vs iteration space rank "
-            << iterSpaceShape.size() << ")";
+            << " partitions result-projected iteration-space dimension " << dim
+            << "; expected full tile size " << fixedSize;
         return signalPassFailure();
       }
+    }
 
-      auto fixedTileSizes =
-          deriveResultFixedTileSizes(graphOp.getBody()->getTerminator());
-      if (failed(fixedTileSizes)) {
+    // Skip per-dim validation when the iteration space has dynamic dims
+    // (tile validity can only be checked at runtime).
+    if (!hasDynamicDims(iterSpaceShape)) {
+      GpuArchitecture gpu(/*warp_size=*/32, /*cache_line=*/128);
+      TileCandidateGenerator generator(gpu, /*maxCandidates=*/1);
+      if (!generator.isValidTile(selectedTile, iterSpaceShape)) {
+        graphOp.emitError() << "Selected tile " << vectorToString(selectedTile)
+                            << " is not valid for iteration space "
+                            << vectorToString(iterSpaceShape);
         return signalPassFailure();
-      }
-      if (!fixedTileSizes->empty() &&
-          fixedTileSizes->size() != iterSpaceShape.size()) {
-        graphOp.emitError()
-            << "result_views rank " << fixedTileSizes->size()
-            << " does not match iteration space rank " << iterSpaceShape.size();
-        return signalPassFailure();
-      }
-      for (auto [dim, fixedSize] : llvm::enumerate(*fixedTileSizes)) {
-        if (fixedSize != 0 && selectedTile[dim] != fixedSize) {
-          graphOp.emitError()
-              << "Selected tile " << vectorToString(selectedTile)
-              << " partitions result-projected iteration-space dimension "
-              << dim << "; expected full tile size " << fixedSize;
-          return signalPassFailure();
-        }
-      }
-
-      // Skip per-dim validation when the iteration space has dynamic dims
-      // (tile validity can only be checked at runtime).
-      if (!hasDynamicDims(iterSpaceShape)) {
-        GpuArchitecture gpu(/*warp_size=*/32, /*cache_line=*/128);
-        TileCandidateGenerator generator(gpu, /*maxCandidates=*/1);
-        if (!generator.isValidTile(selectedTile, iterSpaceShape)) {
-          graphOp.emitError()
-              << "Selected tile " << vectorToString(selectedTile)
-              << " is not valid for iteration space "
-              << vectorToString(iterSpaceShape);
-          return signalPassFailure();
-        }
       }
     }
 

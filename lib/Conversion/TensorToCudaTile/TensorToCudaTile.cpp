@@ -4,6 +4,7 @@
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTile.h"
 
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTileInternal.h"
+#include "tensor_ir/Options/BytecodeVersionOptions.h"
 #include "tensor_ir/Options/Options.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -12,6 +13,7 @@
 
 #include "llvm/Support/Debug.h"
 
+#include "MinVersionInfo.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
 
 #define DEBUG_TYPE "convert-tensor-to-cuda-tile"
@@ -97,6 +99,14 @@ public:
       return signalPassFailure();
     }
 
+    auto resolvedBytecodeVersion =
+        backend::cuda_tile::resolveBytecodeVersion(targetBytecodeVersion);
+    if (!resolvedBytecodeVersion.ok()) {
+      getOperation().emitError("target-bytecode-version: ")
+          << resolvedBytecodeVersion.status().message();
+      return signalPassFailure();
+    }
+
     MLIRContext *ctx = &getContext();
     bool enableExperimentalCudaTileOps = false;
     int32_t minCTAsPerSM = 1;
@@ -115,28 +125,7 @@ public:
       if (failed(rejectLayoutAnalysisAttributes())) {
         return signalPassFailure();
       }
-      for (func::FuncOp func : getOperation().getOps<func::FuncOp>()) {
-        if (func->hasAttr(gpu::GPUDialect::getKernelFuncAttrName())) {
-          func.emitError(
-              "outlined TensorIR kernels must be nested in a gpu.module");
-          return signalPassFailure();
-        }
-      }
-      const bool hasOutlinedKernels = llvm::any_of(
-          getOperation().getOps<gpu::GPUModuleOp>(),
-          [](gpu::GPUModuleOp gpuModule) {
-            return llvm::any_of(gpuModule.getOps<func::FuncOp>(),
-                                [](func::FuncOp func) {
-                                  return func->hasAttr(
-                                      gpu::GPUDialect::getKernelFuncAttrName());
-                                });
-          });
-      if (!hasOutlinedKernels) {
-        getOperation()->emitError(
-            "layout-propagation conversion requires at least one outlined "
-            "gpu.kernel function nested in a gpu.module");
-        return signalPassFailure();
-      }
+
       if (num_ctas > 1) {
         WalkResult persistence = getOperation().walk([&](scf::ForOp loop) {
           if (!loop.getLowerBound().getDefiningOp<gpu::BlockIdOp>()) {
@@ -151,22 +140,20 @@ public:
           return signalPassFailure();
         }
       }
+
       auto optimizationHints =
           tensor_to_cuda_tile::createEntryOptimizationHints(
               ctx, num_ctas, occupancy, num_warps, minCTAsPerSM);
       if (failed(tensor_to_cuda_tile::convertOutlinedKernels(
-              getOperation(), optimizationHints,
-              enableExperimentalCudaTileOps))) {
+              getOperation(), optimizationHints, enableExperimentalCudaTileOps,
+              *resolvedBytecodeVersion))) {
         return signalPassFailure();
       }
 
-      cuda_tile::ModuleOp newModuleOp = createModuleOp();
-      Block &body = newModuleOp.getBody().front();
-      getOperation().walk([&](cuda_tile::EntryOp entryOp) {
-        if (entryOp->getParentOp() != newModuleOp) {
-          entryOp->moveBefore(&body, body.end());
-        }
-      });
+      if (failed(validateBytecodeVersion(getOperation(),
+                                         *resolvedBytecodeVersion))) {
+        return signalPassFailure();
+      }
       return;
     }
 
@@ -191,6 +178,7 @@ public:
     codegenOptions.tileSize.assign(tile_size.begin(), tile_size.end());
     codegenOptions.ctaCount = num_ctas;
     CudaTileOptions cudaTileOptions;
+    cudaTileOptions.bytecodeVersion = targetBytecodeVersion;
     cudaTileOptions.warpCount = num_warps;
     cudaTileOptions.occupancy = occupancy;
     cudaTileOptions.smCount = sm_count;
@@ -240,6 +228,10 @@ public:
         entryOp->moveBefore(&body, body.end());
       }
     });
+    if (failed(validateBytecodeVersion(getOperation(),
+                                       *resolvedBytecodeVersion))) {
+      return signalPassFailure();
+    }
   }
 
 private:
@@ -248,14 +240,10 @@ private:
   /// verified TensorIR view types and SSA coordinates.
   LogicalResult rejectLayoutAnalysisAttributes() {
     SmallVector<StringRef> names{
-        TensorIRDialect::getLayoutAttrName(),
         TensorIRDialect::getIterSpaceMapAttrName(),
         TensorIRDialect::getIterSpaceIdAttrName(),
         TensorIRDialect::getIterSpaceIdsAttrName(),
         TensorIRDialect::getIterSpaceDimDomainsAttrName(),
-        TensorIRDialect::getIterationSpaceAttrName(),
-        TensorIRDialect::getResultLayoutsAttrName(),
-        TensorIRDialect::getResultViewsAttrName(),
         TensorIRDialect::getTileSizeAttrName(),
         TensorIRDialect::getTileCandidatesAttrName()};
     WalkResult result =

@@ -5,8 +5,13 @@
 
 #include "tensor_ir/Artifact/TensorIRArtifact.h"
 #include "tensor_ir/Compiler/CudaTile/CudaTileFrontend.h"
+#include "tensor_ir/Compiler/CudaTile/Pipelines.h"
 #include "tensor_ir/Compiler/CudaTile/TileIRAssembly.h"
+#include "tensor_ir/Dialect/TensorIR.h"
+#include "tensor_ir/Runtime/HostRuntimeAbi.h"
 #include "tensor_ir/Support/Status.h"
+
+#include "mlir/Pass/PassManager.h"
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/FileSystem.h"
@@ -15,6 +20,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "cuda_tile/Bytecode/Writer/BytecodeWriter.h"
+#include <cassert>
 #include <optional>
 
 static std::string createUniqueReproducerDir(const std::string &dir) {
@@ -81,11 +87,22 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
         "Failed to lower TensorIR to CudaTile dialect");
   }
   compiler::cuda_tile::CudaTileFrontendResult frontend = std::move(*frontendOr);
+  bool usesPDL = frontend.usesPDL;
 
   llvm::SmallVector<char, 0> tileirBytecode;
   TIR_ASSIGN_OR_RETURN(
       auto bytecodeVersion,
       resolveBytecodeVersion(options.cudaTile.bytecodeVersion));
+  if (usesPDL) {
+    auto minimumPDLVersion =
+        mlir::cuda_tile::BytecodeVersion::fromVersion(13, 4);
+    assert(minimumPDLVersion && "CUDA Tile bytecode 13.4 must be supported");
+    if (bytecodeVersion < *minimumPDLVersion) {
+      return Status::InvalidArgument(
+          "auto-gdc-insertion=conservative requires CUDA Tile bytecode 13.4 "
+          "or newer");
+    }
+  }
   std::optional<mlir::cuda_tile::BytecodeVersion> runtimeBytecodeVersion =
       bytecodeVersion;
   llvm::raw_svector_ostream os(tileirBytecode);
@@ -123,6 +140,9 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
     // compatibility diagnostic on failure needs a known version, so that
     // diagnostic won't be available for this artifact.
     runtimeBytecodeVersion = std::nullopt;
+    // The loaded bytecode may not match the generated CUDA Tile IR inspected
+    // above. Falling back to ordinary stream serialization is always safe.
+    usesPDL = false;
   }
 
   // The binary starts out as the TileIR bytecode just produced above (with
@@ -148,13 +168,104 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
     }
   }
 
+  std::optional<::tensor_ir::rt::HostModule> hostModule;
+  std::string entrypointName = frontend.runtimeKernelName;
+  if (options.getEffectiveHostTarget() == HostTarget::Native) {
+    auto object = (*frontend.module)
+                      ->getAttrOfType<DenseI8ResourceElementsAttr>(
+                          TensorIRDialect::getNativeObjectAttrName());
+    auto entries = (*frontend.module)
+                       ->getAttrOfType<ArrayAttr>(
+                           TensorIRDialect::getNativeEntrypointsAttrName());
+    auto triple = (*frontend.module)
+                      ->getAttrOfType<StringAttr>(
+                          TensorIRDialect::getNativeTripleAttrName());
+    auto bytes = object ? object.tryGetAsArrayRef() : std::nullopt;
+    if (!triple || !bytes || bytes->empty() || !entries ||
+        entries.size() != 1 || !isa<StringAttr>(entries[0])) {
+      return Status::CompilationError(
+          "Native host object or entry symbol is missing");
+    }
+    entrypointName = cast<StringAttr>(entries[0]).str();
+    hostModule = ::tensor_ir::rt::HostModule{
+        llvm::SmallVector<char, 0>(bytes->begin(), bytes->end()),
+        TENSOR_IR_HOST_ABI_VERSION_1, triple.str()};
+  }
+
   std::optional<std::array<int32_t, 3>> staticGrid;
   if (!frontend.useRuntimeGrid) {
     staticGrid = compiler::cuda_tile::computeStaticGridSize(frontend);
   }
   return ::tensor_ir::rt::TensorIRArtifact::create(
       frontend.runtimeKernelName, frontend.entryFunctionName, std::move(binary),
-      *compiledTarget, std::move(frontend.argLayout), staticGrid);
+      *compiledTarget, std::move(frontend.argLayout), staticGrid, usesPDL,
+      std::move(hostModule), std::move(entrypointName));
+}
+
+//===----------------------------------------------------------------------===//
+// CudaTileCompiler — analyzeModule
+//===----------------------------------------------------------------------===//
+
+StatusOr<std::vector<::tensor_ir::TileCandidate>>
+CudaTileCompiler::analyzeModule(mlir::ModuleOp module,
+                                const CompilerInvocation &opts) {
+  TIR_RETURN_IF_ERROR(opts.validate());
+  llvm::SmallVector<mlir::nv_tensor_ir::GraphOp> graphOps;
+  module.walk([&](mlir::nv_tensor_ir::GraphOp g) { graphOps.push_back(g); });
+  if (graphOps.size() != 1) {
+    return Status::CompilationError(
+        "analyzeModule: expected exactly one graph op, got " +
+        std::to_string(graphOps.size()));
+  }
+  mlir::nv_tensor_ir::GraphOp graphOp = graphOps.front();
+
+  bool hasTileHint =
+      !opts.codegen.tileSize.empty() ||
+      graphOp->hasAttr(
+          mlir::nv_tensor_ir::TensorIRDialect::getTileSizeAttrName()) ||
+      graphOp->hasAttr(
+          mlir::nv_tensor_ir::TensorIRDialect::getTileCandidatesAttrName());
+  if (opts.cudaTile.maxTileCandidates <= 0 && !hasTileHint) {
+    return Status::CompilationError(
+        "analyzeModule: maxTileCandidates must be > 0 or tile hint provided");
+  }
+
+  mlir::PassManager pm(module->getContext());
+  TIR_RETURN_IF_ERROR(buildGraphAnalysisPipeline(pm, opts));
+  if (failed(pm.run(module))) {
+    return Status::CompilationError(
+        "analyzeModule: graph analysis pipeline failed");
+  }
+
+  if (!opts.codegen.tileSize.empty()) {
+    return std::vector<::tensor_ir::TileCandidate>{};
+  }
+
+  auto candidatesAttr = graphOp->getAttrOfType<mlir::ArrayAttr>(
+      mlir::nv_tensor_ir::TensorIRDialect::getTileCandidatesAttrName());
+  auto tileSizeAttr = graphOp->getAttrOfType<mlir::DenseI32ArrayAttr>(
+      mlir::nv_tensor_ir::TensorIRDialect::getTileSizeAttrName());
+  if (!candidatesAttr && !tileSizeAttr) {
+    return Status::CompilationError(
+        "analyzeModule: no tile_candidates or tile_size after analysis");
+  }
+  if (!candidatesAttr) {
+    candidatesAttr = mlir::ArrayAttr::get(graphOp.getContext(), {tileSizeAttr});
+  }
+
+  std::vector<::tensor_ir::TileCandidate> result;
+  for (auto attr : candidatesAttr) {
+    auto arr = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(attr);
+    if (!arr) {
+      return Status::CompilationError(
+          "analyzeModule: tile_candidates element is not DenseI32ArrayAttr");
+    }
+    ::tensor_ir::TileCandidate c;
+    auto values = arr.asArrayRef();
+    c.shape.assign(values.begin(), values.end());
+    result.push_back(std::move(c));
+  }
+  return result;
 }
 
 } // namespace mlir::nv_tensor_ir::backend::cuda_tile

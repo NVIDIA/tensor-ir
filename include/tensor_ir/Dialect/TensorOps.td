@@ -12,22 +12,25 @@ include "tensor_ir/Dialect/TensorOpsBase.td"
 
 def TensorIR_GraphOp : TensorIR_Op<"graph",
     [SingleBlock, SingleBlockImplicitTerminator<"ResultsOp">,
-     FunctionOpInterface, IsolatedFromAbove, OpAsmOpInterface]> {
+     FunctionOpInterface, IsolatedFromAbove, OpAsmOpInterface]
+     # TensorIR_SymbolTraits> {
   let summary = "Define a flat graph of TensorIR operations";
   let description = [{
     This operation models an unordered list of operations forming a
     graph. The body is a single block in a "graph region", that is the
     ordering of the nodes does not matter.
 
-    Note: TensorIR is a flat graph model by design. There is no loop/for
-    construct at this level; iteration is expressed at lower dialect levels
-    (CudaTile) during lowering.
+    Note: TensorIR is a flat graph model by design. Except for structured
+    operations such as `scan_slice` which may contain isolated regions, there is
+    no loop/for construct at this level; iteration is expressed at lower dialect
+    levels (CudaTile) during lowering.
   }];
   let arguments = (ins
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
     OptionalAttr<ArrayAttr>:$arg_attrs,
-    OptionalAttr<ArrayAttr>:$res_attrs
+    OptionalAttr<ArrayAttr>:$res_attrs,
+    OptionalAttr<StrAttr>:$sym_visibility
   );
   let regions = (region SizedRegion<1>:$graphBody);
   let extraClassDeclaration = [{
@@ -75,18 +78,213 @@ def TensorIR_ResultsOp : TensorIR_Op<"results",
       "$results attr-dict-with-keyword ( `:` type($results)^)? ";
 }
 
+//===----------------------------------------------------------------------===//
+// Restricted recurrent scan_slice
+//===----------------------------------------------------------------------===//
+
+def TensorIR_ScanSliceTensor : RankedTensorOf<[AnyFloat, AnyInteger], [
+    CPred<"::mlir::nv_tensor_ir::isTensorType($_self)">,
+    HasStaticShapePred,
+    CPred<"::llvm::all_of(::llvm::cast<::mlir::RankedTensorType>($_self).getShape(), "
+          "[](int64_t size) { return size > 0; })">
+  ], "TensorIR numeric tensor with static, non-empty dimensions">;
+
+def TensorIR_ScanSliceOp : TensorIR_Op<"scan_slice",
+    [RecursiveMemoryEffects, RecursivelySpeculatable, IsolatedFromAbove,
+     SingleBlock, OpAsmOpInterface, InferTypeOpAdaptor,
+     PredOpTrait<"one carry and at least one scanned input",
+                 CPred<"$_op.getNumOperands() >= 2">>,
+     PredOpTrait<"at least one result", CPred<"$_op.getNumResults() >= 1">>,
+     PredOpTrait<"one scan dimension per scanned input",
+       CPred<"::llvm::cast<ScanSliceOp>($_op).getScanDimensions().size() + 1 == $_op.getNumOperands()">>,
+     PredOpTrait<"one output dimension per scan_slice output",
+       CPred<"::llvm::cast<ScanSliceOp>($_op).getOutputDimensions().size() + 1 == $_op.getNumResults()">>,
+     DeclareOpInterfaceMethods<RegionBranchOpInterface,
+       ["getEntrySuccessorOperands", "getSuccessorInputs", "getRegionInvocationBounds"]>,
+     DeclareOpInterfaceMethods<LayoutPropInterface, ["inferResultLayout"]>]> {
+  let summary = "Apply a user-defined recurrence over static tensor axes";
+  let description = [{
+    `scan_slice` carries `inputs[0]` through a sequential loop. The remaining operands
+    are sliced along `scan_dimensions` and passed to the body after the carry.
+    All scan axes have the same positive extent. With `reverse = true`, slices
+    are visited from the last index to the first; otherwise the order is forward.
+    The body cannot capture external values and yields the next carry followed
+    by zero or more per-step values. Result zero is the final carry, with exactly
+    the initial carry's type. Subsequent results stack the corresponding yielded
+    values along `output_dimensions`, at their original scan indices even when
+    visiting in reverse order. Result types are inferred from the operands and
+    body terminator.
+
+    Input and iteration constraints:
+
+    - Exactly one carry tensor is supported. The initial, next, and final carry
+      must have identical shapes and element types. The initial carry may be
+      computed inside the graph.
+    - At least one scanned input is required. Scanned inputs must be direct
+      graph arguments, not intermediate results; bufferized programs use
+      `bufferization.to_tensor` boundary inputs instead.
+    - Each input has one scan axis, and all inputs must have the same positive
+      scan length. Negative indices are unsupported for both `scan_dimensions`
+      and `output_dimensions`.
+    - Tensor shapes must be static, with positive dimension sizes. Input strides
+      must be static. After removing the scan axis and ignoring unit dimensions,
+      each input slice's non-unit dimensions must match a prefix of the carry's
+      non-unit dimensions, in order. Slice shapes and physical strides are
+      preserved; equal element counts do not imply an implicit reshape.
+    - The current lowering supports at most one top-level scan_slice per graph.
+      Nested scans are unsupported.
+
+    Body constraints:
+
+    - The body supports a limited operation set: basic arithmetic, min/max, abs,
+      selected floating-point math functions, convert, reshape, broadcast, and
+      restricted reduction. Each operation retains its own element-type
+      requirements. The body cannot capture values from outside its region.
+    - Reduction supports only addition over a single innermost dimension of
+      the reduction input. The tile must cover that dimension completely;
+      cross-tile reduction is unsupported.
+    - Reshape may only insert or remove dimensions of size 1. Non-unit
+      dimensions must retain their sizes and order; splitting or merging them
+      is unsupported.
+    - For broadcast, input dimension `i` must map to carry axis `i` or have no
+      carry-axis mapping (`-1`). An expanded dimension `i` must match carry
+      dimension `i` and use its tile size. Axis remapping is not inferred.
+
+    Result and use constraints:
+
+    - Each per-step side output must have the same rank as the carry. Each
+      dimension must be 1 or match the corresponding carry dimension. Non-unit
+      dimensions must map to carry axes at the same positions.
+    - Stacked side outputs (history outputs) must be returned directly as graph
+      results, each with exactly one use and a contiguous output buffer. They
+      cannot be further processed or discarded inside the graph; bufferized
+      programs use `bufferization.materialize_in_destination` instead. If no
+      history is needed, the body may yield only the next carry.
+    - A graph cannot return only stacked side outputs. It must also return a
+      non-streaming result whose layout contains the scan_slice, typically the final
+      carry or a compatible result derived from it.
+    - The final carry may feed compatible elementwise operations. Downstream
+      shape-changing reshapes, non-identity transposes, expanding broadcasts,
+      and partial slices are unsupported. Perform any required output reshape
+      outside the kernel.
+
+    Only the carry is forwarded across region control-flow edges. Sliced body
+    arguments and stacked results are produced by scan_slice, not forwarded unchanged.
+
+    Example (forward prefix sum; `reverse` defaults to `false`):
+    ```mlir
+    %final, %prefixes = nv_tensor_ir.scan_slice (%initial, %values)
+        scan_dimensions = [0] output_dimensions = [0]
+        : (tensor<8xf32>, tensor<5x8xf32>) {
+      ^bb0(%carry: tensor<8xf32>, %value: tensor<8xf32>):
+        %next = nv_tensor_ir.add %carry, %value : tensor<8xf32>
+        nv_tensor_ir.yield %next, %next : tensor<8xf32>, tensor<8xf32>
+    }
+    // %final: tensor<8xf32>, %prefixes: tensor<5x8xf32>
+    ```
+  }];
+  let arguments = (ins
+    Variadic<TensorIR_ScanSliceTensor>:$inputs,
+    ConfinedAttr<DenseI64ArrayAttr, [DenseArrayNonNegative<DenseI64ArrayAttr>]>:$scan_dimensions,
+    ConfinedAttr<DenseI64ArrayAttr, [DenseArrayNonNegative<DenseI64ArrayAttr>]>:$output_dimensions,
+    DefaultValuedAttr<BoolAttr, "false">:$reverse
+  );
+  let regions = (region SizedRegion<1>:$body);
+  let results = (outs Variadic<TensorIR_ScanSliceTensor>:$results);
+  let assemblyFormat = [{
+    `(` $inputs `)` `scan_dimensions` `=` $scan_dimensions
+    `output_dimensions` `=` $output_dimensions attr-dict
+    `:` `(` type($inputs) `)` $body
+  }];
+  let builders = [OpBuilder<(ins "ValueRange":$inputs,
+    "ArrayRef<int64_t>":$scanDimensions, "ArrayRef<int64_t>":$outputDimensions,
+    "function_ref<void(OpBuilder &, Location, Block::BlockArgListType)>":$bodyBuilder,
+    CArg<"bool", "false">:$reverse)>];
+  let extraClassDeclaration = [{
+    static StringRef getDefaultDialect() {
+      return TensorIRDialect::getDialectNamespace();
+    }
+    /// The corresponding body argument: operand zero is the carry; other
+    /// operands correspond to slices, not identity-forwarded values.
+    BlockArgument getBlockArgumentForOperand(OpOperand &operand);
+    /// Only the final carry has a tied body argument / initial operand.
+    BlockArgument getBlockArgumentForResult(OpResult result);
+    OpResult getResultForOperand(OpOperand &operand);
+    YieldOp getBodyTerminator();
+    int64_t getScanExtent();
+  }];
+  let hasVerifier = 1;
+}
+
 def TensorIR_AddOp : TensorIR_PointWiseOpBinary<"add", [Commutative]>;
 def TensorIR_SubOp : TensorIR_PointWiseOpBinary<"sub">;
 def TensorIR_MulOp : TensorIR_PointWiseOpBinary<"mul", [Commutative]>;
 def TensorIR_DivOp : TensorIR_PointWiseOpBinary<"div">;
-def TensorIR_ModOp : TensorIR_PointWiseOpBinary<"mod">;
+def TensorIR_ModOp : TensorIR_PointWiseOpBinary<"mod"> {
+  let summary = "Perform floored modulo operation pointwise on two tensors";
+  let description = [{
+    Floored modulo: a nonzero result has the sign of the divisor `rhs`. Defined
+    as
+
+    ```
+    mod(lhs, rhs) = lhs - n * rhs,   n = floor(lhs / rhs)
+    ```
+
+    with `lhs / rhs` taken over the real numbers. `nv_tensor_ir.rem` uses
+    `n = trunc(lhs / rhs)` instead, and `floor` and `trunc` differ only when
+    `lhs / rhs` is negative and not an integer, that is when `lhs` and `rhs`
+    have different signs and `rem(lhs, rhs) != 0`. There `floor` is one smaller,
+    so the result is `rem` plus `rhs`:
+
+    ```
+    mod(lhs, rhs) = rem(lhs, rhs) + rhs   if rem(lhs, rhs) != 0 and
+                                             (lhs < 0) != (rhs < 0)
+                  = rem(lhs, rhs)         otherwise
+    ```
+
+    - Floating point: `rem` is `fmod`. The final add is the only rounding step,
+      so the result can equal `rhs`. A zero result keeps the sign of `lhs`.
+      Special cases:
+      - Either operand is NaN: NaN.
+      - `lhs` is infinite or `rhs` is zero: NaN.
+      - `lhs` is `+0` or `-0` and `rhs` is nonzero: returns `lhs`.
+      - `lhs` is finite and `rhs` is infinite: returns `lhs` if `lhs` is zero
+        or has the sign of `rhs`, and `rhs` otherwise.
+    - Signed integer: `rem` is the remainder of the truncating integer
+      division. `rhs == 0`, or `lhs` equal to the minimum value of the type
+      with `rhs == -1`, is undefined behavior.
+    - Unsigned integer and i1: equal to `rem`. `rhs == 0` is undefined
+      behavior. The reference interpreter does not support i1.
+  }];
+}
 def TensorIR_RemOp : TensorIR_PointWiseOpBinary<"rem"> {
   let summary =
       "Perform truncated remainder operation pointwise on two tensors";
   let description = [{
-    Computes `lhs - trunc(lhs / rhs) * rhs` elementwise.
-    The result has the sign of the dividend (`lhs`), unlike `nv_tensor_ir.mod`
-    which follows floored-remainder semantics.
+    Truncated remainder: a nonzero result has the sign of the dividend `lhs` and
+    a magnitude below `|rhs|`. Defined as
+
+    ```
+    rem(lhs, rhs) = lhs - n * rhs,   n = trunc(lhs / rhs)
+    ```
+
+    with `lhs / rhs` taken over the real numbers.
+
+    - Floating point: `rem(lhs, rhs) = fmod(lhs, rhs)`. `fmod` works on the
+      significands of `|lhs|` and `|rhs|` and never forms a floating point
+      quotient: it aligns the exponents and reduces `|lhs|` by shift-and-subtract
+      long division, shifting the running remainder left by one bit per unit of
+      exponent difference and subtracting the divisor significand whenever the
+      remainder is not smaller than it. The result takes the sign of `lhs`, and
+      a zero result keeps it.
+      Special cases:
+      - Either operand is NaN: NaN.
+      - `lhs` is infinite or `rhs` is zero: NaN.
+      - `lhs` is `+0` or `-0` and `rhs` is nonzero: returns `lhs`.
+      - `lhs` is finite and `rhs` is infinite: returns `lhs`.
+    - Integer (signed, unsigned and i1): `n` is the integer quotient truncated
+      toward zero. `rhs == 0`, or a signed `lhs` equal to the minimum value of
+      the type with `rhs == -1`, is undefined behavior. The reference interpreter does not support i1.
   }];
 }
 
@@ -142,7 +340,33 @@ def TensorIR_PowOp : TensorIR_PointWiseOpBase<"pow",
 def TensorIR_AbsOp : TensorIR_PointWiseOpUnary<"abs">;
 def TensorIR_CeilOp : TensorIR_PointWiseOpUnary<"ceil", [ResultsAreFloatLike]>;
 def TensorIR_CosOp : TensorIR_PointWiseOpUnary<"cos", [ResultsAreFloatLike]>;
-def TensorIR_ExpOp : TensorIR_PointWiseOpUnary<"exp", [ResultsAreFloatLike]>;
+def TensorIR_ExpOp : TensorIR_PointWiseOpUnary<"exp", [ResultsAreFloatLike]> {
+  // clang-format off
+  let description = [{
+    Computes element-wise exp with a per-operation accuracy policy, defaulting
+    to `full`. `full` selects CUDA Math exponential evaluation; it does not
+    promise correctly rounded results. `approx` selects a fast hardware
+    approximation using exp2 with log2(e) scaling and requires Tile IR 13.3
+    or newer. Half-precision inputs are evaluated in f32 with the selected
+    policy, then rounded back to their input dtype. `approx` is not supported
+    for f64.
+
+
+    Example:
+    ```mlir
+    %y = nv_tensor_ir.exp %x
+      <{rounding_mode = #nv_tensor_ir.exp_rounding_mode<approx>}>
+      : tensor<128xf32>
+    ```
+  }];
+  // clang-format on
+  let arguments = (ins
+    Arg<TensorIR_TensorType, "Input tensor">:$input,
+    DefaultValuedAttr<ExpRoundingModeAttr, "ExpRoundingMode::Full">:$rounding_mode
+  );
+  let assemblyFormat = "$input prop-dict attr-dict `:` type($input)";
+  let hasVerifier = 1;
+}
 def TensorIR_FloorOp
     : TensorIR_PointWiseOpUnary<"floor", [ResultsAreFloatLike]>;
 def TensorIR_LogOp : TensorIR_PointWiseOpUnary<"log", [ResultsAreFloatLike]>;
@@ -491,9 +715,12 @@ def TensorIR_ReduceUDOp : TensorIR_Op<"reduce_ud",
 
 def TensorIR_YieldOp
     : TensorIR_Op<"yield", [
-        ParentOneOf<["ReduceUDOp"
+        ParentOneOf<["ReduceUDOp", "ScanSliceOp"
                     ]>,
-        Pure, Terminator, ReturnLike]> {
+        Pure, Terminator,
+        DeclareOpInterfaceMethods<
+            RegionBranchTerminatorOpInterface,
+            ["getMutableSuccessorOperands", "getSuccessorRegions"]>]> {
   let summary = "Yield operation";
 
   let description = [{
@@ -518,9 +745,11 @@ def TensorIR_ContractionOp : TensorIR_Op<"contraction", [Pure]> {
       "Tensor contraction with multiple product and reduction dimensions";
   let description = [{
     Computes `C = A * B`, or `C = Acc + A * B` with an accumulator,
-    summing over each contraction dimension. As with `matmul`, multiplication
-    uses the input element types before conversion to C's element type and
-    accumulation. The accumulator must have exactly C's type.
+    summing over each contraction dimension. Operand interpretation, product
+    precision, and accumulation follow the `matmul` semantics below. Narrow
+    integer products are widened rather than truncated; floating-point product
+    precision is not fixed by the input format. The accumulator must have
+    exactly C's type.
 
     `indexing_maps` contains three affine maps, for A, B, and C respectively,
     from a shared logical iteration domain to tensor dimension indices, as
@@ -619,8 +848,27 @@ def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
     * b: Second matrix of type `TensorIR_TensorType`
     * acc: Optional initial accumulator with the same type as `C`
 
-    The multiplication is performed with the type of the inputs, before
-    being converted to the data type of `C` and accumulated.
+    The numerical semantics follow CUDA Tile matrix-multiply-accumulate
+    operations (`mmaf` and `mmai`) for their supported type combinations.
+    Input element types determine how operand values are interpreted; they
+    do not impose an intermediate rounding or truncation of each product.
+
+    For integer inputs and outputs, products retain their full precision.
+    Inputs are interpreted according to their signedness. Accumulator and
+    result bit patterns are interpreted as signed integers, as in `mmai`,
+    even when the TensorIR result element type is unsigned. Accumulator
+    overflow saturates to the signed range of the result element width,
+    matching `mmai`'s default overflow mode. Saturating accumulation can
+    depend on accumulation order; no particular order is guaranteed. In
+    particular, an unsigned 8-bit product of 255 and 2 contributes 510 to
+    a 32-bit accumulator, rather than an 8-bit truncated product of 254.
+
+    For floating-point inputs and outputs, products are accumulated without
+    a required rounding to the input format first. Intermediate precision,
+    fusion, and accumulation order are implementation-dependent, as in
+    `mmaf`; results need not be bit-identical across targets, tile sizes,
+    or compiler versions. The portable Linalg lowering converts operands
+    to the result element type before multiplication and accumulation.
 
     The two innermost dimensions of tensors `A` and `B` of `TensorIR_TensorType`
     need to satisfy the condition that number of columns of `A` is equal to the

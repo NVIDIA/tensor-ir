@@ -4,8 +4,13 @@
 #ifndef TENSOR_IR_ANALYSIS_POLYEXPRS_H
 #define TENSOR_IR_ANALYSIS_POLYEXPRS_H
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DynamicAPInt.h"
+#include "llvm/ADT/iterator.h"
+#include "llvm/Support/raw_ostream.h"
 
+#include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -79,91 +84,150 @@ struct SparsePolynomialStorage {
 };
 
 class PolyExprContext;
+class PolyExprImpl;
 
-/// An immutable integer polynomial in non-negative integer symbols. Expressions
-/// are uniqued and owned by their context; all returned pointers expire with it.
-/// Powers within a term have increasing variable IDs and nonzero exponents.
-/// Terms have nonzero coefficients and are in descending lexicographic monomial
-/// order (smaller variable IDs have precedence). Zero has no terms.
-/// Pointer equality within a context compares canonical polynomials; use
-/// PolyExprContext::areEqual to also account for symbol definitions.
+/// A copyable, pointer-sized handle to an immutable, context-owned polynomial.
+/// The context must outlive its handles. A default-constructed handle is invalid;
+/// use operator bool to test validity. Invalid is distinct from the zero polynomial.
+/// Equality compares interned identity, without substituting symbol definitions;
+/// use PolyExprContext::areEqual for semantic equality under current definitions.
 class PolyExpr {
 public:
-  /// Arbitrary-precision integer storage allows coefficients to grow during
-  /// polynomial arithmetic without overflow.
   using Storage = SparsePolynomialStorage<llvm::DynamicAPInt>;
 
-  /// Returns the canonical zero polynomial (0) for the given context.
-  static const PolyExpr *getZero(PolyExprContext &context);
-  /// Returns the canonical constant polynomial for `value`. If `value == 0`,
-  /// returns the canonical zero polynomial.
-  static const PolyExpr *getConstant(PolyExprContext &context,
-                                     const llvm::DynamicAPInt &value);
-  /// Convenience overload constructing a constant polynomial from a 64-bit integer.
-  static const PolyExpr *getConstant(PolyExprContext &context,
-                                     std::int64_t value) {
+  constexpr PolyExpr(std::nullptr_t = nullptr) {}
+  explicit operator bool() const { return impl != nullptr; }
+  friend bool operator==(PolyExpr lhs, PolyExpr rhs) {
+    return lhs.impl == rhs.impl;
+  }
+  friend bool operator!=(PolyExpr lhs, PolyExpr rhs) { return !(lhs == rhs); }
+
+  static PolyExpr getZero(PolyExprContext &context);
+  static PolyExpr getConstant(PolyExprContext &context,
+                              const llvm::DynamicAPInt &value);
+  static PolyExpr getConstant(PolyExprContext &context, int64_t value) {
     return getConstant(context, llvm::DynamicAPInt(value));
   }
-  /// Returns the canonical atomic indeterminate symbol \f$1 \cdot x_{\text{variable}}^1\f$.
-  static const PolyExpr *getSymbol(PolyExprContext &context,
-                                   VariableId variable);
-  /// Canonicalizes arbitrary sparse polynomial storage and returns the interned expression.
-  ///
-  /// Validates CSR offset structure, combines repeated variables within terms, combines
-  /// like monomials, eliminates cancelled zero terms, and sorts terms into canonical
-  /// descending lexicographic order. Returns `nullptr` on malformed offsets or exponent/offset
-  /// overflow.
-  static const PolyExpr *get(PolyExprContext &context, const Storage &storage);
+  static PolyExpr getSymbol(PolyExprContext &context, VariableId variable);
+  /// Canonicalizes CSR storage, combining repeated powers and like terms,
+  /// removing zero terms, and sorting. Returns invalid for malformed offsets
+  /// or exponent/offset overflow.
+  static PolyExpr get(PolyExprContext &context, const Storage &storage);
 
-  /// Returns the canonical underlying CSR storage.
-  const Storage &getStorage() const { return storage; }
-  /// Returns the enclosing context that owns this expression.
-  PolyExprContext &getContext() const { return context; }
-  /// Returns true if this is the zero polynomial (no terms).
-  bool isZero() const { return storage.coefficients.empty(); }
-  /// Returns true if this is a constant polynomial (no variable powers, including zero).
-  bool isConstant() const { return storage.powers.empty(); }
-  /// Returns true if this polynomial has exactly one non-zero term (including non-zero constants).
-  bool isMonomial() const { return storage.coefficients.size() == 1; }
-  /// Returns true if this expression is an atomic indeterminate symbol \f$1 \cdot x_i^1\f$.
+  /// A read-only term view. The context owns its coefficient and powers.
+  struct Term {
+    const llvm::DynamicAPInt &coefficient;
+    llvm::ArrayRef<Power> powers;
+  };
+
+  class TermIterator
+      : public llvm::iterator_facade_base<TermIterator,
+                                          std::random_access_iterator_tag, Term,
+                                          std::ptrdiff_t, const Term *, Term> {
+  public:
+    TermIterator() = default;
+    TermIterator &operator+=(std::ptrdiff_t offset) {
+      index += offset;
+      return *this;
+    }
+    TermIterator &operator-=(std::ptrdiff_t offset) {
+      index -= offset;
+      return *this;
+    }
+    using iterator_facade_base::operator-;
+    std::ptrdiff_t operator-(const TermIterator &other) const {
+      assert(impl == other.impl &&
+             "expected iterators into the same polynomial");
+      return static_cast<std::ptrdiff_t>(index) -
+             static_cast<std::ptrdiff_t>(other.index);
+    }
+    Term operator*() const;
+    Term operator[](std::ptrdiff_t offset) const { return *(*this + offset); }
+    bool operator==(const TermIterator &other) const {
+      return impl == other.impl && index == other.index;
+    }
+    bool operator<(const TermIterator &other) const {
+      assert(impl == other.impl &&
+             "expected iterators into the same polynomial");
+      return index < other.index;
+    }
+
+  private:
+    friend class PolyExpr;
+    TermIterator(const PolyExprImpl *impl, size_t index)
+        : impl(impl), index(index) {}
+    const PolyExprImpl *impl = nullptr;
+    size_t index = 0;
+  };
+
+  /// Iterates canonical terms without substituting symbol definitions. Zero
+  /// has no terms; constants have no powers. Requires a valid handle, and the
+  /// context must outlive the iterators and term views.
+  TermIterator begin() const;
+  TermIterator end() const;
+
+  /// Number of canonical terms. Requires a valid handle.
+  size_t size() const;
+  /// Returns a term without substituting definitions. Requires a valid handle
+  /// and an index less than size(). The context owns the returned term view.
+  Term operator[](size_t index) const;
+
+  /// Requires a valid handle.
+  PolyExprContext &getContext() const;
+
+  /// Structural queries on the stored polynomial, without substituting symbol
+  /// definitions. Use normalize() first to query after substitution. Invalid
+  /// handles return false or std::nullopt. Integer extraction additionally
+  /// checks the int64_t range.
+  bool isZero() const;
+  bool isConstant() const;
+  bool isMonomial() const;
   bool isSymbol() const;
-  /// Returns the integer value if this is a constant expression (including 0), or `std::nullopt`.
   std::optional<llvm::DynamicAPInt> getConstantValue() const;
+  std::optional<int64_t> getConstantInt64() const;
+  bool isOne() const;
 
-  /// Computes polynomial addition (\f$\text{this} + \text{rhs}\f$).
-  /// Operands must share a context. Coefficient arithmetic is exact. Returns
-  /// `nullptr` for exponent/offset overflow or mismatched contexts.
-  const PolyExpr *add(const PolyExpr &rhs) const;
-  /// Computes polynomial subtraction (\f$\text{this} - \text{rhs}\f$).
-  /// Operands must share a context. Coefficient arithmetic is exact. Returns
-  /// `nullptr` for exponent/offset overflow or mismatched contexts.
-  const PolyExpr *subtract(const PolyExpr &rhs) const;
-  /// Computes polynomial multiplication (\f$\text{this} \times \text{rhs}\f$).
-  /// Distributes term pairs and combines like monomials. Operands must share a
-  /// context. Returns `nullptr` for exponent/offset overflow or mismatched contexts.
-  const PolyExpr *multiply(const PolyExpr &rhs) const;
-  /// Multivariate polynomial exact division over \f$\mathbb{Z}\f$ without consulting
-  /// symbol definitions.
-  ///
-  /// Performs multivariate long division using leading terms in canonical monomial order.
-  /// Returns `nullptr` for division by zero, non-integral quotient coefficients, non-zero
-  /// remainder, or mismatched contexts.
-  const PolyExpr *exactDiv(const PolyExpr &rhs) const;
+  /// Substitutes definitions; returns invalid on normalization failure.
+  PolyExpr normalize() const;
+  /// Prints with definitions substituted and arbitrary-precision coefficients,
+  /// or <invalid> for an invalid handle or failed normalization.
+  void print(llvm::raw_ostream &os) const;
+  friend llvm::raw_ostream &operator<<(llvm::raw_ostream &os, PolyExpr expr) {
+    expr.print(os);
+    return os;
+  }
 
-  PolyExpr(const PolyExpr &) = delete;
-  PolyExpr &operator=(const PolyExpr &) = delete;
+  /// Raw polynomial arithmetic, without substituting symbol definitions.
+  /// Invalid operands, different contexts and exponent/offset overflow return
+  /// invalid. Division additionally requires an exact quotient over integers.
+  PolyExpr add(PolyExpr rhs) const;
+  PolyExpr subtract(PolyExpr rhs) const;
+  PolyExpr multiply(PolyExpr rhs) const;
+  PolyExpr exactDiv(PolyExpr rhs) const;
+
+  /// Arithmetic after substituting current symbol definitions. Propagates
+  /// invalid handles, normalization failures and the raw arithmetic failures
+  /// above. Division is exact, not truncating; a nonzero remainder is invalid.
+  PolyExpr operator+(PolyExpr rhs) const;
+  PolyExpr operator-(PolyExpr rhs) const;
+  PolyExpr operator*(PolyExpr rhs) const;
+  PolyExpr operator/(PolyExpr rhs) const;
+  PolyExpr operator-() const;
+  PolyExpr &operator+=(PolyExpr rhs) { return *this = *this + rhs; }
+  PolyExpr &operator-=(PolyExpr rhs) { return *this = *this - rhs; }
+  PolyExpr &operator*=(PolyExpr rhs) { return *this = *this * rhs; }
+  PolyExpr &operator/=(PolyExpr rhs) { return *this = *this / rhs; }
 
 private:
   friend class PolyExprContext;
-  PolyExpr(PolyExprContext &context, Storage storage);
-  PolyExprContext &context;
-  Storage storage;
+  explicit PolyExpr(const PolyExprImpl *impl) : impl(impl) {}
+  const PolyExprImpl *impl = nullptr;
 };
 
 /// Manages the lifetime, interning, and acyclic symbol definitions of polynomial expressions.
 ///
 /// PolyExprContext provides:
-/// - Unique storage (hash-consing) for `PolyExpr` instances.
+/// - Unique storage (hash-consing) for `PolyExprImpl` instances.
 /// - An acyclic symbol definition registry mapping `VariableId -> PolyExpr`.
 /// - Recursive normalization (substitution) with memoization.
 /// - Semantic equivalence testing modulo symbol definitions.
@@ -176,32 +240,38 @@ public:
   PolyExprContext(const PolyExprContext &) = delete;
   PolyExprContext &operator=(const PolyExprContext &) = delete;
 
-  /// Add a definition once. Return false for redefinition, a foreign context or
+  /// Add a definition once. Return false for redefinition, an invalid handle, a foreign context or
   /// a cycle, leaving existing definitions and normalization caches unchanged.
   /// References to symbols that have not yet been defined are allowed.
   ///
   /// Cycle detection traverses the transitive dependency graph prior to mutating
   /// internal state, ensuring atomic rejection. Successfully adding a definition
   /// invalidates the normalization cache.
-  bool addDefinition(VariableId variable, const PolyExpr &definition);
-  /// Returns the bound definition for `variable`, or `nullptr` if undefined.
-  const PolyExpr *getDefinition(VariableId variable) const;
+  bool addDefinition(VariableId variable, PolyExpr definition);
+  /// Returns the bound definition for `variable`, or an invalid handle if undefined.
+  PolyExpr getDefinition(VariableId variable) const;
 
   /// Recursively substitute definitions, caching intermediate expressions.
-  /// Return nullptr on exponent or offset overflow (including intermediates)
-  /// or a foreign context. Adding a definition invalidates this cache.
+  /// Return an invalid handle on exponent or offset overflow (including intermediates)
+  /// or an invalid/foreign handle. Adding a definition invalidates this cache.
   ///
   /// Uses exponentiation by squaring to evaluate powers of substituted expressions.
-  const PolyExpr *normalize(const PolyExpr &expression);
+  PolyExpr normalize(PolyExpr expression);
   /// Tests whether `lhs` and `rhs` are semantically equivalent under current definitions.
   /// Evaluates pointer equality as a fast path. If unequal, normalizes both expressions
   /// and compares canonical normalized pointers.
-  /// Returns `std::nullopt` if normalization overflows or an operand has a foreign context.
-  std::optional<bool> areEqual(const PolyExpr &lhs, const PolyExpr &rhs);
+  /// Returns `std::nullopt` if normalization overflows or an operand is invalid or has a foreign context.
+  std::optional<bool> areEqual(PolyExpr lhs, PolyExpr rhs);
 
 private:
   friend class PolyExpr;
-  const PolyExpr *intern(PolyExpr::Storage storage);
+  friend class PolyExprImpl;
+  const PolyExprImpl *intern(PolyExpr::Storage storage);
+  bool addDefinitionImpl(VariableId variable, const PolyExprImpl &definition);
+  const PolyExprImpl *getDefinitionImpl(VariableId variable) const;
+  const PolyExprImpl *normalizeImpl(const PolyExprImpl &expression);
+  std::optional<bool> areEqualImpl(const PolyExprImpl &lhs,
+                                   const PolyExprImpl &rhs);
   struct Impl;
   std::unique_ptr<Impl> impl;
 };

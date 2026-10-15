@@ -26,7 +26,7 @@ def TensorToCudaTileConversionPass : Pass<"convert-tensor-to-cuda-tile", "mlir::
         directly from the pass option.
 
     Option groups by strategy:
-      - Always read: `num-ctas`, `occupancy`, `num-warps`.
+      - Always read: `num-ctas`, `occupancy`, `num-warps`, `target-bytecode-version`.
       - `affine_map`-only: `tile-size`, `persistence`, and `sm-count`.
       - Tiling, reduction strip-mining, and layout-path persistence are owned by
         the preceding formation passes.
@@ -35,6 +35,9 @@ def TensorToCudaTileConversionPass : Pass<"convert-tensor-to-cuda-tile", "mlir::
     "mlir::cuda_tile::CudaTileDialect",
   ];
   let options = [
+    Option<"targetBytecodeVersion", "target-bytecode-version", "std::string",
+           /*default=*/"\"default\"",
+           "CUDA Tile bytecode target: default, current, compatibility, or a dotted version.">,
     Option<"codegen_strategy", "codegen-strategy",
            "mlir::nv_tensor_ir::CudaTileCodegenStrategy",
            /*default=*/"mlir::nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation",

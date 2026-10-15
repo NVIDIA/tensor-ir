@@ -7,27 +7,30 @@ add_tensor_ir_library(NVTensorIRRegistration
 
   LINK_LIBS PUBLIC
   CudaTileDialect
-  MLIRIR
-  NVTensorIR::Dialect
-  NVTensorIR::ToCudaTileConversion
-  NVTensorIR::Transform
-  MLIRArithToLLVM
+  CudaTileTransforms
+
   MLIRArithDialect
+  MLIRArithToLLVM
+  MLIRArithTransforms
   MLIRArithValueBoundsOpInterfaceImpl
   MLIRBufferizationDialect
+  MLIRBufferizationTransforms
+  MLIRBuiltinToLLVMIRTranslation
   MLIRCastInterfaces
+  MLIRControlFlowToLLVM
   MLIRFuncDialect
   MLIRFuncInlinerExtension
   MLIRFuncToLLVM
   MLIRGPUDialect
   MLIRGPUToGPURuntimeTransforms
   MLIRGPUTransforms
+  MLIRIR
+  MLIRLinalgDialect
+  MLIRLinalgTransforms
   MLIRLLVMDialect
   MLIRLLVMIRToLLVMTranslation
   MLIRLLVMIRTransforms
   MLIRLLVMToLLVMIRTranslation
-  MLIRLinalgDialect
-  MLIRLinalgTransforms
   MLIRMathDialect
   MLIRMathToLLVM
   MLIRMemRefDialect
@@ -35,11 +38,20 @@ add_tensor_ir_library(NVTensorIRRegistration
   MLIRPtrDialect
   MLIRPtrToLLVM
   MLIRSCFDialect
+  MLIRSCFToControlFlow
+  MLIRSCFTransforms
   MLIRTensorDialect
   MLIRTensorTransforms
   MLIRTransforms
   MLIRVectorDialect
   MLIRVectorToLLVM
   MLIRVectorTransforms
+
+  NVTensorIR::CudaTilePipelines
+  NVTensorIR::Dialect
+  NVTensorIR::LinalgPipelines
+  NVTensorIR::ToCudaTileConversion
+  NVTensorIR::ToLinalgConversion
+  NVTensorIR::Transform
 
 )

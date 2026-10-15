@@ -1,17 +1,40 @@
 # TensorIR public compiler library.
 
+add_tensor_ir_library(NVTensorIRLinalgPipelines
+  Linalg/Pipelines.cpp
+  PARTIAL_SOURCES_INTENDED
+
+  LINK_LIBS PUBLIC
+    MLIRAffineToStandard
+    MLIRBufferizationTransforms
+    MLIRConvertToLLVMPass
+    MLIRFuncDialect
+    MLIRLinalgTransforms
+    MLIRMathToFuncs
+    MLIRMathToLibm
+    MLIRMemRefTransforms
+    MLIRPass
+    MLIRReconcileUnrealizedCasts
+    MLIRSCFToControlFlow
+    MLIRTransforms
+    NVTensorIR::ToLinalgConversion
+)
+
 add_tensor_ir_library(NVTensorIRCudaTilePipelines
   CudaTile/Pipelines.cpp
   PARTIAL_SOURCES_INTENDED
 
   LINK_LIBS PUBLIC
+    CudaTileTransforms
     MLIRIR
+    MLIRLLVMDialect
     MLIRPass
+    MLIRSCFToControlFlow
     MLIRTransforms
+    NVTensorIR::CompilerOptions
     NVTensorIR::Dialect
     NVTensorIR::ToCudaTileConversion
     NVTensorIR::Transform
-    NVTensorIR::CompilerOptions
 )
 
 

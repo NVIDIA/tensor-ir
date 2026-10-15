@@ -5,6 +5,7 @@
 
 #include "tensor_ir/Artifact/TensorIRArtifactCodec.h"
 #include "tensor_ir/Compiler/Compiler.h"
+#include "tensor_ir/Compiler/CudaTile/CudaTileCompiler.h"
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Options/BytecodeVersionOptions.h"
 #include "tensor_ir/Registration/Registration.h"
@@ -17,7 +18,6 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MemoryBuffer.h"
 
@@ -39,7 +39,6 @@ using mlir::nv_tensor_ir::StatusCode;
 using mlir::nv_tensor_ir::StatusOr;
 using tensor_ir::rt::Any;
 using tensor_ir::rt::CudaTileRuntimeKernel;
-using tensor_ir::rt::IRuntimeKernelPtr;
 using tensor_ir::rt::PackedArgs;
 using tensor_ir::rt::Stream;
 using tensor_ir::rt::TensorView;
@@ -120,127 +119,6 @@ MlirLogicalResult reportStatus(const Status &status,
   return mlirLogicalResultFailure();
 }
 
-static const CudaTileRuntimeKernel *
-getCudaTileRuntimeKernel(const IRuntimeKernelPtr &rtk) {
-  if (!rtk) {
-    return nullptr;
-  }
-  return llvm::dyn_cast<CudaTileRuntimeKernel>(rtk.get());
-}
-
-class Program {
-public:
-  Program(std::unique_ptr<ICompiler> compiler, IRuntimeKernelPtr rtk)
-      : compiler_(std::move(compiler)), rtk_(std::move(rtk)) {}
-
-  Program(const Program &) = delete;
-  Program &operator=(const Program &) = delete;
-  Program(Program &&) = delete;
-  Program &operator=(Program &&) = delete;
-  ~Program() = default;
-
-  void destroy() {
-    rtk_.reset();
-    compiler_.reset();
-    initialized_ = false;
-  }
-
-  bool isDestroyed() const { return !rtk_; }
-
-  bool isInitialized() const { return rtk_ && initialized_; }
-
-  Status initialize() {
-    Status status = validate();
-    if (!status.ok()) {
-      return status;
-    }
-    if (initialized_) {
-      return Status::Ok();
-    }
-    status = rtk_->initializeRuntimeState();
-    if (status.ok()) {
-      initialized_ = true;
-    }
-    return status;
-  }
-
-  StatusOr<bool> checkSupport(PackedArgs args) {
-    Status validation = validate();
-    if (!validation.ok()) {
-      return validation;
-    }
-    Status status = rtk_->checkSupport(args);
-    if (status.ok()) {
-      return true;
-    }
-    if (status.code() == StatusCode::kConstraintNotSatisfied) {
-      return false;
-    }
-    return status;
-  }
-
-  StatusOr<size_t> queryWorkspaceSize(PackedArgs args) const {
-    Status status = validate();
-    if (!status.ok()) {
-      return status;
-    }
-    return rtk_->queryWorkspaceSize(args);
-  }
-
-  Status launch(PackedArgs args, Workspace workspace, Stream stream) {
-    Status status = initialize();
-    if (!status.ok()) {
-      return status;
-    }
-    return rtk_->launch(args, workspace, stream);
-  }
-
-  StatusOr<llvm::ArrayRef<char>> getBytecode() const {
-    Status s = validate();
-    if (!s.ok()) {
-      return s;
-    }
-    const CudaTileRuntimeKernel *rtk = getCudaTileRuntimeKernel(rtk_);
-    if (!rtk) {
-      return Status::NotSupported(
-          "TensorIR compiled program is not a CudaTile runtime kernel");
-    }
-    return rtk->deviceCode();
-  }
-
-  StatusOr<std::unique_ptr<llvm::MemoryBuffer>> serialize() const {
-    Status s = validate();
-    if (!s.ok()) {
-      return s;
-    }
-    const CudaTileRuntimeKernel *rtk = getCudaTileRuntimeKernel(rtk_);
-    if (!rtk) {
-      return Status::NotSupported(
-          "TensorIR compiled program is not a CudaTile runtime kernel");
-    }
-    return serializeArtifact(rtk->getArtifact());
-  }
-
-private:
-  Status validate() const {
-    if (isDestroyed()) {
-      return Status::InvalidArgument(
-          "TensorIR program has already been destroyed");
-    }
-    return Status::Ok();
-  }
-
-  std::unique_ptr<ICompiler> compiler_;
-  IRuntimeKernelPtr rtk_;
-  bool initialized_ = false;
-};
-
-MlirTensorIRProgram wrapProgram(Program *program) { return {program}; }
-
-Program *unwrapProgram(MlirTensorIRProgram program) {
-  return static_cast<Program *>(program.ptr);
-}
-
 /// The C++ invocation behind `invocation`, validated and paired with a compiler
 /// for its backend. Returns nullopt after reporting through `errorCallback`.
 std::optional<std::pair<const CompilerInvocation *, std::unique_ptr<ICompiler>>>
@@ -270,12 +148,6 @@ prepareCompile(MlirTensorIRCompilerInvocation invocation,
     return std::nullopt;
   }
   return std::make_pair(cppInvocation, std::move(compiler));
-}
-
-MlirLogicalResult reportNullProgram(MlirStringCallback errorCallback,
-                                    void *errorUserData) {
-  return reportStatus(Status::InvalidArgument("TensorIR program is null"),
-                      errorCallback, errorUserData);
 }
 
 } // namespace
@@ -354,30 +226,45 @@ MlirLogicalResult mlirTensorIRCalculateCacheKey(
   return mlirLogicalResultSuccess();
 }
 
-MlirTensorIRProgram mlirTensorIRProgramCompile(
+MlirLogicalResult mlirTensorIRCudaTileAnalyzeModule(
     MlirModule module, MlirTensorIRCompilerInvocation invocation,
-    MlirStringCallback errorCallback, void *errorUserData) {
-  auto prepared = prepareCompile(invocation, errorCallback, errorUserData);
-  if (!prepared) {
-    return wrapProgram(nullptr);
+    MlirTensorIRTileCandidateCallback candidateCallback,
+    void *candidateUserData, MlirStringCallback errorCallback,
+    void *errorUserData) {
+  if (mlirModuleIsNull(module)) {
+    return reportStatus(Status::InvalidArgument("module must not be null"),
+                        errorCallback, errorUserData);
   }
-  auto &[cppInvocation, compiler] = *prepared;
-  auto artifact = compiler->compile(unwrap(module), *cppInvocation);
-  if (!artifact.ok()) {
-    reportStatus(artifact.status(), errorCallback, errorUserData);
-    return wrapProgram(nullptr);
+  if (!invocation.ptr) {
+    return reportStatus(Status::InvalidArgument("invocation must not be null"),
+                        errorCallback, errorUserData);
   }
-  auto rtk = CudaTileRuntimeKernel::create(std::move(artifact).value());
-  if (!rtk.ok()) {
-    reportStatus(rtk.status(), errorCallback, errorUserData);
-    return wrapProgram(nullptr);
+  if (!candidateCallback) {
+    return reportStatus(
+        Status::InvalidArgument("candidateCallback must not be null"),
+        errorCallback, errorUserData);
   }
-  return wrapProgram(new Program(std::move(compiler), std::move(rtk).value()));
+  const auto &options =
+      *static_cast<const CompilerInvocation *>(invocation.ptr);
+  mlir::nv_tensor_ir::backend::cuda_tile::CudaTileCompiler compiler;
+  auto candidates = compiler.analyzeModule(unwrap(module), options);
+  if (!candidates.ok()) {
+    return reportStatus(candidates.status(), errorCallback, errorUserData);
+  }
+  for (const auto &candidate : *candidates) {
+    candidateCallback(candidate.shape.data(), candidate.shape.size(),
+                      candidateUserData);
+  }
+  return mlirLogicalResultSuccess();
 }
 
-MlirLogicalResult mlirTensorIRProgramCanCompile(
+MlirLogicalResult mlirTensorIRCanCompile(
     MlirModule module, MlirTensorIRCompilerInvocation invocation,
     bool *canCompile, MlirStringCallback errorCallback, void *errorUserData) {
+  if (mlirModuleIsNull(module)) {
+    return reportStatus(Status::InvalidArgument("module must not be null"),
+                        errorCallback, errorUserData);
+  }
   auto prepared = prepareCompile(invocation, errorCallback, errorUserData);
   if (!prepared) {
     return mlirLogicalResultFailure();
@@ -387,153 +274,154 @@ MlirLogicalResult mlirTensorIRProgramCanCompile(
   return mlirLogicalResultSuccess();
 }
 
-void mlirTensorIRProgramDelete(MlirTensorIRProgram program) {
-  Program *cppProgram = unwrapProgram(program);
-  if (cppProgram) {
-    delete cppProgram;
-  }
-}
-
-void mlirTensorIRProgramDestroy(MlirTensorIRProgram program) {
-  Program *cppProgram = unwrapProgram(program);
-  if (cppProgram) {
-    cppProgram->destroy();
-  }
-}
-
-bool mlirTensorIRProgramIsDestroyed(MlirTensorIRProgram program) {
-  Program *cppProgram = unwrapProgram(program);
-  if (cppProgram) {
-    return cppProgram->isDestroyed();
-  } else {
-    return true;
-  }
-}
-
-bool mlirTensorIRProgramIsInitialized(MlirTensorIRProgram program) {
-  Program *cppProgram = unwrapProgram(program);
-  if (cppProgram) {
-    return cppProgram->isInitialized();
-  } else {
-    return false;
-  }
-}
-
-MlirLogicalResult
-mlirTensorIRProgramInitialize(MlirTensorIRProgram program,
-                              MlirStringCallback errorCallback,
-                              void *errorUserData) {
-  Program *cppProgram = unwrapProgram(program);
-  if (!cppProgram) {
-    return reportNullProgram(errorCallback, errorUserData);
-  }
-  return reportStatus(cppProgram->initialize(), errorCallback, errorUserData);
-}
-
-MlirLogicalResult mlirTensorIRProgramCheckSupport(
-    MlirTensorIRProgram program, MlirTensorIRPackedArgs args, bool *supported,
+MlirTensorIRArtifact mlirTensorIRArtifactCompile(
+    MlirModule module, MlirTensorIRCompilerInvocation invocation,
     MlirStringCallback errorCallback, void *errorUserData) {
-  Program *cppProgram = unwrapProgram(program);
-  if (!cppProgram) {
-    return reportNullProgram(errorCallback, errorUserData);
+  if (mlirModuleIsNull(module)) {
+    reportStatus(Status::InvalidArgument("module must not be null"),
+                 errorCallback, errorUserData);
+    return {nullptr};
   }
-  llvm::SmallVector<Any, 8> unpackedArgs = unwrapPackedArgs(args);
-  StatusOr<bool> result =
-      cppProgram->checkSupport(makePackedArgs(unpackedArgs));
-  if (!result.ok()) {
-    return reportStatus(result.status(), errorCallback, errorUserData);
+  auto prepared = prepareCompile(invocation, errorCallback, errorUserData);
+  if (!prepared) {
+    return {nullptr};
   }
-  *supported = *result;
+  auto &[options, compiler] = *prepared;
+  auto artifact = compiler->compile(unwrap(module), *options);
+  if (!artifact.ok()) {
+    reportStatus(artifact.status(), errorCallback, errorUserData);
+    return {nullptr};
+  }
+  return {artifact->release()};
+}
+
+void mlirTensorIRArtifactDestroy(MlirTensorIRArtifact artifact) {
+  delete static_cast<tensor_ir::rt::TensorIRArtifact *>(artifact.ptr);
+}
+
+MlirLogicalResult mlirTensorIRArtifactGetBytecode(
+    MlirTensorIRArtifact artifact, MlirStringCallback callback, void *userData,
+    MlirStringCallback errorCallback, void *errorUserData) {
+  if (!artifact.ptr) {
+    return reportStatus(Status::InvalidArgument("TensorIR artifact is null"),
+                        errorCallback, errorUserData);
+  }
+  const auto &binary =
+      static_cast<tensor_ir::rt::TensorIRArtifact *>(artifact.ptr)->getBinary();
+  std::visit(
+      [&](const auto &code) {
+        callback(mlirStringRefCreate(code.bytes.data(), code.bytes.size()),
+                 userData);
+      },
+      binary);
   return mlirLogicalResultSuccess();
 }
 
-MlirLogicalResult mlirTensorIRProgramQueryWorkspaceSize(
-    MlirTensorIRProgram program, MlirTensorIRPackedArgs args,
-    size_t *workspaceSize, MlirStringCallback errorCallback,
-    void *errorUserData) {
-  Program *cppProgram = unwrapProgram(program);
-  if (!cppProgram) {
-    return reportNullProgram(errorCallback, errorUserData);
+MlirLogicalResult mlirTensorIRArtifactSerialize(
+    MlirTensorIRArtifact artifact, MlirStringCallback callback, void *userData,
+    MlirStringCallback errorCallback, void *errorUserData) {
+  if (!artifact.ptr) {
+    return reportStatus(Status::InvalidArgument("TensorIR artifact is null"),
+                        errorCallback, errorUserData);
   }
-  llvm::SmallVector<Any, 8> unpackedArgs = unwrapPackedArgs(args);
-  StatusOr<size_t> result =
-      cppProgram->queryWorkspaceSize(makePackedArgs(unpackedArgs));
-  if (!result.ok()) {
-    return reportStatus(result.status(), errorCallback, errorUserData);
-  }
-  *workspaceSize = *result;
-  return mlirLogicalResultSuccess();
-}
-
-MlirLogicalResult mlirTensorIRProgramLaunch(MlirTensorIRProgram program,
-                                            MlirTensorIRPackedArgs args,
-                                            void *workspaceData,
-                                            size_t workspaceSize, void *stream,
-                                            MlirStringCallback errorCallback,
-                                            void *errorUserData) {
-  Program *cppProgram = unwrapProgram(program);
-  if (!cppProgram) {
-    return reportNullProgram(errorCallback, errorUserData);
-  }
-  llvm::SmallVector<Any, 8> unpackedArgs = unwrapPackedArgs(args);
-  Workspace workspace{workspaceData, workspaceSize};
-  Stream cudaStream = reinterpret_cast<Stream>(stream);
-  return reportStatus(
-      cppProgram->launch(makePackedArgs(unpackedArgs), workspace, cudaStream),
-      errorCallback, errorUserData);
-}
-
-MlirLogicalResult mlirTensorIRProgramGetBytecode(
-    MlirTensorIRProgram program, MlirStringCallback bytecodeCallback,
-    void *bytecodeUserData, MlirStringCallback errorCallback,
-    void *errorUserData) {
-  Program *cppProgram = unwrapProgram(program);
-  if (!cppProgram) {
-    return reportNullProgram(errorCallback, errorUserData);
-  }
-  StatusOr<llvm::ArrayRef<char>> bytecode = cppProgram->getBytecode();
-  if (!bytecode.ok()) {
-    return reportStatus(bytecode.status(), errorCallback, errorUserData);
-  }
-  bytecodeCallback(mlirStringRefCreate(bytecode->data(), bytecode->size()),
-                   bytecodeUserData);
-  return mlirLogicalResultSuccess();
-}
-
-/// Sends the serialized artifact bytes for `program` to `bytesCallback`:
-/// the compiled binary plus its full launch metadata, as an opaque blob.
-MlirLogicalResult mlirTensorIRProgramSerialize(MlirTensorIRProgram program,
-                                               MlirStringCallback bytesCallback,
-                                               void *bytesUserData,
-                                               MlirStringCallback errorCallback,
-                                               void *errorUserData) {
-  Program *cppProgram = unwrapProgram(program);
-  if (!cppProgram) {
-    return reportNullProgram(errorCallback, errorUserData);
-  }
-  StatusOr<std::unique_ptr<llvm::MemoryBuffer>> bytes = cppProgram->serialize();
+  auto bytes = tensor_ir::rt::serializeArtifact(
+      *static_cast<tensor_ir::rt::TensorIRArtifact *>(artifact.ptr));
   if (!bytes.ok()) {
     return reportStatus(bytes.status(), errorCallback, errorUserData);
   }
-  bytesCallback(mlirStringRefCreate((*bytes)->getBufferStart(),
-                                    (*bytes)->getBufferSize()),
-                bytesUserData);
+  callback(mlirStringRefCreate((*bytes)->getBufferStart(),
+                               (*bytes)->getBufferSize()),
+           userData);
   return mlirLogicalResultSuccess();
 }
 
-/// Rebuilds a program from bytes produced by `mlirTensorIRProgramSerialize`.
-MlirTensorIRProgram
-mlirTensorIRProgramDeserialize(MlirStringRef bytes,
-                               MlirStringCallback errorCallback,
-                               void *errorUserData) {
-  llvm::StringRef data(bytes.data, bytes.length);
-  auto buffer = llvm::MemoryBuffer::getMemBuffer(
-      data, /*BufferName=*/"", /*RequiresNullTerminator=*/false);
-  StatusOr<IRuntimeKernelPtr> rtk =
-      CudaTileRuntimeKernel::deserialize(buffer->getMemBufferRef());
-  if (!rtk.ok()) {
-    reportStatus(rtk.status(), errorCallback, errorUserData);
-    return wrapProgram(nullptr);
+MlirTensorIRArtifact
+mlirTensorIRArtifactDeserialize(MlirStringRef bytes,
+                                MlirStringCallback errorCallback,
+                                void *errorUserData) {
+  auto artifact = tensor_ir::rt::deserializeArtifact(
+      llvm::MemoryBufferRef(llvm::StringRef(bytes.data, bytes.length), ""));
+  if (!artifact.ok()) {
+    reportStatus(artifact.status(), errorCallback, errorUserData);
+    return {nullptr};
   }
-  return wrapProgram(new Program(/*compiler=*/nullptr, std::move(rtk).value()));
+  return {artifact->release()};
+}
+
+MlirTensorIRRuntimeKernel
+mlirTensorIRArtifactLoad(MlirTensorIRArtifact artifact,
+                         MlirStringCallback errorCallback,
+                         void *errorUserData) {
+  if (!artifact.ptr) {
+    reportStatus(Status::InvalidArgument("TensorIR artifact is null"),
+                 errorCallback, errorUserData);
+    return {nullptr};
+  }
+  auto copy = std::make_unique<tensor_ir::rt::TensorIRArtifact>(
+      *static_cast<tensor_ir::rt::TensorIRArtifact *>(artifact.ptr));
+  auto kernel = CudaTileRuntimeKernel::create(std::move(copy));
+  if (!kernel.ok()) {
+    reportStatus(kernel.status(), errorCallback, errorUserData);
+    return {nullptr};
+  }
+  Status status = (*kernel)->initializeRuntimeState();
+  if (!status.ok()) {
+    reportStatus(status, errorCallback, errorUserData);
+    return {nullptr};
+  }
+  return {kernel->release()};
+}
+
+void mlirTensorIRRuntimeKernelDestroy(MlirTensorIRRuntimeKernel kernel) {
+  delete static_cast<tensor_ir::rt::IRuntimeKernel *>(kernel.ptr);
+}
+
+MlirLogicalResult mlirTensorIRRuntimeKernelCheckSupport(
+    MlirTensorIRRuntimeKernel kernel, MlirTensorIRPackedArgs args,
+    bool *supported, MlirStringCallback errorCallback, void *errorUserData) {
+  if (!kernel.ptr) {
+    return reportStatus(
+        Status::InvalidArgument("TensorIR runtime kernel is null"),
+        errorCallback, errorUserData);
+  }
+  auto unpacked = unwrapPackedArgs(args);
+  Status status = static_cast<tensor_ir::rt::IRuntimeKernel *>(kernel.ptr)
+                      ->checkSupport(makePackedArgs(unpacked));
+  *supported = status.ok();
+  if (status.code() == StatusCode::kConstraintNotSatisfied) {
+    return mlirLogicalResultSuccess();
+  }
+  return reportStatus(status, errorCallback, errorUserData);
+}
+
+MlirLogicalResult mlirTensorIRRuntimeKernelQueryWorkspaceSize(
+    MlirTensorIRRuntimeKernel kernel, MlirTensorIRPackedArgs args,
+    size_t *workspaceSize, MlirStringCallback errorCallback,
+    void *errorUserData) {
+  if (!kernel.ptr) {
+    return reportStatus(
+        Status::InvalidArgument("TensorIR runtime kernel is null"),
+        errorCallback, errorUserData);
+  }
+  auto unpacked = unwrapPackedArgs(args);
+  *workspaceSize = static_cast<tensor_ir::rt::IRuntimeKernel *>(kernel.ptr)
+                       ->queryWorkspaceSize(makePackedArgs(unpacked));
+  return mlirLogicalResultSuccess();
+}
+
+MlirLogicalResult mlirTensorIRRuntimeKernelLaunch(
+    MlirTensorIRRuntimeKernel kernel, MlirTensorIRPackedArgs args,
+    void *workspaceData, size_t workspaceSize, void *stream,
+    MlirStringCallback errorCallback, void *errorUserData) {
+  if (!kernel.ptr) {
+    return reportStatus(
+        Status::InvalidArgument("TensorIR runtime kernel is null"),
+        errorCallback, errorUserData);
+  }
+  auto unpacked = unwrapPackedArgs(args);
+  return reportStatus(static_cast<tensor_ir::rt::IRuntimeKernel *>(kernel.ptr)
+                          ->launch(makePackedArgs(unpacked),
+                                   Workspace{workspaceData, workspaceSize},
+                                   reinterpret_cast<Stream>(stream)),
+                      errorCallback, errorUserData);
 }

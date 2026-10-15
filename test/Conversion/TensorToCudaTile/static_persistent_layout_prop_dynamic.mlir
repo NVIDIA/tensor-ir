@@ -5,16 +5,16 @@ module {
   // CHECK-SAME: %[[IN0:[^,]*]]: tile<ptr<f32>>, %[[M0:[^,]*]]: tile<i32>,
   // CHECK-SAME: %[[IN1:[^,]*]]: tile<ptr<f32>>, %[[M1:[^,]*]]: tile<i32>,
   // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^)]*]]: tile<i32>)
-  // CHECK-SAME: optimization_hints=<default = {num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 2}>
+  // CHECK-SAME: optimization_hints=<default = {
+  // CHECK-SAME: num_cta_in_cga = 1, num_worker_warps_per_cta = 4, occupancy = 2}>
   // CHECK-DAG: %[[FOUR:.*]] = constant <i32: 4> : tile<i32>
+  // CHECK-DAG: %[[IDX2:.*]] = constant <i32: 0> : tile<i32>
   // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
   // CHECK: %[[GRID:.*]], %{{.*}}, %{{.*}} = get_num_tile_blocks : tile<i32>
   // CHECK: %[[TOTAL:.*]] = muli %[[MR]], %[[FOUR]] : tile<i32>
   // CHECK: for %[[TILE:.*]] in (%[[BLOCK]] to %[[TOTAL]], step %[[GRID]]) : tile<i32>
   // CHECK: %[[IDX0:.*]] = remi %[[TILE]], %[[MR]] unsigned : tile<i32>
-  // CHECK: %[[REST:.*]] = divi %[[TILE]], %[[MR]] unsigned : tile<i32>
-  // CHECK: %[[IDX1:.*]] = remi %[[REST]], %[[FOUR]] unsigned : tile<i32>
-  // CHECK: %[[IDX2:.*]] = divi %[[REST]], %[[FOUR]] unsigned : tile<i32>
+  // CHECK: %[[IDX1:.*]] = divi %[[TILE]], %[[MR]] unsigned : tile<i32>
   // CHECK: %[[IN0_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [%[[M0]], 32, 64], strides = [8192, 128, 1]
   // CHECK: %[[IN0_PVIEW:.*]] = make_partition_view %[[IN0_VIEW]]
   // CHECK: %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[IN0_PVIEW]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]

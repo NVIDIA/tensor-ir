@@ -99,7 +99,8 @@ def test_matmul_epilogue(case: dict[str, object]) -> None:
         assert nv_tensor_ir.can_compile(module, options=options)
         with nv_tensor_ir.compile(module, options=options) as program:
             _require_runtime_launch()
-            program.launch(a, b, *extra_inputs, output)
+            with program.load() as kernel:
+                kernel.launch(a, b, *extra_inputs, output)
 
     torch.cuda.synchronize()
     expected = case["reference"](torch.matmul(a, b), extra_inputs)

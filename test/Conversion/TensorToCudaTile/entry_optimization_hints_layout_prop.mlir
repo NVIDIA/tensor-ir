@@ -7,4 +7,5 @@ gpu.module @kernels {
 }
 
 // CHECK-LABEL: entry @entry_optimization_hints(
-//  CHECK-SAME: optimization_hints=<default = {num_cta_in_cga = 2, num_worker_warps_per_cta = 8, occupancy = 3}>
+//  CHECK-SAME: optimization_hints=<default = {
+//  CHECK-SAME: num_cta_in_cga = 2, num_worker_warps_per_cta = 8, occupancy = 3}>

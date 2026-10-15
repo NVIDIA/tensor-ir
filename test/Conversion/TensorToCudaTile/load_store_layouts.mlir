@@ -5,7 +5,7 @@
 // is read with different layouts.
 // ============================================================================
 
-// CHECK-LABEL: @loads_unary_elementwise
+// CHECK-LABEL: entry @loads_unary_elementwise
 // CHECK-SAME: (%[[INPTR:.+]]: tile<ptr<f32>>, %[[OUTPTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
@@ -36,7 +36,7 @@ module {
 
 // -----
 
-// CHECK-LABEL: @loads_binary_elementwise
+// CHECK-LABEL: entry @loads_binary_elementwise
 // CHECK-SAME: (%[[IN0_PTR:.+]]: tile<ptr<f32>>, %[[IN1_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
@@ -74,7 +74,7 @@ module {
 
 // -----
 
-// CHECK-LABEL: @loads_binary_elementwise_single_input
+// CHECK-LABEL: entry @loads_binary_elementwise_single_input
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
@@ -105,7 +105,7 @@ module {
 
 // -----
 
-// CHECK-LABEL: @loads_binary_elementwise_lhs_input
+// CHECK-LABEL: entry @loads_binary_elementwise_lhs_input
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
@@ -139,7 +139,7 @@ module {
 
 // -----
 
-// CHECK-LABEL: @loads_binary_elementwise_rhs_input
+// CHECK-LABEL: entry @loads_binary_elementwise_rhs_input
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
@@ -173,7 +173,7 @@ module {
 
 // -----
 
-// CHECK-LABEL: @loads_ternary_elementwise_select
+// CHECK-LABEL: entry @loads_ternary_elementwise_select
 // CHECK-SAME: (%[[IN0_PTR:.+]]: tile<ptr<i1>>, %[[IN1_PTR:.+]]: tile<ptr<f32>>, %[[IN2_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
@@ -218,7 +218,7 @@ module {
 
 // -----
 
-// CHECK-LABEL: @loads_transpose_kernel
+// CHECK-LABEL: entry @loads_transpose_kernel
 // CHECK-SAME: (%[[INPTR:.+]]: tile<ptr<f32>>, %[[OUTPTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
@@ -241,7 +241,7 @@ module {
 
 // -----
 
-// CHECK-LABEL: @loads_multiple_convert
+// CHECK-LABEL: entry @loads_multiple_convert
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f16>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
@@ -272,7 +272,7 @@ module {
 
 // -----
 
-// CHECK-LABEL: @loads_multiple_compare
+// CHECK-LABEL: entry @loads_multiple_compare
 // CHECK-SAME: (%[[IN0_PTR:.+]]: tile<ptr<f32>>, %[[IN1_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<i1>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
@@ -315,7 +315,7 @@ module {
 // graph iteration space doesn't match the tensor rank.
 // ============================================================================
 
-// CHECK-LABEL: @store_output_rank_increase
+// CHECK-LABEL: entry @store_output_rank_increase
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ZERO:.+]] = constant <i32: 0> : tile<i32>
@@ -344,7 +344,7 @@ module {
 // -----
 
 
-// CHECK-LABEL: @store_output_rank_decrease
+// CHECK-LABEL: entry @store_output_rank_decrease
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK: %[[TVIEW_IN:.+]] = make_tensor_view %[[IN_PTR]], shape = [1024], strides = [1]

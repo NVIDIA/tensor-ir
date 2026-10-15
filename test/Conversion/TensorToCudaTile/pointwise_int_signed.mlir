@@ -68,12 +68,18 @@ nv_tensor_ir.graph @test_div_op(%arg0: tensor<128xsi32>,
 
 // -----
 
+// Floored `mod` lowers to `remi` plus a sign-conditional select.
 // CHECK-LABEL: @test_mod_op
-// CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xi32>]]
-// CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
-// CHECK: %[[DIV:.*]] = divi %[[ARG0]], %[[ARG1]] signed rounding<negative_inf> : [[TILE]]
-// CHECK: %[[MUL:.*]] = muli %[[DIV]], %[[ARG1]] : [[TILE]]
-// CHECK: %[[RESULT:.*]] = subi %[[ARG0]], %[[MUL]] : [[TILE]]
+// CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xi32>]]
+// CHECK-DAG: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
+// CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : [[TILE]]
+// CHECK: %[[REM:.*]] = remi %[[ARG0]], %[[ARG1]] signed : [[TILE]]
+// CHECK: %[[NONZERO:.*]] = cmpi not_equal %[[REM]], %[[ZERO]], signed : [[TILE]]
+// CHECK: %[[SIGN_BITS:.*]] = xori %[[ARG0]], %[[ARG1]] : [[TILE]]
+// CHECK: %[[SIGNS_DIFFER:.*]] = cmpi less_than %[[SIGN_BITS]], %[[ZERO]], signed : [[TILE]]
+// CHECK: %[[FIX:.*]] = andi %[[NONZERO]], %[[SIGNS_DIFFER]]
+// CHECK: %[[FIXED:.*]] = addi %[[REM]], %[[ARG1]] : [[TILE]]
+// CHECK: %[[RESULT:.*]] = select %[[FIX]], %[[FIXED]], %[[REM]]
 // CHECK: store_view_tko weak %[[RESULT]]
 nv_tensor_ir.graph @test_mod_op(%arg0: tensor<128xsi32>,
                                 %arg1: tensor<128xsi32>) -> tensor<128xsi32> {
@@ -83,8 +89,7 @@ nv_tensor_ir.graph @test_mod_op(%arg0: tensor<128xsi32>,
 
 // -----
 
-// `rem` is the truncated counterpart of `mod` and lowers to a single
-// `cuda_tile.remi` carrying the signedness of the element type.
+// `rem` lowers to a single `cuda_tile.remi` carrying the signedness.
 // CHECK-LABEL: @test_rem_op
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xi32>]]
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]

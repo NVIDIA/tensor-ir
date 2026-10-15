@@ -33,6 +33,9 @@ struct CudaTileFrontendResult {
   ::tensor_ir::rt::KernelMetadata argLayout;
   SmallVector<int64_t> resolvedIterationSpaceShape;
   bool useRuntimeGrid = false;
+  /// True when the kernel waits on a grid dependency (`gdc_wait_tko`) and can
+  /// therefore be launched with programmatic dependent launch.
+  bool usesPDL = false;
 };
 
 /// Lightweight legality check for the frontend. This intentionally avoids

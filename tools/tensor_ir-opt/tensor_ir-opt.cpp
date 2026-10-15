@@ -6,6 +6,7 @@
 #include "tensor_ir/Registration/Registration.h"
 #include "tensor_ir/Support/TIROverrideOptions.h"
 
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassOptions.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
@@ -23,6 +24,9 @@ namespace {
 
 struct TestTensorToCudaTileOptions
     : public PassPipelineOptions<TestTensorToCudaTileOptions> {
+  PassOptions::Option<std::string> bytecodeVersion{
+      *this, "bytecode-version", llvm::cl::desc("CUDA Tile bytecode target."),
+      llvm::cl::init("default")};
   PassOptions::ListOption<int32_t> tileSize{
       *this, "tile-size", llvm::cl::desc("A list of integers for tile size"),
       llvm::cl::list_init<int32_t>({})};
@@ -52,6 +56,7 @@ nv_tensor_ir::CompilerInvocation
 getCudaTileConversionOptions(const TestTensorToCudaTileOptions &opts) {
   nv_tensor_ir::CompilerInvocation options;
   options.codegen.tileSize.assign(opts.tileSize.begin(), opts.tileSize.end());
+  options.cudaTile.bytecodeVersion = opts.bytecodeVersion;
   options.cudaTile.reductionTileSize = opts.reductionTileSize;
   options.cudaTile.persistenceMode = opts.persistence;
   options.cudaTile.smCount = opts.smCount;
@@ -96,18 +101,15 @@ namespace mlir::nv_tensor_ir::test {
 void registerTestLoweringPipelines() {
 
   // Layout propagation pipeline
-  // Pass ordering is critical and must be preserved:
-  // 1. LayoutPropagationAnnotation: Annotates ops with layout information
-  // 2. LayoutPropagationNormalization: Computes the main iteration space
-  // 3. TileAnalyzer: Analyzes the iteration spaces and adds tile candidates
-  // 4. TileSelection: Selects tile configuration based on a heuristic
-  // 5. GraphSplitting: Back-propagates iteration_space layouts and enforces
-  //    that non-unary elementwise ops have composite layouts with separated
-  //    operand layouts
-  // 6. FormGridPass: Forms the flattened destination-passing tiled grid
-  // 7. TileReductionsPass: Materializes contraction/persistence loops
-  // 8. OutlineKernelPass: Outlines the mapped forall body
-  // 9. TensorToCudaTileConversion: Converts the explicit program to CudaTile
+  // Pass ordering is critical and must be preserved. Passes compute the
+  // layout-propagation analyses on demand:
+  // 1. TileAnalyzer: Analyzes the iteration spaces and adds tile candidates
+  // 2. TileSelection: Selects tile configuration based on a heuristic
+  // 3. FormGridPass: Back-propagates iteration-space layouts and forms the
+  //    flattened destination-passing tiled grid
+  // 4. TileReductionsPass: Materializes contraction/persistence loops
+  // 5. OutlineKernelPass: Outlines the mapped forall body
+  // 6. TensorToCudaTileConversion: Converts the explicit program to CudaTile
   registerCheckedPipeline<TestTensorToCudaTileOptions>(
       "layout-propagation-pipeline",
       "Pipeline to convert TensorIR to CudaTile using layout propagation",

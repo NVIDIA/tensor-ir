@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "tensor_ir/Analysis/LayoutPropagation.h"
 #include "tensor_ir/Analysis/TileAnalyzer.h"
 #include "tensor_ir/Analysis/TileCandidateGenerator.h"
 #include "tensor_ir/Dialect/TensorIR.h"
@@ -38,7 +39,7 @@ namespace {
 constexpr int32_t kDefaultDynamicTileSize = 128;
 constexpr int32_t kMaxFallbackTileSize = 128;
 
-/// Generate a conservative fallback tile from the iteration_space shape.
+/// Generate a conservative fallback tile from the iteration space shape.
 /// Static dims get bit_floor clamped to kMaxFallbackTileSize; dynamic
 /// dims (<= 0, i.e. kDynamic) get kDefaultDynamicTileSize. Dims constrained
 /// to a fixed tile size (e.g., a concat dim) override the result.
@@ -156,49 +157,28 @@ static void collectSourceInfo(LayoutSourceAttrInterface source,
   }
 }
 
-/// Extract iteration space info from the "iteration_space" attribute set by
-/// LayoutPropagationNormalizationPass. That pass annotates the
-/// terminator (results op) and ops that modify the iteration space (reductions,
-/// matmuls) with a normalized TensorSourceAttr or CompositeSourceAttr.
+/// Extract iteration space info from the normalized layout-propagation
+/// iteration space: the union of the normalized input layouts of the graph
+/// results.
 ///
-/// We read from the terminator first (the graph's output iteration space).
 /// The shape comes from the common iteration space; strides are extracted
 /// per-source so the tile heuristic can evaluate coalescing for each input.
-///
-/// Returns failure if no "iteration_space" attributes are found (Phase 1 was
-/// not run, or LayoutPropagationNormalizationPass was not run).
 FailureOr<IterationSpaceInfo> extractIterationSpace(GraphOp graphOp) {
-  // Find the "iteration_space" attr on the terminator (results op).
-  // MR #17719 annotates the terminator with the graph's output iteration space.
-  Attribute iterSpaceAttr;
-  Operation *terminator = graphOp.getBody()->getTerminator();
-  if (terminator) {
-    iterSpaceAttr =
-        terminator->getAttr(TensorIRDialect::getIterationSpaceAttrName());
-  }
-
-  if (!iterSpaceAttr) {
-    return graphOp.emitError("No \"iteration_space\" attribute found: "
-                             "LayoutPropagationAnnotation and "
-                             "LayoutPropagationNormalization must run first");
-  }
-
-  auto sourceAttr = dyn_cast<LayoutSourceAttrInterface>(iterSpaceAttr);
-  if (!sourceAttr) {
-    return graphOp.emitError(
-        "\"iteration_space\" attribute must be a layout source attribute");
-  }
+  MLIR_ASSIGN_OR_RETURN(LayoutNormalization normalization,
+                        LayoutNormalization::compute(graphOp));
+  LayoutSourceAttrInterface sourceAttr = normalization.iterationSpace;
 
   IterationSpaceInfo info;
 
   SmallVector<TensorSourceAttr> leafSources;
   collectSourceInfo(sourceAttr, leafSources, info.fixedTileDims);
-  MLIR_ASSIGN_OR_RETURN(auto resultFixedTileSizes,
-                        deriveResultFixedTileSizes(terminator));
+  MLIR_ASSIGN_OR_RETURN(
+      auto resultFixedTileSizes,
+      deriveResultFixedTileSizes(normalization.resultViews, graphOp));
   if (!resultFixedTileSizes.empty() &&
       resultFixedTileSizes.size() != sourceAttr.getShape().size()) {
     return graphOp.emitError()
-           << "result_views rank " << resultFixedTileSizes.size()
+           << "result view rank " << resultFixedTileSizes.size()
            << " does not match iteration space rank "
            << sourceAttr.getShape().size();
   }
@@ -248,12 +228,11 @@ FailureOr<IterationSpaceInfo> extractIterationSpace(GraphOp graphOp) {
     return failure();
   }
 
-  // The "iteration_space" attribute contains only input layouts. Multi-output
+  // The iteration space contains only input layouts. Multi-output
   // normalization records every physical output in root-carrier coordinates,
-  // so add all of them to coalescing analysis. Keep the legacy result-0 path
-  // for the single-output representation, which intentionally has no
-  // result_views attribute.
-  MLIR_ASSIGN_OR_RETURN(auto resultViews, getResultViews(terminator));
+  // so add all of them to coalescing analysis. Keep the result-0 path for the
+  // single-output representation, which has no result views.
+  ArrayRef<TensorSourceAttr> resultViews = normalization.resultViews;
   if (!resultViews.empty()) {
     for (TensorSourceAttr view : resultViews) {
       MLIR_ASSIGN_OR_RETURN(auto elemSize,
@@ -277,8 +256,7 @@ FailureOr<IterationSpaceInfo> extractIterationSpace(GraphOp graphOp) {
     auto resultDescriptors = getTensorDescriptors(graphOp.getResultTypes(),
                                                   graphOp.getAllResultAttrs());
     if (failed(resultDescriptors)) {
-      terminator->emitError(
-          "Failed to get tensor descriptors for output tensors");
+      graphOp.emitError("Failed to get tensor descriptors for output tensors");
       return failure();
     }
 
@@ -316,8 +294,7 @@ FailureOr<IterationSpaceInfo> extractIterationSpace(GraphOp graphOp) {
   }
 
   LLVM_DEBUG({
-    llvm::dbgs() << "TileAnalyzerPass: extracted iteration space from "
-                    "\"iteration_space\" attr: shape="
+    llvm::dbgs() << "TileAnalyzerPass: extracted iteration space: shape="
                  << vectorToString(info.shape) << " (" << info.allStrides.size()
                  << " source(s))\n";
     for (size_t i = 0; i < info.allStrides.size(); ++i) {
@@ -376,8 +353,7 @@ struct TileAnalyzerPass : public impl::TileAnalyzerPassBase<TileAnalyzerPass> {
       return;
     }
 
-    // Step 2: Extract iteration space from "iteration_space" attribute
-    // (set by LayoutPropagationNormalizationPass).
+    // Step 2: Extract the normalized layout-propagation iteration space.
     auto iterSpaceInfo = extractIterationSpace(graphOp);
     if (failed(iterSpaceInfo)) {
       return signalPassFailure();
@@ -403,7 +379,7 @@ struct TileAnalyzerPass : public impl::TileAnalyzerPassBase<TileAnalyzerPass> {
 
     // When the byte-weighted/smem tracks produce no valid candidates (e.g.
     // small or awkwardly shaped iteration spaces), synthesize a single
-    // conservative fallback tile derived from the iteration_space shape.
+    // conservative fallback tile derived from the iteration space shape.
     // This guarantees that TileAnalyzerPass always emits at least one
     // candidate, as long as the tile size is not already specified via options
     // or tile_size attribute on graph. So downstream passes (TileSelectionPass)

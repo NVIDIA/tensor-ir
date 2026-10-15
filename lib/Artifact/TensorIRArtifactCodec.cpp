@@ -24,7 +24,7 @@ namespace tensor_ir::rt {
 namespace {
 namespace schema = ::tensor_ir::rt::schema;
 
-constexpr uint32_t kTensorIRArtifactVersion = 2;
+constexpr uint32_t kTensorIRArtifactVersion = 3;
 
 schema::ArchPortability toSchema(ArchPortability portability) {
   switch (portability) {
@@ -227,29 +227,47 @@ public:
                                (*artifact.staticGrid)[2]);
     }
 
-    auto metadata = schema::CreateLaunchMetadata(
+    auto metadata = schema::CreateKernelMetadata(
         builder_, builder_.CreateString(artifact.funcName), argsType, args,
         tileSizes, argLayout.numInputs, argLayout.gridShapeTensorIdx, gridShape,
         gridShapeDimMapping, toSchema(argLayout.persistence), argLayout.smCount,
-        argLayout.occupancy, staticGridStruct ? &*staticGridStruct : nullptr);
+        argLayout.occupancy, staticGridStruct ? &*staticGridStruct : nullptr,
+        artifact.usesPDL_);
 
+    // The current single-entrypoint ABI uses the same logical arguments as
+    // the sole device kernel.
     auto kernelNameOffset = builder_.CreateString(artifact.kernelName);
+    auto entrypoint = schema::CreateEntrypoint(
+        builder_, builder_.CreateString(artifact.entrypointName),
+        argLayout.numInputs, argsType, args);
+    auto kernels = builder_.CreateVector(&metadata, 1);
+    auto entrypoints = builder_.CreateVector(&entrypoint, 1);
 
     schema::SmTarget archStruct(artifact.arch.getComputeCapabilityVersion(),
                                 toSchema(artifact.arch.getPortability()));
 
-    schema::Binary binaryType;
+    schema::DeviceModule binaryType;
     ::flatbuffers::Offset<void> binaryOffset =
         encodeBinary(artifact.binary, binaryType);
 
-    return schema::CreateTensorIRArtifact(builder_, kTensorIRArtifactVersion,
-                                          kernelNameOffset, &archStruct,
-                                          binaryType, binaryOffset, metadata);
+    ::flatbuffers::Offset<schema::HostModule> hostModule;
+    if (artifact.hostModule) {
+      const auto &host = *artifact.hostModule;
+      auto bytes = builder_.CreateVector(
+          reinterpret_cast<const uint8_t *>(host.bytes.data()),
+          host.bytes.size());
+      hostModule = schema::CreateHostModule(builder_, host.abiVersion, bytes,
+                                            builder_.CreateString(host.triple));
+    }
+
+    return schema::CreateTensorIRArtifact(
+        builder_, kTensorIRArtifactVersion, kernelNameOffset, &archStruct,
+        binaryType, binaryOffset, kernels, hostModule, entrypoints);
   }
 
 private:
   ::flatbuffers::Offset<void> encodeBinary(const Binary &binary,
-                                           schema::Binary &binaryType) {
+                                           schema::DeviceModule &binaryType) {
     return std::visit(
         [&](const auto &b) -> ::flatbuffers::Offset<void> {
           auto bytesOffset = builder_.CreateVector(
@@ -257,11 +275,11 @@ private:
               b.bytes.size());
           using T = std::decay_t<decltype(b)>;
           if constexpr (std::is_same_v<T, Cubin>) {
-            binaryType = schema::Binary::Cubin;
+            binaryType = schema::DeviceModule::Cubin;
             return schema::CreateCubin(builder_, bytesOffset).Union();
           } else {
             static_assert(std::is_same_v<T, TileIRBytecode>);
-            binaryType = schema::Binary::TileIRBytecode;
+            binaryType = schema::DeviceModule::TileIRBytecode;
             std::optional<schema::BcVersion> versionStruct;
             if (b.version) {
               versionStruct.emplace(b.version->getMajor(),
@@ -304,9 +322,9 @@ private:
 
 namespace {
 
-StatusOr<Binary> decodeBinary(schema::Binary kind, const void *value) {
+StatusOr<Binary> decodeBinary(schema::DeviceModule kind, const void *value) {
   switch (kind) {
-  case schema::Binary::Cubin: {
+  case schema::DeviceModule::Cubin: {
     const auto *cubin = static_cast<const schema::Cubin *>(value);
     if (!cubin || !cubin->bytes()) {
       return Status::InvalidArgument(
@@ -316,7 +334,7 @@ StatusOr<Binary> decodeBinary(schema::Binary kind, const void *value) {
                                      cubin->bytes()->end());
     return Binary(Cubin{std::move(bytes)});
   }
-  case schema::Binary::TileIRBytecode: {
+  case schema::DeviceModule::TileIRBytecode: {
     const auto *tileir = static_cast<const schema::TileIRBytecode *>(value);
     if (!tileir || !tileir->bytes()) {
       return Status::InvalidArgument(
@@ -336,7 +354,7 @@ StatusOr<Binary> decodeBinary(schema::Binary kind, const void *value) {
     }
     return Binary(TileIRBytecode{std::move(bytes), version});
   }
-  case schema::Binary::NONE:
+  case schema::DeviceModule::NONE:
   default:
     return Status::InvalidArgument(
         "serialized TensorIRArtifact has a malformed binary");
@@ -350,7 +368,23 @@ decodeTensorIRArtifact(const schema::TensorIRArtifact &payload) {
                                 std::to_string(payload.version()) +
                                 " is not supported");
   }
-  const schema::LaunchMetadata *metadata = payload.metadata();
+  if (payload.kernels()->size() != 1 || payload.entrypoints()->size() != 1) {
+    return Status::NotSupported(
+        "serialized TensorIRArtifact must have exactly one kernel and one "
+        "entrypoint");
+  }
+  std::optional<HostModule> hostModule;
+  if (const auto *host = payload.host_module()) {
+    hostModule = HostModule{llvm::SmallVector<char, 0>(host->bytes()->begin(),
+                                                       host->bytes()->end()),
+                            host->abi_version(), host->triple()->str()};
+  }
+  const schema::KernelMetadata *metadata = payload.kernels()->Get(0);
+  const schema::Entrypoint *entrypoint = payload.entrypoints()->Get(0);
+  if (entrypoint->name()->size() == 0) {
+    return Status::InvalidArgument(
+        "serialized TensorIRArtifact has an empty entrypoint name");
+  }
   KernelMetadataBuilder builder;
   if (const auto *args = metadata->args()) {
     const auto *argTypes = metadata->args_type();
@@ -379,6 +413,23 @@ decodeTensorIRArtifact(const schema::TensorIRArtifact &payload) {
   TIR_ASSIGN_OR_RETURN(KernelMetadata argLayout,
                        KernelMetadata::create(std::move(builder)));
 
+  // The current runtime passes entrypoint arguments directly to the kernel.
+  if (entrypoint->num_inputs() != argLayout.numInputs ||
+      (entrypoint->args() ? entrypoint->args()->size() : 0) !=
+          argLayout.args.size()) {
+    return Status::InvalidArgument(
+        "serialized TensorIRArtifact entrypoint and kernel signatures differ");
+  }
+  for (::flatbuffers::uoffset_t i = 0; i < argLayout.args.size(); ++i) {
+    TIR_ASSIGN_OR_RETURN(ArgDesc desc,
+                         decodeArgDesc(entrypoint->args_type()->Get(i),
+                                       entrypoint->args()->Get(i)));
+    if (!(desc == argLayout.args[i])) {
+      return Status::InvalidArgument("serialized TensorIRArtifact entrypoint "
+                                     "and kernel signatures differ");
+    }
+  }
+
   std::optional<std::array<int32_t, 3>> staticGrid;
   if (const schema::GridDimensions *grid = metadata->static_grid()) {
     staticGrid = {grid->x(), grid->y(), grid->z()};
@@ -398,15 +449,16 @@ decodeTensorIRArtifact(const schema::TensorIRArtifact &payload) {
         "serialized TensorIRArtifact has an invalid compute target");
   }
 
-  TIR_ASSIGN_OR_RETURN(Binary binary,
-                       decodeBinary(payload.binary_type(), payload.binary()));
+  TIR_ASSIGN_OR_RETURN(Binary binary, decodeBinary(payload.device_module_type(),
+                                                   payload.device_module()));
 
-  std::string funcName = metadata->func_name()->str();
-  std::string kernelName = payload.kernel_name()->str();
+  std::string funcName = metadata->name()->str();
+  std::string kernelName = payload.module_name()->str();
 
-  return TensorIRArtifact::create(std::move(kernelName), std::move(funcName),
-                                  std::move(binary), *arch,
-                                  std::move(argLayout), staticGrid);
+  return TensorIRArtifact::create(
+      std::move(kernelName), std::move(funcName), std::move(binary), *arch,
+      std::move(argLayout), staticGrid, metadata->uses_pdl(),
+      std::move(hostModule), entrypoint->name()->str());
 }
 
 class FlatBufferMemoryBuffer final : public llvm::MemoryBuffer {

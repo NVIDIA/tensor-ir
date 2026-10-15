@@ -1,6 +1,11 @@
 if(TENSOR_IR_INCLUDE_TESTS)
   # Passed to lit.site.cfg.py.in to set up the path where to find libraries.
   set(MLIR_LIB_DIR ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+  set(CUDA_TILE_TOOLS_DIR "")
+  if(TARGET cuda-tile-translate)
+    get_property(CUDA_TILE_TOOLS_DIR TARGET cuda-tile-translate
+      PROPERTY RUNTIME_OUTPUT_DIRECTORY)
+  endif()
 
   llvm_canonicalize_cmake_booleans(
     TENSOR_IR_INCLUDE_TESTS
@@ -23,6 +28,8 @@ if(TENSOR_IR_INCLUDE_TESTS)
 
   set(MLIR_TEST_DEPENDS
     FileCheck
+    mlir-runner
+    mlir_c_runner_utils
     not
     split-file
     tensor_ir-compiler
@@ -30,6 +37,10 @@ if(TENSOR_IR_INCLUDE_TESTS)
     tensor_ir-tblgen
     TensorIRUnitTests
   )
+
+  if(TARGET cuda-tile-translate)
+    list(APPEND MLIR_TEST_DEPENDS cuda-tile-translate)
+  endif()
 
 
   if(TENSOR_IR_ENABLE_BINDINGS_PYTHON)

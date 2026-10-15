@@ -7,7 +7,11 @@ namespace mlir::test {
 
 void registerTestConvertOpBuilderPass();
 void registerTestSideEffectsPass();
+void registerTestControlFlowInterfacePass();
+void registerTestLayoutPropagationPasses();
 void registerTestTileAnalyzerPass();
+void registerTestTilingEnumeratorPass();
+void registerTestTilingEvaluatorPass();
 
 } // namespace mlir::test
 
@@ -16,7 +20,11 @@ namespace mlir::nv_tensor_ir::test {
 void registerAllPasses() {
   ::mlir::test::registerTestConvertOpBuilderPass();
   ::mlir::test::registerTestSideEffectsPass();
+  ::mlir::test::registerTestControlFlowInterfacePass();
+  ::mlir::test::registerTestLayoutPropagationPasses();
   ::mlir::test::registerTestTileAnalyzerPass();
+  ::mlir::test::registerTestTilingEnumeratorPass();
+  ::mlir::test::registerTestTilingEvaluatorPass();
 }
 
 } // namespace mlir::nv_tensor_ir::test

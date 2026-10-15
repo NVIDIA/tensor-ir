@@ -16,19 +16,11 @@
 //       CHECK: nv_tensor_ir.store %[[REDUCED]]#1
 //   CHECK-NOT: nv_tensor_ir.reduce_ud
 //       CHECK: return
-#reduction = #nv_tensor_ir.reduction_source<"(4,1,(8)):(8,0,(1))",
-    #nv_tensor_ir.composite_source<
-      #nv_tensor_ir.tensor_source<0, 0, "(4,8):(8,1)">,
-      #nv_tensor_ir.tensor_source<1, 0, "(4,8):(8,1)">>>
 func.func @multi_result_reduction(%a: memref<4x8xf32, #ptr.generic_space>,
     %b: memref<4x8xf16, #ptr.generic_space>,
     %out0: memref<4x1xf32, strided<[1, 0]>, #ptr.generic_space>,
     %out1: memref<4x1xf16, strided<[1, 0]>, #ptr.generic_space>) attributes {
   nv_tensor_ir.bufferized_program,
-  iteration_space = #reduction,
-  result_layouts = [#reduction, #reduction],
-  result_views = [#nv_tensor_ir.tensor_source<2, 0, "(4,1):(1,0)">,
-                  #nv_tensor_ir.tensor_source<3, 0, "(4,1):(1,0)">],
   tile_size = array<i32: 2, 1>
 } {
   %a_tile = bufferization.to_tensor %a restrict
@@ -41,7 +33,7 @@ func.func @multi_result_reduction(%a: memref<4x8xf32, #ptr.generic_space>,
     %sum0 = arith.addf %acc0, %v0 : f32
     %sum1 = arith.addf %acc1, %v1 : f16
     nv_tensor_ir.yield %sum0, %sum1 : f32, f16
-  } {layout = #reduction}
+  }
       : tensor<4x8xf32>, tensor<4x8xf16> -> tensor<4x1xf32>, tensor<4x1xf16>
   bufferization.materialize_in_destination %r0 in restrict writable %out0
       : (tensor<4x1xf32>, memref<4x1xf32, strided<[1, 0]>, #ptr.generic_space>)

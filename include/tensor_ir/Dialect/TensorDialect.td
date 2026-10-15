@@ -30,6 +30,35 @@ def TensorIR_Dialect : Dialect {
   let extraClassDeclaration = [{
     void registerTypes();
 
+    /// Nonnegative i32 ordinal assigned to each kernel entrypoint.
+    /// At runtime, the oridinal is used to select the correct loaded
+    /// entrypoint function if the program contains multiple kernels.
+    static StringRef getKernelOrdinalAttrName() {
+      return "nv_tensor_ir.kernel_ordinal";
+    }
+
+    /// UnitAttr name for argument which contains the runtime context
+    /// pointer.
+    static StringRef getRuntimeContextAttrName() {
+      return "nv_tensor_ir.runtime_context";
+    }
+
+    /// DenseI8ResourceElementsAttr name for the native ELF binary data
+    /// which may be attached to the top-level ModuleOp.
+    static StringRef getNativeObjectAttrName() {
+      return "nv_tensor_ir.host_object";
+    }
+
+    /// StringAttr recording the native object target and calling convention.
+    static StringRef getNativeTripleAttrName() {
+      return "nv_tensor_ir.host_triple";
+    }
+
+    /// ArrayAttr of exported native host entry symbol names.
+    static StringRef getNativeEntrypointsAttrName() {
+      return "nv_tensor_ir.host_entrypoints";
+    }
+
     static StringRef getAlignmentAttrName() {
       return "nv_tensor_ir.alignment";
     }
@@ -71,26 +100,6 @@ def TensorIR_Dialect : Dialect {
       return "nv_tensor_ir.iter_space_dim_domains";
     }
 
-    static StringRef getIterationSpaceAttrName() {
-      return "iteration_space";
-    }
-
-    /// Per-result terminal layouts expressed in the normalized root carrier.
-    /// The array is ordered like the operands of ResultsOp.
-    static StringRef getResultLayoutsAttrName() {
-      return "result_layouts";
-    }
-
-    /// Per-result physical output views expressed in the normalized root
-    /// carrier. The array is ordered like the operands of ResultsOp.
-    static StringRef getResultViewsAttrName() {
-      return "result_views";
-    }
-
-    static StringRef getLayoutAttrName() {
-      return "layout";
-    }
-
     static StringRef getTileSizeAttrName() {
       return "tile_size";
     }
@@ -104,6 +113,7 @@ def TensorIR_Dialect : Dialect {
   let useDefaultAttributePrinterParser = 1;
   // OSS has no dialect-defined types, so TableGen emits no type parser/printer
   // bodies. Only declare the overrides when their type definitions are present.
+  let hasOperationAttrVerify = 1;
   let hasRegionArgAttrVerify = 1;
   let hasRegionResultAttrVerify = 1;
   let dependentDialects = [

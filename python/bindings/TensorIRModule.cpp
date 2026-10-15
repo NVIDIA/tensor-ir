@@ -477,38 +477,23 @@ void *packStream(nb::object stream) {
       "stream must be None, an integer pointer, or a CUDA stream");
 }
 
-class PyProgram {
+class PyRuntimeKernel {
 public:
-  explicit PyProgram(MlirTensorIRProgram program) : program_(program) {}
-
-  PyProgram(const PyProgram &) = delete;
-  PyProgram &operator=(const PyProgram &) = delete;
-  PyProgram(PyProgram &&) = delete;
-  PyProgram &operator=(PyProgram &&) = delete;
-  ~PyProgram() { mlirTensorIRProgramDelete(program_); }
-
-  bool isDestroyed() const { return mlirTensorIRProgramIsDestroyed(program_); }
-
-  bool isInitialized() const {
-    return mlirTensorIRProgramIsInitialized(program_);
-  }
-
-  void initialize() {
-    std::string error;
-    checkCAPIResult(
-        mlirTensorIRProgramInitialize(program_, appendStringRef, &error),
-        "mlirTensorIRProgramInitialize", error);
-  }
+  explicit PyRuntimeKernel(MlirTensorIRRuntimeKernel kernel)
+      : kernel_(kernel) {}
+  PyRuntimeKernel(const PyRuntimeKernel &) = delete;
+  PyRuntimeKernel &operator=(const PyRuntimeKernel &) = delete;
+  ~PyRuntimeKernel() { mlirTensorIRRuntimeKernelDestroy(kernel_); }
 
   bool checkSupport(nb::tuple pyArgs) {
     PackedPythonArgs args = packArgs(pyArgs);
     MlirTensorIRPackedArgs packedArgs = args.packed();
     bool supported = false;
     std::string error;
-    checkCAPIResult(mlirTensorIRProgramCheckSupport(program_, packedArgs,
-                                                    &supported, appendStringRef,
-                                                    &error),
-                    "mlirTensorIRProgramCheckSupport", error);
+    checkCAPIResult(
+        mlirTensorIRRuntimeKernelCheckSupport(kernel_, packedArgs, &supported,
+                                              appendStringRef, &error),
+        "mlirTensorIRRuntimeKernelCheckSupport", error);
     return supported;
   }
 
@@ -518,9 +503,9 @@ public:
     size_t workspaceSize = 0;
     std::string error;
     checkCAPIResult(
-        mlirTensorIRProgramQueryWorkspaceSize(
-            program_, packedArgs, &workspaceSize, appendStringRef, &error),
-        "mlirTensorIRProgramQueryWorkspaceSize", error);
+        mlirTensorIRRuntimeKernelQueryWorkspaceSize(
+            kernel_, packedArgs, &workspaceSize, appendStringRef, &error),
+        "mlirTensorIRRuntimeKernelQueryWorkspaceSize", error);
     return workspaceSize;
   }
 
@@ -530,46 +515,66 @@ public:
     PackedWorkspace packedWorkspace = packWorkspace(std::move(workspace), args);
     void *packedStream = packStream(std::move(stream));
     std::string error;
-    checkCAPIResult(
-        mlirTensorIRProgramLaunch(program_, packedArgs, packedWorkspace.data,
-                                  packedWorkspace.size, packedStream,
-                                  appendStringRef, &error),
-        "mlirTensorIRProgramLaunch", error);
+    checkCAPIResult(mlirTensorIRRuntimeKernelLaunch(
+                        kernel_, packedArgs, packedWorkspace.data,
+                        packedWorkspace.size, packedStream, appendStringRef,
+                        &error),
+                    "mlirTensorIRRuntimeKernelLaunch", error);
+  }
+
+private:
+  MlirTensorIRRuntimeKernel kernel_;
+};
+
+class PyArtifact {
+public:
+  explicit PyArtifact(MlirTensorIRArtifact artifact) : artifact_(artifact) {}
+  PyArtifact(const PyArtifact &) = delete;
+  PyArtifact &operator=(const PyArtifact &) = delete;
+  ~PyArtifact() { mlirTensorIRArtifactDestroy(artifact_); }
+
+  std::unique_ptr<PyRuntimeKernel> load() const {
+    std::string error;
+    auto kernel = mlirTensorIRArtifactLoad(artifact_, appendStringRef, &error);
+    if (!kernel.ptr) {
+      throwCAPIError("mlirTensorIRArtifactLoad", error);
+    }
+    return std::make_unique<PyRuntimeKernel>(kernel);
   }
 
   nb::bytes getBytecode() const {
     std::string bytecode;
     std::string error;
-    checkCAPIResult(mlirTensorIRProgramGetBytecode(program_, appendStringRef,
-                                                   &bytecode, appendStringRef,
-                                                   &error),
-                    "mlirTensorIRProgramGetBytecode", error);
+    checkCAPIResult(mlirTensorIRArtifactGetBytecode(artifact_, appendStringRef,
+                                                    &bytecode, appendStringRef,
+                                                    &error),
+                    "mlirTensorIRArtifactGetBytecode", error);
     return nb::bytes(bytecode.data(), bytecode.size());
   }
 
   nb::bytes serialize() const {
     std::string bytes;
     std::string error;
-    checkCAPIResult(mlirTensorIRProgramSerialize(program_, appendStringRef,
-                                                 &bytes, appendStringRef,
-                                                 &error),
-                    "mlirTensorIRProgramSerialize", error);
+    checkCAPIResult(mlirTensorIRArtifactSerialize(artifact_, appendStringRef,
+                                                  &bytes, appendStringRef,
+                                                  &error),
+                    "mlirTensorIRArtifactSerialize", error);
     return nb::bytes(bytes.data(), bytes.size());
   }
 
-  static std::unique_ptr<PyProgram> deserialize(nb::bytes bytes) {
+  static std::unique_ptr<PyArtifact> deserialize(nb::bytes bytes) {
     MlirStringRef data = mlirStringRefCreate(bytes.c_str(), bytes.size());
     std::string error;
-    MlirTensorIRProgram program =
-        mlirTensorIRProgramDeserialize(data, appendStringRef, &error);
-    if (!program.ptr) {
-      throwCAPIError("mlirTensorIRProgramDeserialize", error);
+    MlirTensorIRArtifact artifact =
+        mlirTensorIRArtifactDeserialize(data, appendStringRef, &error);
+    if (!artifact.ptr) {
+      throwCAPIError("mlirTensorIRArtifactDeserialize", error);
     }
-    return std::make_unique<PyProgram>(program);
+    return std::make_unique<PyArtifact>(artifact);
   }
 
 private:
-  MlirTensorIRProgram program_;
+  MlirTensorIRArtifact artifact_;
 };
 
 } // namespace
@@ -599,6 +604,22 @@ NB_MODULE(_tensor_ir, m) {
   nb::enum_<MlirTensorIRCudaTileArtifactKind>(m, "CudaTileArtifactKind")
       .value("TileIR", MlirTensorIRCudaTileArtifactKindTileIR)
       .value("Cubin", MlirTensorIRCudaTileArtifactKindCubin);
+
+  nb::enum_<MlirTensorIRCudaTileAutoGdcInsertion>(m, "AutoGdcInsertion")
+      .value("NONE", MlirTensorIRCudaTileAutoGdcInsertionNone)
+      .value("CONSERVATIVE", MlirTensorIRCudaTileAutoGdcInsertionConservative);
+
+  nb::enum_<MlirTensorIRCodegenHostTarget>(m, "HostTarget")
+      .value("Auto", MlirTensorIRCodegenHostTargetAuto)
+      .value("Native", MlirTensorIRCodegenHostTargetNative)
+      .value("Interpreter", MlirTensorIRCodegenHostTargetInterpreter);
+  nb::enum_<MlirTensorIRCodegenHostArch>(m, "HostArch")
+      .value("Native", MlirTensorIRCodegenHostArchNative)
+      .value("X86_64", MlirTensorIRCodegenHostArchX86_64)
+      .value("AArch64", MlirTensorIRCodegenHostArchAArch64);
+  nb::enum_<MlirTensorIRCodegenHostOS>(m, "HostOS")
+      .value("Windows", MlirTensorIRCodegenHostOSWindows)
+      .value("Linux", MlirTensorIRCodegenHostOSLinux);
 
   nb::class_<PyBytecodeVersion>(m, "BytecodeVersion")
       .def_static("current",
@@ -698,7 +719,12 @@ NB_MODULE(_tensor_ir, m) {
                    mlirTensorIRCompilerInvocationSet##field)
   TIR_BIND_OPTION(int32_t, "cta_count", CtaCount);
   TIR_BIND_OPTION(int32_t, "warp_count", WarpCount);
+  TIR_BIND_OPTION(MlirTensorIRCodegenHostTarget, "host_target", HostTarget);
+  TIR_BIND_OPTION(MlirTensorIRCodegenHostArch, "host_arch", HostArch);
+  TIR_BIND_OPTION(MlirTensorIRCodegenHostOS, "host_os", HostOS);
   TIR_BIND_OPTION(int32_t, "max_tile_candidates", MaxTileCandidates);
+  TIR_BIND_OPTION(MlirTensorIRCudaTileAutoGdcInsertion, "auto_gdc_insertion",
+                  AutoGdcInsertion);
   TIR_BIND_OPTION(MlirTensorIRCudaTileCodegenStrategy, "codegen_strategy",
                   CodegenStrategy);
   TIR_BIND_OPTION(MlirTensorIRCudaTileArtifactKind, "artifact_kind",
@@ -714,18 +740,18 @@ NB_MODULE(_tensor_ir, m) {
 #undef TIR_BIND_STRING_OPTION
 #undef TIR_BIND_OPTION
 
-  nb::class_<PyProgram>(m, "_Program")
-      .def("initialize", &PyProgram::initialize)
-      .def("check_support", &PyProgram::checkSupport, nb::arg("args"))
-      .def("query_workspace_size", &PyProgram::queryWorkspaceSize,
+  nb::class_<PyRuntimeKernel>(m, "_RuntimeKernel")
+      .def("check_support", &PyRuntimeKernel::checkSupport, nb::arg("args"))
+      .def("query_workspace_size", &PyRuntimeKernel::queryWorkspaceSize,
            nb::arg("args"))
-      .def("launch", &PyProgram::launch, nb::arg("args"),
-           nb::arg("workspace") = nb::none(), nb::arg("stream") = nb::none())
-      .def("get_bytecode", &PyProgram::getBytecode)
-      .def("serialize", &PyProgram::serialize)
-      .def_static("deserialize", &PyProgram::deserialize, nb::arg("bytes"))
-      .def_prop_ro("is_destroyed", &PyProgram::isDestroyed)
-      .def_prop_ro("is_initialized", &PyProgram::isInitialized);
+      .def("launch", &PyRuntimeKernel::launch, nb::arg("args"),
+           nb::arg("workspace") = nb::none(), nb::arg("stream") = nb::none());
+
+  nb::class_<PyArtifact>(m, "_Artifact")
+      .def("load", &PyArtifact::load)
+      .def("get_bytecode", &PyArtifact::getBytecode)
+      .def("serialize", &PyArtifact::serialize)
+      .def_static("deserialize", &PyArtifact::deserialize, nb::arg("bytes"));
 
   m.def("_tensor_metadata_from_dlpack", &tensorMetadataFromDLPack,
         nb::arg("tensor"),
@@ -739,15 +765,33 @@ NB_MODULE(_tensor_ir, m) {
   m.def(
       "compile",
       [](MlirModule module,
-         const CompileOptions &compileOptions) -> std::unique_ptr<PyProgram> {
+         const CompileOptions &compileOptions) -> std::unique_ptr<PyArtifact> {
         std::string error;
-        MlirTensorIRProgram program = mlirTensorIRProgramCompile(
+        MlirTensorIRArtifact artifact = mlirTensorIRArtifactCompile(
             validateModule(module), compileOptions.handle(), appendStringRef,
             &error);
-        if (!program.ptr) {
-          throwCAPIError("mlirTensorIRProgramCompile", error);
+        if (!artifact.ptr) {
+          throwCAPIError("mlirTensorIRArtifactCompile", error);
         }
-        return std::make_unique<PyProgram>(program);
+        return std::make_unique<PyArtifact>(artifact);
+      },
+      nb::arg("module"), nb::arg("options"));
+
+  m.def(
+      "analyze_module",
+      [](MlirModule module, const CompileOptions &compileOptions) {
+        std::vector<std::vector<int32_t>> candidates;
+        std::string error;
+        auto collect = [](const int32_t *shape, size_t rank, void *userData) {
+          auto &result =
+              *static_cast<std::vector<std::vector<int32_t>> *>(userData);
+          result.emplace_back(shape, shape + rank);
+        };
+        checkCAPIResult(mlirTensorIRCudaTileAnalyzeModule(
+                            validateModule(module), compileOptions.handle(),
+                            collect, &candidates, appendStringRef, &error),
+                        "mlirTensorIRCudaTileAnalyzeModule", error);
+        return candidates;
       },
       nb::arg("module"), nb::arg("options"));
 
@@ -756,10 +800,10 @@ NB_MODULE(_tensor_ir, m) {
       [](MlirModule module, const CompileOptions &compileOptions) -> bool {
         bool canCompile = false;
         std::string error;
-        checkCAPIResult(mlirTensorIRProgramCanCompile(
+        checkCAPIResult(mlirTensorIRCanCompile(
                             validateModule(module), compileOptions.handle(),
                             &canCompile, appendStringRef, &error),
-                        "mlirTensorIRProgramCanCompile", error);
+                        "mlirTensorIRCanCompile", error);
         return canCompile;
       },
       nb::arg("module"), nb::arg("options"));

@@ -23,10 +23,9 @@ nv_tensor_ir.graph @test_iota_1d() -> tensor<128xf32>
 
 // CHECK-LABEL: entry @test_iota_2d_dim0
 // CHECK-SAME: (%[[OUT:.*]]: tile<ptr<f32>>
-// CHECK: %[[C2:.*]] = constant <i32: 2> : tile<i32>
-// CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[ROW:.*]] = remi %[[BLOCK]], %[[C2]] unsigned : tile<i32>
-// CHECK: %[[COL:.*]] = divi %[[BLOCK]], %[[C2]] unsigned : tile<i32>
+// CHECK-DAG: %[[C2:.*]] = constant <i32: 2> : tile<i32>
+// CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
+// CHECK: %[[ROW:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
 // CHECK: %[[IOTA:.*]] = iota : tile<2xi32>
 // CHECK: %[[R0:.*]] = reshape %[[IOTA]] : tile<2xi32> -> tile<2x1xi32>
 // CHECK: %[[B0:.*]] = broadcast %[[R0]] : tile<2x1xi32> -> tile<2x16xi32>
@@ -37,7 +36,7 @@ nv_tensor_ir.graph @test_iota_1d() -> tensor<128xf32>
 // CHECK: %[[F32:.*]] = itof %[[IDX]] unsigned : tile<2x16xi32> -> tile<2x16xf32>
 // CHECK: %[[TVIEW:.*]] = make_tensor_view %[[OUT]], shape = [4, 16], strides = [16, 1]
 // CHECK: %[[PVIEW:.*]] = make_partition_view %[[TVIEW]]
-// CHECK: store_view_tko weak %[[F32]], %[[PVIEW]][%[[ROW]], %[[COL]]]
+// CHECK: store_view_tko weak %[[F32]], %[[PVIEW]][%[[ROW]], %[[ZERO]]]
 nv_tensor_ir.graph @test_iota_2d_dim0() -> tensor<4x16xf32>
     attributes {tile_size = array<i32: 2, 16>} {
   %out = iota dimension = 0 : tensor<4x16xf32>
@@ -48,20 +47,16 @@ nv_tensor_ir.graph @test_iota_2d_dim0() -> tensor<4x16xf32>
 
 // CHECK-LABEL: entry @test_iota_2d_dim1
 // CHECK-SAME: (%[[OUT:.*]]: tile<ptr<f32>>
-// CHECK: %[[C16:.*]] = constant <i32: 16> : tile<i32>
 // CHECK: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
-// CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
+// CHECK-NOT: get_tile_block_id
 // CHECK: %[[IOTA:.*]] = iota : tile<16xi32>
 // CHECK: %[[R0:.*]] = reshape %[[IOTA]] : tile<16xi32> -> tile<1x16xi32>
 // CHECK: %[[B0:.*]] = broadcast %[[R0]] : tile<1x16xi32> -> tile<4x16xi32>
-// CHECK: %[[OFF:.*]] = muli %[[BLOCK]], %[[C16]] : tile<i32>
-// CHECK: %[[OFF_SHAPE:.*]] = reshape %[[OFF]] : tile<i32> -> tile<1x1xi32>
-// CHECK: %[[BASE:.*]] = broadcast %[[OFF_SHAPE]] : tile<1x1xi32> -> tile<4x16xi32>
-// CHECK: %[[IDX:.*]] = addi %[[B0]], %[[BASE]] : tile<4x16xi32>
-// CHECK: %[[F32:.*]] = itof %[[IDX]] unsigned : tile<4x16xi32> -> tile<4x16xf32>
+// CUDA Tile versions differ in whether the zero offset is folded before itof.
+// CHECK: %[[F32:.*]] = itof %{{.*}} unsigned : tile<4x16xi32> -> tile<4x16xf32>
 // CHECK: %[[TVIEW:.*]] = make_tensor_view %[[OUT]], shape = [4, 16], strides = [16, 1]
 // CHECK: %[[PVIEW:.*]] = make_partition_view %[[TVIEW]]
-// CHECK: store_view_tko weak %[[F32]], %[[PVIEW]][%[[ZERO]], %[[BLOCK]]]
+// CHECK: store_view_tko weak %[[F32]], %[[PVIEW]][%[[ZERO]], %[[ZERO]]]
 nv_tensor_ir.graph @test_iota_2d_dim1() -> tensor<4x16xf32>
     attributes {tile_size = array<i32: 4, 16>} {
   %out = iota dimension = 1 : tensor<4x16xf32>
@@ -122,11 +117,11 @@ nv_tensor_ir.graph @test_iota_i32() -> (tensor<64xsi32>)
 // lowered from one local iota tile and two ranked broadcasts.
 // CHECK-LABEL: entry @test_iota_propagation
 // CHECK-SAME: (%[[OUT:.*]]: tile<ptr<f32>>
-// CHECK: %[[TILE_SIZE:.*]] = constant <i32: 4> : tile<i32>
-// CHECK: %[[ROW_STRIDE:.*]] = constant <i32: 64> : tile<i32>
-// CHECK: %[[IOTA_STRIDE:.*]] = constant <i32: 16> : tile<4x4x4xi32>
-// CHECK: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
-// CHECK: %[[C2:.*]] = constant <i32: 2> : tile<i32>
+// CHECK-DAG: %[[TILE_SIZE:.*]] = constant <i32: 4> : tile<i32>
+// CHECK-DAG: %[[ROW_STRIDE:.*]] = constant <i32: 64> : tile<i32>
+// CHECK-DAG: %[[IOTA_STRIDE:.*]] = constant <i32: 16> : tile<4x4x4xi32>
+// CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
+// CHECK-DAG: %[[C2:.*]] = constant <i32: 2> : tile<i32>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
 // CHECK: %[[ROW:.*]] = remi %[[BLOCK]], %[[C2]] unsigned : tile<i32>
 // CHECK: %[[COL:.*]] = divi %[[BLOCK]], %[[C2]] unsigned : tile<i32>

@@ -22,26 +22,26 @@ BytecodeVersion = nv_tensor_ir.BytecodeVersion
 CudaTileArtifactKind = nv_tensor_ir.CudaTileArtifactKind
 
 
-class ProgramCache:
-    """Explicit cache for compiled TensorIR programs.
+class ArtifactCache:
+    """Explicit cache for compiled TensorIR artifacts.
 
     Pass an instance to :func:`compile` or :func:`compile_traced` to reuse
-    programs compiled by the selected backend.
+    artifacts compiled by the selected backend.
     """
 
     def __init__(self) -> None:
-        self._programs: dict[str, nv_tensor_ir.Program] = {}
+        self._artifacts: dict[str, nv_tensor_ir.Artifact] = {}
 
     def flush(self) -> None:
-        """Remove all cached programs without invalidating returned programs."""
-        self._programs.clear()
+        """Remove all cached artifacts without invalidating returned artifacts."""
+        self._artifacts.clear()
 
-    def _get(self, key: str) -> nv_tensor_ir.Program | None:
-        program = self._programs.get(key)
+    def _get(self, key: str) -> nv_tensor_ir.Artifact | None:
+        program = self._artifacts.get(key)
         return copy.copy(program) if program is not None else None
 
-    def _put(self, key: str, program: nv_tensor_ir.Program) -> None:
-        self._programs[key] = copy.copy(program)
+    def _put(self, key: str, program: nv_tensor_ir.Artifact) -> None:
+        self._artifacts[key] = copy.copy(program)
 
 
 class CompiledKernel:
@@ -207,13 +207,13 @@ def compile_traced(
     name: str = "kernel_traced",
     dynamic_shape: bool = False,
     backend: str = "cuda_tile",
-    program_cache: ProgramCache | None = None,
+    artifact_cache: ArtifactCache | None = None,
 ) -> CompiledKernel:
     """Compile a concrete TensorIR trace with the selected backend."""
     if not isinstance(graph, TraceGraph):
         raise TypeError("tir.compile_traced expects a graph returned by tir.trace")
-    if program_cache is not None and not isinstance(program_cache, ProgramCache):
-        raise TypeError("program_cache must be a ProgramCache or None")
+    if artifact_cache is not None and not isinstance(artifact_cache, ArtifactCache):
+        raise TypeError("artifact_cache must be a ArtifactCache or None")
     backend_impl = _get_backend_impl(backend)
     tensor_info_overrides = backend_impl.prepare_tensor_infos(
         graph,
@@ -231,7 +231,7 @@ def compile_traced(
         options=options,
         tile_sizes=tile_sizes,
         dynamic_shape=dynamic_shape,
-        program_cache=program_cache,
+        artifact_cache=artifact_cache,
     )
 
 
@@ -244,13 +244,13 @@ def compile(
     name: str | None = None,
     dynamic_shape: bool = False,
     backend: str = "cuda_tile",
-    program_cache: ProgramCache | None = None,
+    artifact_cache: ArtifactCache | None = None,
 ) -> CompiledKernel:
     """Compile a TensorIR DSL kernel with the selected registered backend."""
     if not isinstance(kernel_func, KernelFunction):
         raise TypeError("tir.compile expects a function decorated with @tir.kernel")
-    if program_cache is not None and not isinstance(program_cache, ProgramCache):
-        raise TypeError("program_cache must be a ProgramCache or None")
+    if artifact_cache is not None and not isinstance(artifact_cache, ArtifactCache):
+        raise TypeError("artifact_cache must be a ArtifactCache or None")
     raw_func = _unwrap(kernel_func.func)
     graph = trace(kernel_func, *inputs, output=output)
     graph_name = name or _mangle_name(raw_func.__name__)
@@ -261,7 +261,7 @@ def compile(
         name=graph_name,
         dynamic_shape=dynamic_shape,
         backend=backend,
-        program_cache=program_cache,
+        artifact_cache=artifact_cache,
     )
 
 

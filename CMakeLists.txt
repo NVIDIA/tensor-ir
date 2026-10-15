@@ -12,7 +12,7 @@ if(LLVM_TARGET_IS_CROSSCOMPILE_HOST)
   return()
 endif()
 
-project(TensorIRCompiler VERSION 0.1.5 LANGUAGES C CXX)
+project(TensorIRCompiler VERSION 0.1.6 LANGUAGES C CXX)
 
 # ==============================================================================
 # Project Options
@@ -20,6 +20,8 @@ project(TensorIRCompiler VERSION 0.1.5 LANGUAGES C CXX)
 
 option(TENSOR_IR_ENABLE_BINDINGS_PYTHON "Build the TensorIR Python bindings" ON)
 option(TENSOR_IR_INCLUDE_TESTS "Generate build targets for TensorIR tests" ON)
+option(TENSOR_IR_INSTALL_TESTS
+       "Install tools required only for testing" "${TENSOR_IR_INCLUDE_TESTS}")
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set(_TENSOR_IR_DOWNLOAD_LLVM_DEFAULT ON)
@@ -214,7 +216,15 @@ include(GNUInstallDirs)
 
 install(TARGETS tensor_ir-compiler tensor_ir-opt
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-if(TENSOR_IR_INCLUDE_TESTS)
+
+if(TENSOR_IR_INCLUDE_TESTS AND TENSOR_IR_INSTALL_TESTS)
+  # Add required cuda-tile project tools used in tensor-ir tests.
+  if(TARGET cuda-tile-translate)
+    install(TARGETS cuda-tile-translate
+          RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  endif()
+
+  # Add TD files required for testing tensor_ir-tblgen.
   set(TENSOR_IR_MLIR_TABLEGEN_INCLUDE_DIR "")
   foreach(_tensor_ir_mlir_include_dir IN LISTS MLIR_INCLUDE_DIRS)
     if(EXISTS "${_tensor_ir_mlir_include_dir}/mlir/IR/Constraints.td" AND

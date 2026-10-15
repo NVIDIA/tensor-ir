@@ -67,12 +67,12 @@ nv_tensor_ir.graph @test_div_op(%arg0: tensor<128xui32>,
 
 // -----
 
+// Unsigned `mod` is the plain remainder.
 // CHECK-LABEL: @test_mod_op
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xi32>]]
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
-// CHECK: %[[DIV:.*]] = divi %[[ARG0]], %[[ARG1]] unsigned : [[TILE]]
-// CHECK: %[[MUL:.*]] = muli %[[DIV]], %[[ARG1]] : [[TILE]]
-// CHECK: %[[RESULT:.*]] = subi %[[ARG0]], %[[MUL]] : [[TILE]]
+// CHECK: %[[RESULT:.*]] = remi %[[ARG0]], %[[ARG1]] unsigned : [[TILE]]
+// CHECK-NOT: select
 // CHECK: store_view_tko weak %[[RESULT]]
 nv_tensor_ir.graph @test_mod_op(%arg0: tensor<128xui32>,
                                 %arg1: tensor<128xui32>) -> tensor<128xui32> {
@@ -82,8 +82,7 @@ nv_tensor_ir.graph @test_mod_op(%arg0: tensor<128xui32>,
 
 // -----
 
-// `rem` is the truncated counterpart of `mod` and lowers to a single
-// `cuda_tile.remi` carrying the signedness of the element type.
+// `rem` lowers to a single `cuda_tile.remi` carrying the signedness.
 // CHECK-LABEL: @test_rem_op
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xi32>]]
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]

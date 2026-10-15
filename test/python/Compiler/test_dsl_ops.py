@@ -580,6 +580,118 @@ def test_extended_operator_overloads(profiling: bool) -> None:
     )
 
 
+@tir.kernel
+def mod_kernel(a, b):
+    return tir.mod(a, b)
+
+
+_NAN, _INF = float("nan"), float("inf")
+
+
+def _large_quotients_f32() -> tuple[torch.Tensor, torch.Tensor]:
+    generator = torch.Generator().manual_seed(0)
+    a = (torch.randint(-50000, 50000, (8, 8), generator=generator) * 100).to(
+        torch.float32
+    )
+    b = torch.where(
+        torch.rand((8, 8), generator=generator) < 0.5,
+        torch.tensor(1.25),
+        torch.tensor(-2.25),
+    )
+    return a, b
+
+
+def _operand_pairs(
+    dtype: torch.dtype, pairs: list[tuple[float, float]]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    a = torch.tensor([[lhs] * 8 for lhs, _ in pairs], dtype=dtype)
+    b = torch.tensor([[rhs] * 8 for _, rhs in pairs], dtype=dtype)
+    return a, b
+
+
+_SPECIAL_VALUES = [
+    (5.0, _INF),
+    (-3.0, _INF),
+    (3.0, -_INF),
+    (_NAN, 2.0),
+    (1.0, 0.0),
+    (_INF, 2.0),
+    (-0.0, 2.0),
+    (4.0, -2.0),
+    (-4.0, 2.0),
+    (0.0, -3.0),
+]
+# 120000 overflows f16, 2^-26 underflows it.
+_F16_QUOTIENT_RANGE = [
+    (60000.0, 0.5),
+    (-60000.0, 0.5),
+    (60000.0, -0.5),
+    (-(2.0**-14), 4096.0),
+    (2.0**-14, -4096.0),
+]
+
+
+_MIXED_SIGN_INT32 = [(-7, 3), (7, -3), (-7, -3), (7, 3), (6, -3), (-6, 3)]
+
+
+@pytest.mark.parametrize(
+    "dtype, operands",
+    [
+        pytest.param(torch.float32, _large_quotients_f32, id="large_quotients_f32"),
+        pytest.param(
+            torch.int32,
+            lambda: _operand_pairs(torch.int32, _MIXED_SIGN_INT32),
+            id="mixed_sign_int32",
+        ),
+        pytest.param(
+            torch.float32,
+            lambda: _operand_pairs(torch.float32, _SPECIAL_VALUES + [(-1e-10, 1.0)]),
+            id="special_values_f32",
+        ),
+        pytest.param(
+            torch.float16,
+            lambda: _operand_pairs(torch.float16, _SPECIAL_VALUES),
+            id="special_values_f16",
+        ),
+        pytest.param(
+            torch.bfloat16,
+            lambda: _operand_pairs(torch.bfloat16, _SPECIAL_VALUES),
+            id="special_values_bf16",
+        ),
+        pytest.param(
+            torch.float16,
+            lambda: _operand_pairs(torch.float16, _F16_QUOTIENT_RANGE),
+            id="quotient_range_f16",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "kernel, reference", [(rem_kernel, torch.fmod), (mod_kernel, torch.remainder)]
+)
+def test_mod_rem_matches_torch(
+    kernel: KernelFunction, reference, dtype: torch.dtype, operands
+) -> None:
+    a, b = (t.cuda() for t in operands())
+    output = torch.empty_like(a)
+
+    compiled = tir.compile(
+        kernel,
+        a,
+        b,
+        output=output,
+        name=f"{kernel.__name__}_matches_torch",
+        options=_layout_propagation_auto_options(),
+    )
+    compiled.run(a, b, output=output)
+    torch.cuda.synchronize()
+
+    expected = reference(a.float().cpu(), b.float().cpu()).to(dtype)
+    actual = output.cpu()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
+    finite = ~torch.isnan(expected)
+    assert torch.equal(torch.signbit(actual)[finite], torch.signbit(expected)[finite])
+
+
 def test_atan2_rejects_integer_operands() -> None:
     @tir.kernel
     def integer_atan2_kernel(lhs, rhs):

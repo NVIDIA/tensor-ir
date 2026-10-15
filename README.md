@@ -64,6 +64,8 @@ cmake --build build --target tensor_ir-compiler tensor_ir-opt tensor_ir_python_b
 | `-DTENSOR_IR_CUDA_TILE_SOURCE_URL=<url>` | Override the pinned CUDA Tile source archive |
 | `-DTENSOR_IR_DOWNLOAD_LLVM=ON/OFF` | Download the pinned LLVM source (default: `ON` for top-level builds) |
 | `-DTENSOR_IR_LLVM_SOURCE_URL=<url>` | LLVM source archive URL; accepts a cached `file://` URL |
+| `-DTENSOR_IR_LLVM_USE_GIT=ON/OFF` | Fetch LLVM from Git instead of the source archive (default: `OFF`) |
+| `-DTENSOR_IR_LLVM_GIT_REPOSITORY=<url>` | LLVM Git repository used when `TENSOR_IR_LLVM_USE_GIT=ON` |
 | `-DMLIR_DIR=<path>` | MLIR package directory used when LLVM downloading is disabled |
 | `-DTENSOR_IR_ENABLE_BINDINGS_PYTHON=ON/OFF` | Build the TensorIR Python bindings (default: `ON`) |
 | `-DTENSOR_IR_INCLUDE_TESTS=ON/OFF` | Build test-only passes and configure the lit suite (default: `ON`) |
@@ -154,6 +156,10 @@ option list and defaults, run `build/bin/tensor_ir-compiler --help`.
   `max(compatibility, 13.3)`.
 - `--codegen-strategy=<strategy>` - TensorIR-to-CUDA-Tile lowering path:
   `layout-propagation` (default) or `affine-map`
+- `--host-target=<target>` - Host execution: `auto` (default) selects native
+  code for OSS CUDA Tile layout propagation and interpreter execution for other
+  pipelines. Use `interpreter` to opt out, or `native` to require native support.
+  Native compilation and loading failures are reported without interpreter retry.
 - `--kernel-target=<sm_XX[a|f]>` - Target GPU architecture (for example,
   `sm_100`, `sm_100a`, or `sm_100f`); defaults to the SM100 family target
   `sm_100f`
@@ -256,41 +262,51 @@ with ir.Context() as ctx, ir.Location.unknown(ctx):
     module = ir.Module.parse(mlir_text)
 
     assert nv_tensor_ir.can_compile(module, tile_sizes=[8])
-    with nv_tensor_ir.compile(module, tile_sizes=[8]) as program:
-        assert program.get_bytecode()
+    with nv_tensor_ir.compile(module, tile_sizes=[8]) as artifact:
+        assert artifact.get_bytecode()
 
         a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
         b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
         out = torch.empty_like(a)
 
-        program.launch(a, b, out)
+        with artifact.load() as kernel:
+            kernel.launch(a, b, out)
 ```
 
-By default, TensorIR targets `max(compatibility, 13.3)`. To request the
+By default, TensorIR targets `max(compatibility, 13.4)`. To request the
 compatibility bytecode target explicitly, pass a `CompileOptions` object:
 
 ```python
 options = nv_tensor_ir.CompileOptions()
 options.tile_sizes = [8]
 options.bytecode_version = nv_tensor_ir.BytecodeVersion.compatibility()
-program = nv_tensor_ir.compile(module, options=options)
+artifact = nv_tensor_ir.compile(module, options=options)
 ```
 
-A compiled `program` can be serialized and written to disk, so a separate
+Compilation and deserialization return an `Artifact`, the Python counterpart
+of C++ `TensorIRArtifact`. They do not load host or device code. Calling
+`artifact.load()` creates an independently owned `RuntimeKernel` and initializes
+its host and device state before returning. Loading may compile device bytecode
+or fail if the artifact targets an incompatible GPU. Use a context
+manager or `kernel.destroy()` to unload it. Destroying the artifact does not
+invalidate kernels already loaded from it.
+
+A compiled `artifact` can be serialized and written to disk, so a separate
 runtime process can load and launch it later without depending on the
 compiler at all:
 
 ```python
 # Host/compile-time process: compile once, persist the result.
-with open("add_op.tirprogram", "wb") as f:
-    f.write(program.serialize())
+with open("add_op.tirartifact", "wb") as f:
+    f.write(artifact.serialize())
 ```
 
 ```python
-# Runtime process: load the persisted program and launch it directly.
-with open("add_op.tirprogram", "rb") as f:
-    program = nv_tensor_ir.Program.deserialize(f.read())
-program.launch(a, b, out)
+# Runtime process: deserialize the artifact, then explicitly load its code.
+with open("add_op.tirartifact", "rb") as f:
+    artifact = nv_tensor_ir.Artifact.deserialize(f.read())
+with artifact.load() as kernel:
+    kernel.launch(a, b, out)
 ```
 
 ### Python DSL
@@ -336,12 +352,12 @@ compiled = tir.compile(
 compiled.run(a, b, bias, residual, output=output)
 ```
 
-To reuse compiled programs across equivalent DSL compilations, create a
-`ProgramCache` and pass it to `tir.compile`. The cache is explicit: omitting
-`program_cache` disables cache lookup and insertion.
+To reuse compiled artifacts across equivalent DSL compilations, create a
+`ArtifactCache` and pass it to `tir.compile`. The cache is explicit: omitting
+`artifact_cache` disables cache lookup and insertion.
 
 ```python
-program_cache = tir.ProgramCache()
+artifact_cache = tir.ArtifactCache()
 compiled = tir.compile(
     fused_gemm_epilogue,
     a,
@@ -350,14 +366,14 @@ compiled = tir.compile(
     residual,
     output=output,
     tile_sizes=(64, 64),
-    program_cache=program_cache,
+    artifact_cache=artifact_cache,
 )
 # Alternatively, use tir.calculate_cache_key(compiled.module, ...) to get the
 # cache key used for this compilation when managing the cache manually.
 
-# ... reuse program_cache in later tir.compile calls ...
+# ... reuse artifact_cache in later tir.compile calls ...
 
-program_cache.flush()
+artifact_cache.flush()
 ```
 
 The Python DSL provides a simple built-in profiling utility. Run the compiled

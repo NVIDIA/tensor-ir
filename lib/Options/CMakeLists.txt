@@ -9,7 +9,7 @@ add_tensor_ir_library(NVTensorIRCompilerOptions
   LINK_LIBS PUBLIC
     CudaTileBytecodeWriter
     NVTensorIR::Utils
-  LINK_COMPONENTS Support
+  LINK_COMPONENTS Support TargetParser
 )
 
 # Tool-support library: the cl bindings TU. Linked by tools, never by the

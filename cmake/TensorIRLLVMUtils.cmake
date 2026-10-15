@@ -12,14 +12,27 @@ include("${CMAKE_CURRENT_LIST_DIR}/TensorIRFetchContent.cmake")
 set(TENSOR_IR_LLVM_SOURCE_URL
     "https://github.com/llvm/llvm-project/archive/${TENSOR_IR_PINNED_LLVM_COMMIT}.tar.gz"
     CACHE STRING "LLVM source archive URL")
+option(TENSOR_IR_LLVM_USE_GIT
+       "Fetch LLVM from Git instead of a source archive" OFF)
+set(TENSOR_IR_LLVM_GIT_REPOSITORY
+    "https://github.com/llvm/llvm-project.git"
+    CACHE STRING "LLVM Git repository")
 
 function(_tensor_ir_populate_llvm_project source_url binary_dir_var)
+  if(TENSOR_IR_LLVM_USE_GIT)
+    set(_tensor_ir_llvm_fetch_content_args
+        GIT_REPOSITORY "${TENSOR_IR_LLVM_GIT_REPOSITORY}"
+        GIT_TAG "${TENSOR_IR_PINNED_LLVM_COMMIT}")
+  else()
+    set(_tensor_ir_llvm_fetch_content_args
+        URL "${source_url}"
+        URL_HASH "SHA256=${TENSOR_IR_PINNED_LLVM_ARCHIVE_SHA256}")
+  endif()
+
   tensor_ir_fetch_content(
     tensor_ir_llvm_project llvm_source_dir llvm_binary_dir
     SOURCE_SUBDIR llvm
-    FETCH_CONTENT_ARGS
-      URL "${source_url}"
-      URL_HASH "SHA256=${TENSOR_IR_PINNED_LLVM_ARCHIVE_SHA256}")
+    FETCH_CONTENT_ARGS ${_tensor_ir_llvm_fetch_content_args})
   set(${binary_dir_var} "${llvm_binary_dir}" PARENT_SCOPE)
 endfunction()
 
@@ -45,7 +58,7 @@ macro(_tensor_ir_configure_llvm_options)
   # dependency.
   set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
   set(LLVM_ENABLE_RUNTIMES "" CACHE STRING "" FORCE)
-  set(LLVM_TARGETS_TO_BUILD "Native" CACHE STRING "" FORCE)
+  set(LLVM_TARGETS_TO_BUILD "Native;X86;AArch64" CACHE STRING "" FORCE)
 
   # With CMP0077 NEW, option() doesn't clear normal variables.
   set(LLVM_APPEND_VC_REV OFF)
@@ -79,13 +92,22 @@ endmacro()
 function(tensor_ir_fetch_llvm_project llvm_root_var)
 
   tensor_ir_configure_llvm_cmake_compatibility_policies()
-  if(TENSOR_IR_LLVM_SOURCE_URL STREQUAL "")
-    message(FATAL_ERROR "TENSOR_IR_LLVM_SOURCE_URL must not be empty")
+  if(TENSOR_IR_LLVM_USE_GIT)
+    if(TENSOR_IR_LLVM_GIT_REPOSITORY STREQUAL "")
+      message(FATAL_ERROR "TENSOR_IR_LLVM_GIT_REPOSITORY must not be empty")
+    endif()
+    set(_tensor_ir_llvm_source
+        "Git repository ${TENSOR_IR_LLVM_GIT_REPOSITORY}")
+  else()
+    if(TENSOR_IR_LLVM_SOURCE_URL STREQUAL "")
+      message(FATAL_ERROR "TENSOR_IR_LLVM_SOURCE_URL must not be empty")
+    endif()
+    set(_tensor_ir_llvm_source "archive ${TENSOR_IR_LLVM_SOURCE_URL}")
   endif()
 
   _tensor_ir_configure_llvm_options()
   message(STATUS "Fetching pinned LLVM ${TENSOR_IR_PINNED_LLVM_COMMIT} from "
-                 "${TENSOR_IR_LLVM_SOURCE_URL}")
+                 "${_tensor_ir_llvm_source}")
   _tensor_ir_populate_llvm_project("${TENSOR_IR_LLVM_SOURCE_URL}"
                                    llvm_binary_dir)
   _tensor_ir_prepare_mlir_build_package("${llvm_binary_dir}" mlir_dir)

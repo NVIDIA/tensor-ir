@@ -1,5 +1,10 @@
-// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,layout-propagation-annotation,layout-propagation-normalization,tile-selection,graph-splitting),tir-bufferize,func.func(tir-form-grid,tir-tile-reductions{reduction-tile-size=128}),outline-tensor-ir-kernel,convert-tensor-to-cuda-tile{codegen-strategy=layout_propagation})' --split-input-file | FileCheck %s --check-prefix=LOWERED
-// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,layout-propagation-annotation,layout-propagation-normalization,tile-selection,graph-splitting),tir-bufferize,func.func(tir-form-grid,tir-tile-reductions{reduction-tile-size=128}))' --split-input-file | FileCheck %s
+// RUN: tensor_ir-opt %s --layout-propagation-pipeline --split-input-file | FileCheck %s --check-prefix=LOWERED
+// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(\
+// RUN:   materialize-default-strides, \
+// RUN:   tile-selection), \
+// RUN:   tir-bufferize, \
+// RUN:   func.func(tir-form-grid,tir-tile-reductions{reduction-tile-size=128}))' \
+// RUN:   --split-input-file | FileCheck %s
 
 // A contracting domain that fits in one tile stays loop-free, but grid
 // formation's temporary matmul metadata is still consumed.

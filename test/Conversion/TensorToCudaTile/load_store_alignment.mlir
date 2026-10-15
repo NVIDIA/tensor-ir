@@ -1,6 +1,6 @@
 // RUN: tensor_ir-opt -layout-propagation-pipeline -split-input-file %s | FileCheck %s
 
-// CHECK-LABEL: @alignment_explicit
+// CHECK-LABEL: entry @alignment_explicit
 // CHECK-SAME: %[[PTR_IN:.*]]: tile<ptr<f32>>, %[[PTR_OUT:.*]]: tile<ptr<f32>>
 // CHECK: %[[PTR_IN_ALIGNED:.*]] = assume div_by<128>, %[[PTR_IN]]
 // CHECK: make_tensor_view %[[PTR_IN_ALIGNED]]
@@ -16,7 +16,7 @@ nv_tensor_ir.graph @alignment_explicit(
 
 // -----
 
-// CHECK-LABEL: @alignment_implicit
+// CHECK-LABEL: entry @alignment_implicit
 // CHECK-SAME: %[[PTR_IN:.*]]: tile<ptr<f32>>, %[[PTR_OUT:.*]]: tile<ptr<f32>>
 // CHECK: make_tensor_view %[[PTR_IN]]
 // CHECK: make_tensor_view %[[PTR_OUT]]
@@ -30,7 +30,7 @@ nv_tensor_ir.graph @alignment_implicit(
 
 // -----
 
-// CHECK-LABEL: @alignment_smaller_than_element_size
+// CHECK-LABEL: entry @alignment_smaller_than_element_size
 // CHECK-SAME: %[[PTR_IN:.*]]: tile<ptr<f32>>, %[[PTR_OUT:.*]]: tile<ptr<f32>>
 // CHECK: make_tensor_view %[[PTR_IN]]
 // CHECK: make_tensor_view %[[PTR_OUT]]
@@ -44,7 +44,7 @@ nv_tensor_ir.graph @alignment_smaller_than_element_size(
 
 // -----
 
-// CHECK-LABEL: @alignment_updated_by_offset
+// CHECK-LABEL: entry @alignment_updated_by_offset
 // CHECK-SAME: %[[PTR_IN:.*]]: tile<ptr<f32>>, %[[PTR_OUT:.*]]: tile<ptr<f32>>
 // CHECK: %[[PTR_IN_OFFSET:.*]] = offset %[[PTR_IN]], %{{.*}}
 // CHECK: %[[PTR_IN_ALIGNED:.*]] = assume div_by<16>, %[[PTR_IN_OFFSET]]

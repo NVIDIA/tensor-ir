@@ -74,6 +74,9 @@ def TensorIR_LoadOp : TensorIR_Op<"load", [
     `alignment` is a positive power-of-two byte-alignment guarantee for the
     view origin `element_ptr(base, o)`. It does not change the address
     calculation or guarantee that every element address has that alignment.
+
+    `allow_tma` is a performance hint: when false, the backend must not use
+    TMA for this access. It does not change the semantics of the load.
   }];
   let arguments = (ins Arg<Ptr_PtrType, "", [MemRead]>:$base,
                        Variadic<Index>:$offsets,
@@ -85,7 +88,8 @@ def TensorIR_LoadOp : TensorIR_Op<"load", [
                        DenseI64ArrayAttr:$static_strides,
                        DenseI64ArrayAttr:$static_indices,
                        IntValidAlignment<I64Attr>:$alignment,
-                       OptionalAttr<TilePaddingAttr>:$padding);
+                       OptionalAttr<TilePaddingAttr>:$padding,
+                       DefaultValuedAttr<BoolAttr, "true">:$allow_tma);
   let results = (outs TensorIR_TensorType:$tile);
   let assemblyFormat = [{
     $base `` custom<DynamicIndexList>($indices, $static_indices) `view`
@@ -100,7 +104,7 @@ def TensorIR_LoadOp : TensorIR_Op<"load", [
       "Type":$tile, "Value":$base, "OpFoldResult":$offset,
       "ArrayRef<OpFoldResult>":$sizes, "ArrayRef<OpFoldResult>":$strides,
       "ArrayRef<OpFoldResult>":$indices, "IntegerAttr":$alignment,
-      "TilePaddingAttr":$padding)>];
+      "TilePaddingAttr":$padding, "bool":$allowTma)>];
   let extraClassDeclaration = [{
     /// Sizes and strides are available through the interface's getMixedSizes
     /// and getMixedStrides methods. The view has a single mixed offset.
@@ -179,6 +183,9 @@ def TensorIR_StoreOp : TensorIR_Op<"store", [
     `alignment` is a positive power-of-two byte-alignment guarantee for the
     view origin `element_ptr(base, o)`. It does not change the address
     calculation or guarantee that every element address has that alignment.
+
+    `allow_tma` is a performance hint: when false, the backend must not use
+    TMA for this access. It does not change the semantics of the store.
   }];
   let arguments = (ins TensorIR_TensorType:$tile,
                        Arg<Ptr_PtrType, "", [MemWrite]>:$base,
@@ -190,7 +197,8 @@ def TensorIR_StoreOp : TensorIR_Op<"store", [
                        DenseI64ArrayAttr:$static_sizes,
                        DenseI64ArrayAttr:$static_strides,
                        DenseI64ArrayAttr:$static_indices,
-                       IntValidAlignment<I64Attr>:$alignment);
+                       IntValidAlignment<I64Attr>:$alignment,
+                       DefaultValuedAttr<BoolAttr, "true">:$allow_tma);
   let assemblyFormat = [{
     $tile `,` $base `` custom<DynamicIndexList>($indices, $static_indices) `view`
     `offset` `` `:` custom<DynamicIndexList>($offsets, $static_offsets) `,`
@@ -203,7 +211,8 @@ def TensorIR_StoreOp : TensorIR_Op<"store", [
   let builders = [OpBuilder<(ins
       "Value":$tile, "Value":$base, "OpFoldResult":$offset,
       "ArrayRef<OpFoldResult>":$sizes, "ArrayRef<OpFoldResult>":$strides,
-      "ArrayRef<OpFoldResult>":$indices, "IntegerAttr":$alignment)>];
+      "ArrayRef<OpFoldResult>":$indices, "IntegerAttr":$alignment,
+      "bool":$allowTma)>];
   let extraClassDeclaration = [{
     /// Sizes and strides are available through the interface's getMixedSizes
     /// and getMixedStrides methods. The view has a single mixed offset.

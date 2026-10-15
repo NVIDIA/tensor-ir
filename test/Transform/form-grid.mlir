@@ -1,4 +1,4 @@
-// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,layout-propagation-annotation,layout-propagation-normalization,tile-selection,graph-splitting),tir-bufferize,func.func(tir-form-grid))' --split-input-file | FileCheck %s --implicit-check-not='layout =' --implicit-check-not='iteration_space' --implicit-check-not='tile_size' --implicit-check-not='result_views' --implicit-check-not='result_layouts' --implicit-check-not='nv_tensor_ir.iter_space' --implicit-check-not='bufferization.'
+// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,tile-selection),tir-bufferize,func.func(tir-form-grid))' --split-input-file | FileCheck %s --implicit-check-not='layout =' --implicit-check-not='iteration_space' --implicit-check-not='tile_size' --implicit-check-not='result_views' --implicit-check-not='result_layouts' --implicit-check-not='nv_tensor_ir.iter_space' --implicit-check-not='bufferization.'
 
 // CHECK-LABEL: func.func @pointwise_dispatch(
 //  CHECK-SAME: %[[LHS:[^:]+]]: memref<32x64xf32, strided<[64, 1]>, #ptr.generic_space>
@@ -50,11 +50,11 @@ nv_tensor_ir.graph @unit_outer_tile_count(
 //       CHECK: %[[IPTR:.*]] = ptr.to_ptr %[[INPUT]]
 //       CHECK: %{{.*}}, %{{.*}}, %[[OSIZES:.*]]:2, %[[OSTRIDES:.*]]:2 = memref.extract_strided_metadata %[[OUTPUT]]
 //       CHECK: %[[OPTR:.*]] = ptr.to_ptr %[[OUTPUT]]
-//       CHECK: arith.addi %[[OSIZES]]#0
+//       CHECK: arith.ceildivui %[[OSIZES]]#0
 //       CHECK: scf.forall (%[[LINEAR:.*]]) in (%{{.*}})
-//       CHECK: nv_tensor_ir.load %[[IPTR]][%{{.*}}, %{{.*}}] view offset: [0], sizes: [%[[ISIZES]]#0, 32], strides: [%[[ISTRIDES]]#0, 1], alignment: 4
+//       CHECK: nv_tensor_ir.load %[[IPTR]][%[[LINEAR]], 0] view offset: [0], sizes: [%[[ISIZES]]#0, 32], strides: [%[[ISTRIDES]]#0, 1], alignment: 4
 //       CHECK: nv_tensor_ir.cos
-//       CHECK: nv_tensor_ir.store {{.*}}, %[[OPTR]][%{{.*}}, %{{.*}}] view offset: [0], sizes: [%[[OSIZES]]#0, 32], strides: [%[[OSTRIDES]]#0, 1], alignment: 4
+//       CHECK: nv_tensor_ir.store {{.*}}, %[[OPTR]][%[[LINEAR]], 0] view offset: [0], sizes: [%[[OSIZES]]#0, 32], strides: [%[[OSTRIDES]]#0, 1], alignment: 4
 //       CHECK: } {mapping = [#gpu.block<x>]}
 nv_tensor_ir.graph @dynamic(
     %input: tensor<?x32xf32> {nv_tensor_ir.stride = "(?,1)"})
@@ -158,16 +158,13 @@ nv_tensor_ir.graph @reduction_tile_cache(%input: tensor<64x128xf32>)
 // -----
 
 // A matmul dimension whose static extent fits in one output tile must be read
-// at coordinate zero. The broadcast batch leaves multiple grid tiles, making
-// the otherwise-unit N coordinate a runtime expression before this fold.
+// at coordinate zero, even when the broadcast batch leaves multiple grid tiles.
 // CHECK-LABEL: func.func @matmul_full_tile_coordinate_dispatch(
-//       CHECK: scf.forall (%[[LINEAR:.*]]) in (2)
-//       CHECK: %[[BATCH:.*]] = arith.remui %[[LINEAR]]
-//       CHECK: %[[UNIT_N_COORD:.*]] = arith.divui %[[LINEAR]]
+//       CHECK: scf.forall (%[[BATCH:.*]]) in (2)
 //       CHECK: nv_tensor_ir.load
 //       CHECK: nv_tensor_ir.load {{.*}}[0, 0]
 //       CHECK: nv_tensor_ir.matmul
-//       CHECK: nv_tensor_ir.store {{.*}}[%[[BATCH]], 0, %[[UNIT_N_COORD]]]
+//       CHECK: nv_tensor_ir.store {{.*}}[%[[BATCH]], 0, 0]
 nv_tensor_ir.graph @matmul_full_tile_coordinate(
     %lhs: tensor<1x8x32xf32> {nv_tensor_ir.stride = "(0,32,1)"},
     %rhs: tensor<1x32x16xf32> {nv_tensor_ir.stride = "(0,16,1)"})
@@ -178,47 +175,4 @@ nv_tensor_ir.graph @matmul_full_tile_coordinate(
   %result = broadcast %product
       : tensor<1x8x16xf32> -> tensor<8x8x16xf32>
   results %result : tensor<8x8x16xf32>
-}
-
-// -----
-
-// The first output projects the dynamic root dimension with zero stride, so it
-// cannot provide the runtime grid extent. FormGrid must obtain that extent from
-// the later, non-broadcast output.
-// CHECK-LABEL: func.func @dynamic_extent_from_later_output(
-//  CHECK-SAME: %[[INPUT:[^:]+]]: memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>
-//  CHECK-SAME: %[[PROJECTED:[^:]+]]: memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>
-//  CHECK-SAME: %[[FULL:[^:]+]]: memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>
-//       CHECK: %{{.*}}, %{{.*}}, %[[FULL_SIZES:.*]]:2, %{{.*}}:2 = memref.extract_strided_metadata %[[FULL]]
-//       CHECK: arith.addi %[[FULL_SIZES]]#0
-//       CHECK: scf.forall
-func.func @dynamic_extent_from_later_output(
-    %input: memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>,
-    %projected: memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>,
-    %full: memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>)
-    attributes {
-      iteration_space = #nv_tensor_ir.tensor_source<0, 0, "(?,32):(32,1)", [0]>,
-      nv_tensor_ir.bufferized_program,
-      result_layouts = [
-        #nv_tensor_ir.tensor_source<0, 0, "(?,32):(32,1)", [0]>,
-        #nv_tensor_ir.tensor_source<0, 0, "(?,32):(32,1)", [0]>],
-      result_views = [
-        #nv_tensor_ir.tensor_source<1, 0, "(?,32):(0,1)">,
-        #nv_tensor_ir.tensor_source<2, 0, "(?,32):(32,1)", [0]>],
-      tile_size = array<i32: 4, 32>
-    } {
-  %tile = bufferization.to_tensor %input restrict
-      : memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>
-        to tensor<?x32xf32>
-  %result = nv_tensor_ir.cos %tile {
-      layout = #nv_tensor_ir.tensor_source<0, 0, "(?,32):(32,1)", [0]>,
-      nv_tensor_ir.iter_space_id = 0 : i32} : tensor<?x32xf32>
-  bufferization.materialize_in_destination %result in restrict writable
-      %projected : (tensor<?x32xf32>,
-                    memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>)
-                   -> ()
-  bufferization.materialize_in_destination %result in restrict writable %full
-      : (tensor<?x32xf32>,
-         memref<?x32xf32, strided<[32, 1]>, #ptr.generic_space>) -> ()
-  return
 }

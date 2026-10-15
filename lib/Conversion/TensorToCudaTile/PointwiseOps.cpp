@@ -147,11 +147,19 @@ static bool isLowPrecisionFloat(Type type) {
   return type.isF16() || type.isBF16();
 }
 
-/// Build exp lowering matching XLA's CUDA policy:
+/// Build exp lowering. ExpOp supplies its policy; composite activations without
+/// a mode retain XLA's CUDA policy:
 /// - f32/f64 use the full libdevice-backed exp path.
 /// - f16/bf16 are computed with f32 approximate exp and rounded back.
 Value buildExp(OpBuilder &rewriter, Location loc, Value tile,
-               Type resultElementType) {
+               Type resultElementType,
+               std::optional<ExpRoundingMode> roundingMode) {
+  ExpRoundingMode mode = roundingMode.value_or(
+      isLowPrecisionFloat(resultElementType) ? ExpRoundingMode::Approx
+                                             : ExpRoundingMode::Full);
+  auto cudaMode = mode == ExpRoundingMode::Approx
+                      ? cuda_tile::RoundingMode::APPROX
+                      : cuda_tile::RoundingMode::FULL;
   auto tileType = cast<ShapedType>(tile.getType());
   if (isLowPrecisionFloat(resultElementType)) {
     auto f32TileType =
@@ -159,13 +167,12 @@ Value buildExp(OpBuilder &rewriter, Location loc, Value tile,
     Value f32Tile =
         cuda_tile::FToFOp::create(rewriter, loc, f32TileType, tile,
                                   cuda_tile::RoundingMode::NEAREST_EVEN);
-    Value exp = cuda_tile::ExpOp::create(rewriter, loc, f32Tile,
-                                         cuda_tile::RoundingMode::APPROX);
+    Value exp = cuda_tile::ExpOp::create(rewriter, loc, f32Tile, cudaMode);
     return cuda_tile::FToFOp::create(rewriter, loc, tileType, exp,
                                      cuda_tile::RoundingMode::NEAREST_EVEN);
   }
 
-  return cuda_tile::ExpOp::create(rewriter, loc, tile);
+  return cuda_tile::ExpOp::create(rewriter, loc, tile, cudaMode);
 }
 
 //===----------------------------------------------------------------------===//
@@ -178,9 +185,11 @@ class PointwiseOpConversion
 public:
   PointwiseOpConversion(ConversionState &state,
                         const TypeConverter &typeConverter, MLIRContext *ctx,
-                        bool enableExperimentalCudaTileOps)
+                        bool enableExperimentalCudaTileOps,
+                        cuda_tile::BytecodeVersion targetBytecodeVersion)
       : OpInterfaceConversionPattern(typeConverter, ctx), state(state),
-        enableExperimentalCudaTileOps(enableExperimentalCudaTileOps) {}
+        enableExperimentalCudaTileOps(enableExperimentalCudaTileOps),
+        targetBytecodeVersion(targetBytecodeVersion) {}
 
   LogicalResult
   matchAndRewrite(PointwiseOpInterface pointwise,
@@ -216,12 +225,14 @@ public:
     auto resultType = cuda_tile::TileType::get(state.getTileShape(),
                                                convertedType.getElementType());
     return lowerPointwiseOp(pointwise, operands, resultType, rewriter,
-                            enableExperimentalCudaTileOps);
+                            enableExperimentalCudaTileOps,
+                            targetBytecodeVersion);
   }
 
 private:
   ConversionState &state;
   bool enableExperimentalCudaTileOps;
+  cuda_tile::BytecodeVersion targetBytecodeVersion;
 };
 
 /// Sigmoid computation builder (common).
@@ -429,15 +440,16 @@ LogicalResult validateConstantOpLowerable(ConstantOp op) {
 // Registration
 //===----------------------------------------------------------------------===//
 
-void registerPointwisePatterns(RewritePatternSet &patterns,
-                               ConversionState &state,
-                               const TypeConverter &typeConverter,
-                               bool enableExperimentalCudaTileOps) {
+void registerPointwisePatterns(
+    RewritePatternSet &patterns, ConversionState &state,
+    const TypeConverter &typeConverter, bool enableExperimentalCudaTileOps,
+    cuda_tile::BytecodeVersion targetBytecodeVersion) {
   MLIRContext *ctx = patterns.getContext();
   patterns.add<ConstantOpConversion, SplatOpConversion>(state, typeConverter,
                                                         ctx);
   patterns.add<PointwiseOpConversion>(state, typeConverter, ctx,
-                                      enableExperimentalCudaTileOps);
+                                      enableExperimentalCudaTileOps,
+                                      targetBytecodeVersion);
 }
 
 } // namespace tensor_to_cuda_tile

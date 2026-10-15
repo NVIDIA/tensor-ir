@@ -13,7 +13,7 @@ from .dsl import (
     CodegenStrategy,
     CompileOptions,
     CompiledKernel,
-    ProgramCache,
+    ArtifactCache,
     _register_backend_impl,
 )
 from .module_builder import TensorInfoOverrides
@@ -43,18 +43,22 @@ class CudaTileCompiledKernel(CompiledKernel):
     """TensorIR DSL kernel compiled for the CUDA Tile backend.
 
     ``graph`` is the trace captured during compilation. It is exposed for
-    lightweight inspection and statistics; execution uses ``program``.
+    lightweight inspection and statistics; execution loads ``artifact`` on first use.
     """
 
-    program: nv_tensor_ir.Program
+    artifact: nv_tensor_ir.Artifact
     module: object
     graph: TraceGraph
     input_count: int
     output_count: int
     _context: object | None = field(default=None, repr=False)
 
+    _runtime_kernel: nv_tensor_ir.RuntimeKernel | None = field(
+        default=None, init=False, repr=False
+    )
+
     def get_bytecode(self) -> bytes:
-        return self.program.get_bytecode()
+        return self.artifact.get_bytecode()
 
     def run(self, *inputs: object, output: object | tuple[object, ...]) -> None:
         if len(inputs) != self.input_count:
@@ -66,7 +70,9 @@ class CudaTileCompiledKernel(CompiledKernel):
             raise TypeError(
                 f"Expected {self.output_count} output tensors, got {len(outputs)}"
             )
-        self.program.launch(*inputs, *outputs)
+        if self._runtime_kernel is None or self._runtime_kernel.is_destroyed:
+            self._runtime_kernel = self.artifact.load()
+        self._runtime_kernel.launch(*inputs, *outputs)
 
 
 def prepare_tensor_infos(
@@ -161,7 +167,7 @@ def compile_cuda_tile(
     options: CompileOptions | None = None,
     tile_sizes: tuple[int, ...] = (),
     dynamic_shape: bool = False,
-    program_cache: ProgramCache | None = None,
+    artifact_cache: ArtifactCache | None = None,
 ) -> CudaTileCompiledKernel:
     """Compile a traced kernel with the CUDA Tile backend."""
     options = _resolve_compile_options(options, tile_sizes)
@@ -173,14 +179,14 @@ def compile_cuda_tile(
                 "layout propagation does not support dynamic matmul"
             )
 
-    if program_cache is None:
+    if artifact_cache is None:
         program = nv_tensor_ir.compile(module, options=options)
     else:
         cache_key = _calculate_cache_key(module, options=options)
-        program = program_cache._get(cache_key)
+        program = artifact_cache._get(cache_key)
         if program is None:
             program = nv_tensor_ir.compile(module, options=options)
-            program_cache._put(cache_key, program)
+            artifact_cache._put(cache_key, program)
 
     return CudaTileCompiledKernel(
         program,

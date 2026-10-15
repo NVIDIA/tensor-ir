@@ -68,6 +68,10 @@ def build_mlir_module(
                     # OUTPUT_REF nodes define graph result metadata only; they do
                     # not produce SSA values in the TensorIR graph body.
                     continue
+                if node.kind == NodeKind.RESULT:
+                    if node_id not in values:
+                        raise RuntimeError("missing multi-result value")
+                    continue
                 result_info = _tensor_info(graph, node_id, tensor_info_overrides)
                 result_type = _node_result_type(node, result_info, ir)
                 result = _build_node(
@@ -77,6 +81,7 @@ def build_mlir_module(
                     values,
                     ir,
                     nv_tensor_ir,
+                    tensor_info_overrides,
                 )
                 values[node_id] = result
 
@@ -87,6 +92,65 @@ def build_mlir_module(
         return module, context
 
 
+def _build_scan_slice(node, values: dict[int, object], ir, nv_tensor_ir, overrides):
+    """Build one isolated scan_slice region and bind all of its SSA results."""
+    result_infos = [
+        overrides.get(node_id, info)
+        for node_id, info in zip(
+            node.kwargs["result_node_ids"],
+            node.kwargs["result_tensor_infos"],
+            strict=True,
+        )
+    ]
+    result_types = [_tensor_type(info, ir) for info in result_infos]
+    operation = ir.Operation.create(
+        "nv_tensor_ir.scan_slice",
+        results=result_types,
+        operands=[values[arg] for arg in node.args],
+        attributes={
+            "scan_dimensions": ir.DenseI64ArrayAttr.get(node.kwargs["scan_dimensions"]),
+            "output_dimensions": ir.DenseI64ArrayAttr.get(
+                node.kwargs["output_dimensions"]
+            ),
+            "reverse": ir.BoolAttr.get(bool(node.kwargs["reverse"])),
+        },
+        regions=1,
+    )
+    region_graph = node.kwargs["region"]
+    argument_types = [
+        _tensor_type(region_graph.nodes[node_id].tensor_info, ir)
+        for node_id in region_graph.input_ids
+    ]
+    block = operation.regions[0].blocks.append(*argument_types)
+    region_values = dict(zip(region_graph.input_ids, block.arguments, strict=True))
+    with ir.InsertionPoint(block):
+        for region_node_id, region_node in enumerate(region_graph.nodes):
+            if region_node.kind == NodeKind.INPUT:
+                continue
+            if region_node.kind == NodeKind.RESULT:
+                raise NotImplementedError(
+                    "Multi-result operations (RESULT nodes) inside a scan_slice body "
+                    "are not supported"
+                )
+            region_info = region_node.tensor_info
+            region_type = _node_result_type(region_node, region_info, ir)
+            region_values[region_node_id] = _build_node(
+                region_node,
+                region_info,
+                region_type,
+                region_values,
+                ir,
+                nv_tensor_ir,
+            )
+        nv_tensor_ir.YieldOp(
+            [region_values[result_id] for result_id in region_graph.result_ids]
+        )
+    result_node_ids = node.kwargs["result_node_ids"]
+    for result_node_id, result in zip(result_node_ids, operation.results, strict=True):
+        values[result_node_id] = result
+    return operation.results[0]
+
+
 def _build_node(
     node,
     result_info: TensorInfo,
@@ -94,6 +158,7 @@ def _build_node(
     values: dict[int, object],
     ir,
     nv_tensor_ir,
+    tensor_info_overrides: TensorInfoOverrides | None = None,
 ):
     if node.kind == NodeKind.CONSTANT:
         value = _scalar_attr(node.kwargs["value"], result_info.dtype, ir)
@@ -122,6 +187,14 @@ def _build_node(
                 values[operand],
                 beta,
                 results=[result_type],
+            )
+        elif node.op == UnaryOp.EXP and "rounding_mode" in node.kwargs:
+            mode = {
+                "full": nv_tensor_ir.ExpRoundingMode.Full,
+                "approx": nv_tensor_ir.ExpRoundingMode.Approx,
+            }[node.kwargs["rounding_mode"]]
+            op = nv_tensor_ir.ExpOp(
+                values[operand], rounding_mode=mode, results=[result_type]
             )
         else:
             op = _unary_op(node.op, nv_tensor_ir)(
@@ -160,6 +233,10 @@ def _build_node(
             int(node.kwargs["dimension"]),
         )
         return op.operation.results[0]
+    if node.kind == NodeKind.SCAN_SLICE:
+        return _build_scan_slice(
+            node, values, ir, nv_tensor_ir, tensor_info_overrides or {}
+        )
     if node.kind == NodeKind.IOTA:
         op = nv_tensor_ir.IotaOp(result_type, int(node.kwargs["dimension"]), [])
         return op.operation.results[0]

@@ -1,5 +1,6 @@
 add_tensor_ir_library(NVTensorIRUtils
   ComputeCapability.cpp
+  LayoutPermutation.cpp
   Utils.cpp
   DEPENDS
 

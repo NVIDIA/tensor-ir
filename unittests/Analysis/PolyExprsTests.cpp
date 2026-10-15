@@ -3,8 +3,11 @@
 
 #include "tensor_ir/Analysis/PolyExprs.h"
 
+#include "llvm/ADT/STLExtras.h"
+
 #include "gtest/gtest.h"
 #include <limits>
+#include <type_traits>
 
 using namespace mlir::nv_tensor_ir;
 
@@ -27,8 +30,8 @@ using namespace mlir::nv_tensor_ir;
 /// - Context Isolation: cross-context rejection for operations, definitions, and queries.
 
 /// Helper to construct a `PolyExpr` from small 64-bit integer coefficients for convenient test setup.
-static const PolyExpr *getSmall(PolyExprContext &context,
-                                const SparsePolynomialStorage<int64_t> &input) {
+static PolyExpr getSmall(PolyExprContext &context,
+                         const SparsePolynomialStorage<int64_t> &input) {
   PolyExpr::Storage storage;
   for (int64_t coefficient : input.coefficients) {
     storage.coefficients.emplace_back(coefficient);
@@ -47,10 +50,10 @@ namespace {
 class PolyExprTest : public testing::Test {
 protected:
   PolyExprContext context;
-  const PolyExpr *zero = PolyExpr::getZero(context);
-  const PolyExpr *one = PolyExpr::getConstant(context, 1);
-  const PolyExpr *x = PolyExpr::getSymbol(context, 0);
-  const PolyExpr *y = PolyExpr::getSymbol(context, 1);
+  PolyExpr zero = PolyExpr::getZero(context);
+  PolyExpr one = PolyExpr::getConstant(context, 1);
+  PolyExpr x = PolyExpr::getSymbol(context, 0);
+  PolyExpr y = PolyExpr::getSymbol(context, 1);
 };
 
 /// Tests construction of zero, constants, symbols, and canonicalization of raw sparse storage.
@@ -62,18 +65,22 @@ protected:
 ///   eliminates zero exponents, cancels duplicate opposite terms, and drops zero coefficients.
 /// - Support for maximum VariableId (UINT32_MAX).
 TEST_F(PolyExprTest, ConstructorsAndCanonicalStorage) {
-  EXPECT_TRUE(zero->isZero());
-  EXPECT_TRUE(zero->isConstant());
-  EXPECT_FALSE(zero->isMonomial());
-  EXPECT_EQ(zero->getConstantValue(), 0);
-  EXPECT_EQ(zero->getStorage().offsets, std::vector<Offset>({0}));
+  EXPECT_TRUE(zero.isZero());
+  EXPECT_TRUE(zero.isConstant());
+  EXPECT_FALSE(zero.isMonomial());
+  EXPECT_EQ(zero.getConstantValue(), 0);
+  EXPECT_EQ(zero.begin(), zero.end());
+  EXPECT_EQ(zero.size(), 0u);
   EXPECT_EQ(zero, PolyExpr::getConstant(context, 0));
-  EXPECT_TRUE(one->isConstant());
-  EXPECT_TRUE(one->isMonomial());
-  EXPECT_FALSE(one->isSymbol());
-  EXPECT_TRUE(x->isSymbol());
-  EXPECT_FALSE(x->isConstant());
-  EXPECT_FALSE(x->getConstantValue());
+  EXPECT_EQ(one.size(), 1u);
+  EXPECT_TRUE(one[0].powers.empty());
+  EXPECT_EQ(one[0].coefficient, 1);
+  EXPECT_TRUE(one.isConstant());
+  EXPECT_TRUE(one.isMonomial());
+  EXPECT_FALSE(one.isSymbol());
+  EXPECT_TRUE(x.isSymbol());
+  EXPECT_FALSE(x.isConstant());
+  EXPECT_FALSE(x.getConstantValue());
   EXPECT_EQ(x, PolyExpr::getSymbol(context, 0));
 
   // Verify canonicalization of complex raw input:
@@ -82,22 +89,22 @@ TEST_F(PolyExprTest, ConstructorsAndCanonicalStorage) {
   // - Term 2: -2 * (x_0^3 * x_1^1)
   // - Term 3: 0 * (x_9^5) = 0 (zero coefficient term, discarded)
   // Term 0 and Term 2 cancel out (2 - 2 = 0), leaving only the constant 3.
-  auto *p = getSmall(
-      context, {{2, 3, -2, 0},
-                {0, 3, 4, 6, 7},
-                {{1, 1}, {0, 1}, {0, 2}, {7, 0}, {0, 3}, {1, 1}, {9, 5}}});
+  auto p = getSmall(context,
+                    {{2, 3, -2, 0},
+                     {0, 3, 4, 6, 7},
+                     {{1, 1}, {0, 1}, {0, 2}, {7, 0}, {0, 3}, {1, 1}, {9, 5}}});
   EXPECT_EQ(p, PolyExpr::getConstant(context, 3));
 
   // Verify power sorting and exponent accumulation within a single term:
   // 2 * (x_1^2 * x_0^1 * x_0^2) -> 2 * x_0^3 * x_1^2
-  auto *q = getSmall(context, {{2}, {0, 3}, {{1, 2}, {0, 1}, {0, 2}}});
+  auto q = getSmall(context, {{2}, {0, 3}, {{1, 2}, {0, 1}, {0, 2}}});
   ASSERT_NE(q, nullptr);
-  EXPECT_EQ(q->getStorage().powers, (std::vector<Power>{{0, 3}, {1, 2}}));
-  EXPECT_EQ(q->getStorage().offsets, (std::vector<Offset>{0, 2}));
+  EXPECT_EQ(llvm::to_vector(q.begin()->powers),
+            (llvm::SmallVector<Power>{{0, 3}, {1, 2}}));
+  EXPECT_EQ(std::distance(q.begin(), q.end()), 1);
   constexpr VariableId maxId = std::numeric_limits<VariableId>::max();
-  EXPECT_EQ(
-      PolyExpr::getSymbol(context, maxId)->getStorage().powers[0].variable,
-      maxId);
+  auto maxSymbol = PolyExpr::getSymbol(context, maxId);
+  EXPECT_EQ(maxSymbol.begin()->powers[0].variable, maxId);
 }
 
 /// Verifies defensive validation of CSR offset arrays in PolyExpr::get.
@@ -125,20 +132,60 @@ TEST_F(PolyExprTest, RejectsMalformedStorage) {
 /// - Binomial expansion: (x + y)^2 == x^2 + 2xy + y^2
 /// - Interning: structurally identical expressions share pointer equality.
 TEST_F(PolyExprTest, ArithmeticAndInterning) {
-  auto *sum = x->add(*y);
-  auto *difference = x->subtract(*y);
+  auto sum = x.add(y);
+  auto difference = x.subtract(y);
   ASSERT_NE(sum, nullptr);
   ASSERT_NE(difference, nullptr);
-  EXPECT_EQ(sum, y->add(*x));
-  EXPECT_EQ(x->subtract(*x), zero);
-  EXPECT_EQ(x->multiply(*zero), zero);
-  EXPECT_EQ(x->multiply(*one), x);
-  auto *xx = x->multiply(*x);
-  auto *yy = y->multiply(*y);
-  EXPECT_EQ(sum->multiply(*difference), xx->subtract(*yy));
-  EXPECT_EQ(sum->multiply(*sum),
-            xx->add(*x->multiply(*y))->add(*x->multiply(*y))->add(*yy));
-  EXPECT_EQ(sum->getStorage().powers, (std::vector<Power>{{0, 1}, {1, 1}}));
+  EXPECT_EQ(sum, y.add(x));
+  EXPECT_EQ(x.subtract(x), zero);
+  EXPECT_EQ(x.multiply(zero), zero);
+  EXPECT_EQ(x.multiply(one), x);
+  auto xx = x.multiply(x);
+  auto yy = y.multiply(y);
+  EXPECT_EQ(sum.multiply(difference), xx.subtract(yy));
+  EXPECT_EQ(sum.multiply(sum),
+            xx.add(x.multiply(y)).add(x.multiply(y)).add(yy));
+  auto term = sum.begin();
+  EXPECT_EQ(term->coefficient, 1);
+  EXPECT_EQ(llvm::to_vector((term++)->powers),
+            (llvm::SmallVector<Power>{{0, 1}}));
+  EXPECT_EQ(term->coefficient, 1);
+  EXPECT_EQ(llvm::to_vector((term++)->powers),
+            (llvm::SmallVector<Power>{{1, 1}}));
+  EXPECT_EQ(term, sum.end());
+}
+
+TEST_F(PolyExprTest, RandomAccessTermIterator) {
+  static_assert(std::is_same_v<
+                std::iterator_traits<PolyExpr::TermIterator>::iterator_category,
+                std::random_access_iterator_tag>);
+  const auto expr = x.add(y).add(one);
+  auto begin = expr.begin();
+  auto end = expr.end();
+  EXPECT_EQ(end - begin, 3);
+  EXPECT_EQ(begin - end, -3);
+  EXPECT_EQ(zero.end() - zero.begin(), 0);
+  EXPECT_EQ(begin + 3, end);
+  EXPECT_EQ(3 + begin, end);
+  EXPECT_EQ(end - 3, begin);
+  EXPECT_LT(begin, end);
+  EXPECT_GT(end, begin);
+  EXPECT_LE(begin, begin);
+  EXPECT_GE(end, end);
+  EXPECT_EQ(begin[1].powers.front().variable, 1u);
+  EXPECT_TRUE(end[-1].powers.empty());
+  EXPECT_EQ(end[-1].coefficient, 1);
+  auto term = end;
+  term += -2;
+  EXPECT_EQ(term, begin + 1);
+  term -= -1;
+  EXPECT_EQ(term, end - 1);
+  EXPECT_EQ(term--, end - 1);
+  EXPECT_EQ(--term, begin);
+  EXPECT_EQ(++term, begin + 1);
+  term += 2;
+  term -= 3;
+  EXPECT_EQ(term, begin);
 }
 
 /// Verifies multivariate polynomial long division over Z without symbol definitions.
@@ -154,25 +201,25 @@ TEST_F(PolyExprTest, ArithmeticAndInterning) {
 /// - Non-zero remainder: (x^2 - y^2 + 1) / (x + y) == nullptr
 /// - Monomial order with missing lower-ID variables in divisor terms.
 TEST_F(PolyExprTest, ExactPolynomialDivision) {
-  auto *sum = x->add(*y);
-  auto *difference = x->subtract(*y);
-  auto *p = sum->multiply(*difference);
+  auto sum = x.add(y);
+  auto difference = x.subtract(y);
+  auto p = sum.multiply(difference);
   ASSERT_NE(p, nullptr);
-  EXPECT_EQ(p->exactDiv(*sum), difference);
-  EXPECT_EQ(p->exactDiv(*p), one);
-  EXPECT_EQ(zero->exactDiv(*x), zero);
-  EXPECT_EQ(x->exactDiv(*zero), nullptr);
-  EXPECT_EQ(x->exactDiv(*y), nullptr);
-  EXPECT_EQ(x->exactDiv(*PolyExpr::getConstant(context, 2)), nullptr);
-  auto *negative = PolyExpr::getConstant(context, -3)->multiply(*sum);
-  EXPECT_EQ(negative->exactDiv(*sum), PolyExpr::getConstant(context, -3));
+  EXPECT_EQ(p.exactDiv(sum), difference);
+  EXPECT_EQ(p.exactDiv(p), one);
+  EXPECT_EQ(zero.exactDiv(x), zero);
+  EXPECT_EQ(x.exactDiv(zero), nullptr);
+  EXPECT_EQ(x.exactDiv(y), nullptr);
+  EXPECT_EQ(x.exactDiv(PolyExpr::getConstant(context, 2)), nullptr);
+  auto negative = PolyExpr::getConstant(context, -3).multiply(sum);
+  EXPECT_EQ(negative.exactDiv(sum), PolyExpr::getConstant(context, -3));
   // Nonzero remainder after successfully canceling the leading term.
-  EXPECT_EQ(p->add(*one)->exactDiv(*sum), nullptr);
+  EXPECT_EQ(p.add(one).exactDiv(sum), nullptr);
   // Missing lower-ID variables must compare as exponent zero.
-  auto *z = PolyExpr::getSymbol(context, 2);
-  auto *divisor = x->multiply(*z)->add(*y);
-  auto *quotient = x->add(*z)->subtract(*one);
-  EXPECT_EQ(divisor->multiply(*quotient)->exactDiv(*divisor), quotient);
+  auto z = PolyExpr::getSymbol(context, 2);
+  auto divisor = x.multiply(z).add(y);
+  auto quotient = x.add(z).subtract(one);
+  EXPECT_EQ(divisor.multiply(quotient).exactDiv(divisor), quotient);
 }
 
 /// Verifies exact arbitrary-precision integer arithmetic (`llvm::DynamicAPInt`).
@@ -187,12 +234,12 @@ TEST_F(PolyExprTest, ArbitraryPrecisionCoefficients) {
   llvm::DynamicAPInt large(std::numeric_limits<int64_t>::max());
   large *= large;
   large *= large;
-  auto *constant = PolyExpr::getConstant(context, large);
-  EXPECT_EQ(constant->getConstantValue(), large);
+  auto constant = PolyExpr::getConstant(context, large);
+  EXPECT_EQ(constant.getConstantValue(), large);
   EXPECT_EQ(constant, PolyExpr::getConstant(context, large));
-  EXPECT_EQ(constant->add(*one)->getConstantValue(), large + 1);
-  EXPECT_EQ(zero->subtract(*constant)->getConstantValue(), -large);
-  EXPECT_EQ(constant->multiply(*constant)->getConstantValue(), large * large);
+  EXPECT_EQ(constant.add(one).getConstantValue(), large + 1);
+  EXPECT_EQ(zero.subtract(constant).getConstantValue(), -large);
+  EXPECT_EQ(constant.multiply(constant).getConstantValue(), large * large);
 
   // Large coefficients must also participate in canonicalization and interning.
   EXPECT_EQ(PolyExpr::get(context, {{large, large, -large}, {0, 0, 0, 0}, {}}),
@@ -200,17 +247,18 @@ TEST_F(PolyExprTest, ArbitraryPrecisionCoefficients) {
   EXPECT_EQ(
       PolyExpr::get(context, {{large, -large}, {0, 1, 2}, {{0, 1}, {0, 1}}}),
       zero);
-  auto *dense = PolyExpr::get(context, {{large, large, large, large},
-                                        {0, 1, 2, 3, 3},
-                                        {{0, 3}, {0, 2}, {0, 1}}});
+  auto dense = PolyExpr::get(context, {{large, large, large, large},
+                                       {0, 1, 2, 3, 3},
+                                       {{0, 3}, {0, 2}, {0, 1}}});
   ASSERT_NE(dense, nullptr);
-  auto *square = dense->multiply(*dense);
+  auto square = dense.multiply(dense);
   ASSERT_NE(square, nullptr);
-  EXPECT_EQ(square->exactDiv(*dense), dense);
+  EXPECT_EQ(square.exactDiv(dense), dense);
   // Check the coefficient of x^3, where all four products contribute.
-  EXPECT_EQ(square->getStorage().coefficients[3], 4 * large * large);
-  ASSERT_TRUE(context.addDefinition(0, *constant));
-  EXPECT_EQ(context.normalize(*x->multiply(*x)),
+  ASSERT_EQ(square.size(), 7u);
+  EXPECT_EQ(square[3].coefficient, 4 * large * large);
+  ASSERT_TRUE(context.addDefinition(0, constant));
+  EXPECT_EQ(context.normalize(x.multiply(x)),
             PolyExpr::getConstant(context, large * large));
 }
 
@@ -222,10 +270,10 @@ TEST_F(PolyExprTest, ArbitraryPrecisionCoefficients) {
 /// - PolyExpr::get detects exponent overflow when accumulating repeated powers.
 TEST_F(PolyExprTest, CheckedExponents) {
   constexpr Exponent maxExponent = std::numeric_limits<Exponent>::max();
-  auto *power = getSmall(context, {{1}, {0, 1}, {{0, maxExponent}}});
+  auto power = getSmall(context, {{1}, {0, 1}, {{0, maxExponent}}});
   ASSERT_NE(power, nullptr);
-  EXPECT_EQ(power->multiply(*x), nullptr);
-  EXPECT_EQ(power->exactDiv(*x)->multiply(*x), power);
+  EXPECT_EQ(power.multiply(x), nullptr);
+  EXPECT_EQ(power.exactDiv(x).multiply(x), power);
   EXPECT_EQ(getSmall(context, {{1}, {0, 2}, {{0, maxExponent}, {0, 1}}}),
             nullptr);
 }
@@ -239,17 +287,17 @@ TEST_F(PolyExprTest, CheckedExponents) {
 /// - Cache invalidation: adding the definition for x invalidates cached normalizations for z.
 /// - Undefined symbols return nullptr from getDefinition.
 TEST_F(PolyExprTest, DefinitionsNormalizeAndInvalidateCache) {
-  auto *z = PolyExpr::getSymbol(context, 2);
-  auto *sum = x->add(*one);
-  EXPECT_EQ(context.normalize(*y), y);
-  EXPECT_EQ(context.areEqual(*y, *sum), false);
-  ASSERT_TRUE(context.addDefinition(1, *sum));
-  EXPECT_EQ(context.normalize(*y), sum);
-  EXPECT_EQ(context.areEqual(*y, *sum), true);
-  ASSERT_TRUE(context.addDefinition(2, *y->multiply(*y)));
-  EXPECT_EQ(context.normalize(*z), sum->multiply(*sum));
-  ASSERT_TRUE(context.addDefinition(0, *PolyExpr::getConstant(context, 2)));
-  EXPECT_EQ(context.normalize(*z), PolyExpr::getConstant(context, 9));
+  auto z = PolyExpr::getSymbol(context, 2);
+  auto sum = x.add(one);
+  EXPECT_EQ(context.normalize(y), y);
+  EXPECT_EQ(context.areEqual(y, sum), false);
+  ASSERT_TRUE(context.addDefinition(1, sum));
+  EXPECT_EQ(context.normalize(y), sum);
+  EXPECT_EQ(context.areEqual(y, sum), true);
+  ASSERT_TRUE(context.addDefinition(2, y.multiply(y)));
+  EXPECT_EQ(context.normalize(z), sum.multiply(sum));
+  ASSERT_TRUE(context.addDefinition(0, PolyExpr::getConstant(context, 2)));
+  EXPECT_EQ(context.normalize(z), PolyExpr::getConstant(context, 9));
   EXPECT_EQ(context.getDefinition(999), nullptr);
 }
 
@@ -261,19 +309,19 @@ TEST_F(PolyExprTest, DefinitionsNormalizeAndInvalidateCache) {
 /// - Atomicity: failed additions leave all previous definitions and normalizations intact.
 /// - Immutability: attempting to redefine an already-bound symbol is rejected.
 TEST_F(PolyExprTest, RejectsCyclesAndRedefinitionsAtomically) {
-  auto *z = PolyExpr::getSymbol(context, 2);
-  EXPECT_FALSE(context.addDefinition(0, *x->add(*one)));
+  auto z = PolyExpr::getSymbol(context, 2);
+  EXPECT_FALSE(context.addDefinition(0, x.add(one)));
   EXPECT_EQ(context.getDefinition(0), nullptr);
-  ASSERT_TRUE(context.addDefinition(0, *y));
-  ASSERT_TRUE(context.addDefinition(1, *z));
-  EXPECT_EQ(context.normalize(*x), z);
-  EXPECT_FALSE(context.addDefinition(2, *x));
-  EXPECT_FALSE(context.addDefinition(0, *one));
+  ASSERT_TRUE(context.addDefinition(0, y));
+  ASSERT_TRUE(context.addDefinition(1, z));
+  EXPECT_EQ(context.normalize(x), z);
+  EXPECT_FALSE(context.addDefinition(2, x));
+  EXPECT_FALSE(context.addDefinition(0, one));
   EXPECT_EQ(context.getDefinition(0), y);
   EXPECT_EQ(context.getDefinition(2), nullptr);
-  EXPECT_EQ(context.normalize(*x), z);
-  ASSERT_TRUE(context.addDefinition(2, *one));
-  EXPECT_EQ(context.normalize(*x), one);
+  EXPECT_EQ(context.normalize(x), z);
+  ASSERT_TRUE(context.addDefinition(2, one));
+  EXPECT_EQ(context.normalize(x), one);
 }
 
 /// Verifies that symbol definitions and lookups work across the entire VariableId range.
@@ -283,9 +331,9 @@ TEST_F(PolyExprTest, RejectsCyclesAndRedefinitionsAtomically) {
 TEST_F(PolyExprTest, DefinitionsSupportFullVariableIdRange) {
   constexpr VariableId maxId = std::numeric_limits<VariableId>::max();
   for (VariableId id : {maxId, maxId - 1}) {
-    ASSERT_TRUE(context.addDefinition(id, *one));
+    ASSERT_TRUE(context.addDefinition(id, one));
     EXPECT_EQ(context.getDefinition(id), one);
-    EXPECT_EQ(context.normalize(*PolyExpr::getSymbol(context, id)), one);
+    EXPECT_EQ(context.normalize(PolyExpr::getSymbol(context, id)), one);
   }
 }
 
@@ -297,18 +345,18 @@ TEST_F(PolyExprTest, DefinitionsSupportFullVariableIdRange) {
 /// - Power normalization: evaluates (x + 1)^5 using binary exponentiation when x = 1,
 ///   yielding 2^5 = 32.
 TEST_F(PolyExprTest, SharedDefinitionDagAndPowers) {
-  auto *a = PolyExpr::getSymbol(context, 2);
-  auto *b = PolyExpr::getSymbol(context, 3);
-  auto *c = PolyExpr::getSymbol(context, 4);
-  ASSERT_TRUE(context.addDefinition(2, *x->add(*one)));
-  ASSERT_TRUE(context.addDefinition(3, *a->add(*y)));
-  ASSERT_TRUE(context.addDefinition(4, *a->subtract(*y)));
-  auto *sum = x->add(*one);
-  auto *expected = sum->multiply(*sum)->subtract(*y->multiply(*y));
-  EXPECT_EQ(context.areEqual(*b->multiply(*c), *expected), true);
-  auto *power = getSmall(context, {{1}, {0, 1}, {{2, 5}}});
-  ASSERT_TRUE(context.addDefinition(0, *one));
-  EXPECT_EQ(context.normalize(*power), PolyExpr::getConstant(context, 32));
+  auto a = PolyExpr::getSymbol(context, 2);
+  auto b = PolyExpr::getSymbol(context, 3);
+  auto c = PolyExpr::getSymbol(context, 4);
+  ASSERT_TRUE(context.addDefinition(2, x.add(one)));
+  ASSERT_TRUE(context.addDefinition(3, a.add(y)));
+  ASSERT_TRUE(context.addDefinition(4, a.subtract(y)));
+  auto sum = x.add(one);
+  auto expected = sum.multiply(sum).subtract(y.multiply(y));
+  EXPECT_EQ(context.areEqual(b.multiply(c), expected), true);
+  auto power = getSmall(context, {{1}, {0, 1}, {{2, 5}}});
+  ASSERT_TRUE(context.addDefinition(0, one));
+  EXPECT_EQ(context.normalize(power), PolyExpr::getConstant(context, 32));
 }
 
 /// Verifies memoization of normalization failures and cache recovery upon new definitions.
@@ -320,15 +368,15 @@ TEST_F(PolyExprTest, SharedDefinitionDagAndPowers) {
 /// - Adding a new definition invalidates the failure cache, allowing successful normalization.
 TEST_F(PolyExprTest, NormalizationFailureIsCachedAndInvalidated) {
   constexpr Exponent maxExponent = std::numeric_limits<Exponent>::max();
-  auto *power = getSmall(context, {{1}, {0, 1}, {{2, maxExponent}}});
-  ASSERT_TRUE(context.addDefinition(0, *power));
-  auto *expression = x->multiply(*x);
-  EXPECT_EQ(context.normalize(*expression), nullptr);
-  EXPECT_EQ(context.areEqual(*expression, *one), std::nullopt);
-  EXPECT_EQ(context.areEqual(*expression, *expression), true);
-  ASSERT_TRUE(context.addDefinition(2, *one));
-  EXPECT_EQ(context.normalize(*expression), one);
-  EXPECT_EQ(context.areEqual(*expression, *one), true);
+  auto power = getSmall(context, {{1}, {0, 1}, {{2, maxExponent}}});
+  ASSERT_TRUE(context.addDefinition(0, power));
+  auto expression = x.multiply(x);
+  EXPECT_EQ(context.normalize(expression), nullptr);
+  EXPECT_EQ(context.areEqual(expression, one), std::nullopt);
+  EXPECT_EQ(context.areEqual(expression, expression), true);
+  ASSERT_TRUE(context.addDefinition(2, one));
+  EXPECT_EQ(context.normalize(expression), one);
+  EXPECT_EQ(context.areEqual(expression, one), true);
 }
 
 /// Verifies strict isolation between distinct PolyExprContext instances.
@@ -337,13 +385,195 @@ TEST_F(PolyExprTest, NormalizationFailureIsCachedAndInvalidated) {
 /// addDefinition, normalize, or areEqual are safely rejected.
 TEST_F(PolyExprTest, RejectsForeignContexts) {
   PolyExprContext other;
-  auto *foreign = PolyExpr::getSymbol(other, 0);
-  EXPECT_EQ(x->add(*foreign), nullptr);
-  EXPECT_EQ(x->subtract(*foreign), nullptr);
-  EXPECT_EQ(x->multiply(*foreign), nullptr);
-  EXPECT_EQ(x->exactDiv(*foreign), nullptr);
-  EXPECT_FALSE(context.addDefinition(1, *foreign));
-  EXPECT_EQ(context.normalize(*foreign), nullptr);
-  EXPECT_EQ(context.areEqual(*x, *foreign), std::nullopt);
+  auto foreign = PolyExpr::getSymbol(other, 0);
+  EXPECT_EQ(x.add(foreign), nullptr);
+  EXPECT_EQ(x.subtract(foreign), nullptr);
+  EXPECT_EQ(x.multiply(foreign), nullptr);
+  EXPECT_EQ(x.exactDiv(foreign), nullptr);
+  EXPECT_FALSE(context.addDefinition(1, foreign));
+  EXPECT_EQ(context.normalize(foreign), nullptr);
+  EXPECT_EQ(context.areEqual(x, foreign), std::nullopt);
 }
+
+TEST_F(PolyExprTest, OperatorsSubstituteDefinitions) {
+  auto sum = x.add(one);
+  ASSERT_TRUE(context.addDefinition(1, sum));
+  EXPECT_EQ(y + one, sum.add(one));
+  EXPECT_EQ(y - x, one);
+  EXPECT_EQ(y * x, sum.multiply(x));
+  EXPECT_EQ(y / sum, one);
+  EXPECT_EQ(one / y, nullptr);
+  EXPECT_EQ(y.exactDiv(sum), nullptr);
+
+  ASSERT_TRUE(context.addDefinition(0, one));
+  auto two = PolyExpr::getConstant(context, 2);
+  EXPECT_EQ(y + one, PolyExpr::getConstant(context, 3));
+  EXPECT_EQ(y * x, two);
+  EXPECT_EQ(y / two, one);
+  EXPECT_EQ(y / zero, nullptr);
+
+  PolyExprContext other;
+  auto foreign = PolyExpr::getConstant(other, 1);
+  for (PolyExpr invalid : {PolyExpr(), foreign}) {
+    EXPECT_EQ(invalid + one, nullptr);
+    EXPECT_EQ(one + invalid, nullptr);
+    EXPECT_EQ(invalid - one, nullptr);
+    EXPECT_EQ(one - invalid, nullptr);
+    EXPECT_EQ(invalid * one, nullptr);
+    EXPECT_EQ(one * invalid, nullptr);
+    EXPECT_EQ(invalid / one, nullptr);
+    EXPECT_EQ(one / invalid, nullptr);
+  }
+}
+
+TEST_F(PolyExprTest, StructuralQueriesIgnoreDefinitions) {
+  auto sum = x.add(y);
+  auto alias = PolyExpr::getSymbol(context, 2);
+  ASSERT_TRUE(context.addDefinition(2, sum));
+  ASSERT_TRUE(context.addDefinition(0, one));
+  ASSERT_TRUE(context.addDefinition(1, zero));
+
+  for (PolyExpr symbol : {x, y, alias}) {
+    EXPECT_FALSE(symbol.isZero());
+    EXPECT_FALSE(symbol.isOne());
+    EXPECT_FALSE(symbol.isConstant());
+    EXPECT_TRUE(symbol.isMonomial());
+    EXPECT_TRUE(symbol.isSymbol());
+    EXPECT_EQ(symbol.getConstantValue(), std::nullopt);
+    EXPECT_EQ(symbol.getConstantInt64(), std::nullopt);
+  }
+  EXPECT_FALSE(sum.isMonomial());
+  EXPECT_FALSE(sum.isConstant());
+  EXPECT_FALSE(sum.isSymbol());
+  EXPECT_TRUE(sum.normalize().isMonomial());
+  EXPECT_TRUE(sum.normalize().isOne());
+
+  for (PolyExpr symbol : {x, y, alias}) {
+    PolyExpr normalized = symbol.normalize();
+    bool isZero = symbol == y;
+    EXPECT_EQ(normalized.isZero(), isZero);
+    EXPECT_EQ(normalized.isOne(), !isZero);
+    EXPECT_TRUE(normalized.isConstant());
+    EXPECT_EQ(normalized.isMonomial(), !isZero);
+    EXPECT_FALSE(normalized.isSymbol());
+    EXPECT_EQ(normalized.getConstantValue(), isZero ? 0 : 1);
+    EXPECT_EQ(normalized.getConstantInt64(), isZero ? 0 : 1);
+  }
+}
+
+TEST_F(PolyExprTest, ExplicitlyNormalizedQueriesAndPrinting) {
+  auto print = [](PolyExpr expr) {
+    std::string result;
+    llvm::raw_string_ostream os(result);
+    expr.print(os);
+    return result;
+  };
+  EXPECT_EQ(print(zero), "0");
+  EXPECT_EQ(print(one), "1");
+  auto polynomial = x.multiply(x).subtract(y).subtract(one);
+  EXPECT_EQ(print(polynomial), "s0^2 - s1 - 1");
+  EXPECT_EQ(print(zero.subtract(x)), "-s0");
+  EXPECT_FALSE(x.isOne());
+  EXPECT_EQ(x.getConstantInt64(), std::nullopt);
+  ASSERT_TRUE(context.addDefinition(0, one));
+  EXPECT_FALSE(x.isOne());
+  EXPECT_EQ(x.getConstantInt64(), std::nullopt);
+  EXPECT_TRUE(x.normalize().isOne());
+  EXPECT_EQ(x.normalize().getConstantInt64(), 1);
+  EXPECT_EQ(print(polynomial), "-s1");
+
+  for (int64_t bound : {std::numeric_limits<int64_t>::min(),
+                        std::numeric_limits<int64_t>::max()}) {
+    EXPECT_EQ(PolyExpr::getConstant(context, bound).getConstantInt64(), bound);
+  }
+  llvm::DynamicAPInt large(std::numeric_limits<int64_t>::max());
+  large += 1;
+  auto constant = PolyExpr::getConstant(context, large);
+  EXPECT_EQ(constant.getConstantInt64(), std::nullopt);
+  EXPECT_EQ(print(constant), "9223372036854775808");
+  EXPECT_EQ(PolyExpr::getConstant(context, -large - 1).getConstantInt64(),
+            std::nullopt);
+}
+
+TEST_F(PolyExprTest, NormalizedOperationsPropagateOverflowAndRecover) {
+  auto power = getSmall(
+      context, {{1}, {0, 1}, {{2, std::numeric_limits<Exponent>::max()}}});
+  ASSERT_TRUE(context.addDefinition(0, power));
+  auto expression = x.multiply(x);
+  EXPECT_EQ(expression + one, nullptr);
+  EXPECT_EQ(one - expression, nullptr);
+  EXPECT_EQ(expression * one, nullptr);
+  EXPECT_EQ(one / expression, nullptr);
+  EXPECT_FALSE(expression.normalize());
+  EXPECT_EQ(expression.normalize().getConstantInt64(), std::nullopt);
+  EXPECT_FALSE(expression.normalize().isOne());
+  std::string printed;
+  llvm::raw_string_ostream os(printed);
+  expression.print(os);
+  EXPECT_EQ(printed, "<invalid>");
+  ASSERT_TRUE(context.addDefinition(2, one));
+  EXPECT_EQ(expression * one, one);
+  EXPECT_FALSE(expression.isOne());
+  EXPECT_EQ(expression.getConstantInt64(), std::nullopt);
+  EXPECT_TRUE(expression.normalize().isOne());
+  EXPECT_EQ(expression.normalize().getConstantInt64(), 1);
+}
+
+TEST_F(PolyExprTest, ValueHandlesAndCompoundOperators) {
+  static_assert(sizeof(PolyExpr) == sizeof(const PolyExprImpl *));
+  static_assert(std::is_trivially_copyable_v<PolyExpr>);
+  PolyExpr invalid;
+  EXPECT_FALSE(invalid);
+  EXPECT_NE(invalid, zero);
+  EXPECT_EQ(invalid, PolyExpr());
+  EXPECT_TRUE(zero);
+  EXPECT_FALSE(invalid.isZero());
+  EXPECT_FALSE(invalid.isOne());
+  EXPECT_FALSE(invalid.isConstant());
+  EXPECT_FALSE(invalid.isMonomial());
+  EXPECT_FALSE(invalid.isSymbol());
+  EXPECT_EQ(invalid.getConstantValue(), std::nullopt);
+  EXPECT_EQ(invalid.getConstantInt64(), std::nullopt);
+  EXPECT_FALSE(invalid.normalize());
+  EXPECT_FALSE(context.addDefinition(9, invalid));
+  EXPECT_FALSE(context.normalize(invalid));
+  EXPECT_EQ(context.areEqual(invalid, invalid), std::nullopt);
+
+  PolyExpr copy = x;
+  EXPECT_EQ(copy, x);
+  copy += one;
+  EXPECT_EQ(copy, x + one);
+  EXPECT_EQ(x, PolyExpr::getSymbol(context, 0));
+  copy *= y;
+  EXPECT_EQ(copy, (x + one) * y);
+  copy /= y;
+  copy -= one;
+  EXPECT_EQ(copy, x);
+  EXPECT_EQ(-copy, zero.subtract(x));
+  EXPECT_EQ(-zero, zero);
+  EXPECT_FALSE(-invalid);
+  copy /= zero;
+  EXPECT_FALSE(copy);
+  copy += one;
+  copy -= one;
+  copy *= one;
+  copy /= one;
+  EXPECT_FALSE(copy);
+  EXPECT_FALSE(invalid.add(one));
+  EXPECT_FALSE(one.subtract(invalid));
+  EXPECT_FALSE(invalid.multiply(one));
+  EXPECT_FALSE(one.exactDiv(invalid));
+
+  std::string printed;
+  llvm::raw_string_ostream os(printed);
+  os << x << ":" << invalid;
+  EXPECT_EQ(printed, "s0:<invalid>");
+
+  ASSERT_TRUE(context.addDefinition(0, one));
+  EXPECT_NE(x, one);
+  EXPECT_EQ(context.areEqual(x, one), true);
+  EXPECT_EQ(x.normalize(), one);
+  EXPECT_EQ(-x, PolyExpr::getConstant(context, -1));
+}
+
 } // namespace

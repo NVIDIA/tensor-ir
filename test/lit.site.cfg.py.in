@@ -11,6 +11,7 @@ config.python_executable = "@Python3_EXECUTABLE@"
 config.enable_bindings_python = @TENSOR_IR_ENABLE_BINDINGS_PYTHON@
 
 config.tensor_ir_tools_dir = "@TENSOR_IR_TOOLS_DIR@"
+config.cuda_tile_tools_dir = "@CUDA_TILE_TOOLS_DIR@"
 config.tensor_ir_obj_root = "@TENSOR_IR_BINARY_DIR@"
 config.tensor_ir_install_root = "@TENSOR_IR_INSTALL_ROOT@"
 config.tensor_ir_python_package_prefix = "@TENSOR_IR_PYTHON_PACKAGE_PREFIX@"

@@ -3,13 +3,14 @@
 # Update the CUDA Tile and LLVM revisions together. The LLVM revision must match
 # the compatibility pin for the selected CUDA Tile revision.
 
+# CUDA Tile v13.4.0 and its cmake/IncludeLLVM.cmake compatibility pin.
 set(TENSOR_IR_PINNED_CUDA_TILE_COMMIT
-    "af2417041cc939b87ef56d92cfdcf61737c5457e")
+    "7e8e2e68fa219716103824c01f7303367cf7df8d")
 set(TENSOR_IR_PINNED_CUDA_TILE_ARCHIVE_SHA256
-    "81597e49469171bf8fa7319fbd44ebe133001521f484589e3dd3fb3fad282dc0")
-set(TENSOR_IR_PINNED_LLVM_COMMIT "57109befac92811d2253109242ca6fa69c961fb2")
+    "2398f88dd0dbcda3732934c8527485c3941d3a6453c98b6c249461e6309ea44c")
+set(TENSOR_IR_PINNED_LLVM_COMMIT "9ebb067a8a2b4b0705f06d59c77d36dfab98333f")
 set(TENSOR_IR_PINNED_LLVM_ARCHIVE_SHA256
-    "725cc90dc8221d9f8fd66da076c0a129441ec54f081eb7fbe029b6a8d9171e94"
+    "84f6624d9f6a32e180d7cb3b91d9e47b3f51da7f1f79ef216614dbff8b928145"
     CACHE STRING "LLVM source archive SHA256")
 
 # DLPack is independent of the CUDA Tile and LLVM compatibility pair.

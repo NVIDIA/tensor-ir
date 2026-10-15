@@ -34,3 +34,22 @@ nv_tensor_ir.graph @identity_layout(%input: tensor<8x4xf16>)
   %result = cos %input : tensor<8x4xf16>
   results %result : tensor<8x4xf16>
 }
+
+
+// -----
+
+// Tests that allow_tma = false is recorded on the boundary memref argument,
+// where FormGrid reads it, and that the default (true) is not materialized.
+
+// CHECK-LABEL: func.func @allow_tma_dispatch(
+// CHECK-SAME: %[[INPUT:[^:]+]]: memref<8x4xf16, #ptr.generic_space> {nv_tensor_ir.alignment = 2 : i64, nv_tensor_ir.allow_tma = false}
+// CHECK-SAME: %[[OUTPUT:[^:]+]]: memref<8x4xf16, #ptr.generic_space> {nv_tensor_ir.alignment = 2 : i64})
+// CHECK: %[[TENSOR:.*]] = bufferization.to_tensor %[[INPUT]] restrict
+// CHECK: %[[RESULT:.*]] = nv_tensor_ir.cos %[[TENSOR]]
+// CHECK: bufferization.materialize_in_destination %[[RESULT]] in restrict writable %[[OUTPUT]]
+nv_tensor_ir.graph @allow_tma(
+    %input: tensor<8x4xf16> {nv_tensor_ir.allow_tma = false})
+    -> tensor<8x4xf16> {
+  %result = cos %input : tensor<8x4xf16>
+  results %result : tensor<8x4xf16>
+}

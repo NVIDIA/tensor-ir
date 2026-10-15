@@ -62,11 +62,25 @@ def CompilerBackendOpt : EnumOption<"compilerBackend", "compiler-backend",
                                     CompilerBackendEnum, "Auto",
                                     "Compiler backend">;
 
+def AutoGdcInsertionOpt
+    : EnumOption<"autoGdcInsertion", "auto-gdc-insertion", AutoGdcInsertionEnum,
+                 "None",
+                 "Wait before global memory access so the kernel can be "
+                 "launched with Programmatic Dependent Launch (requires CUDA "
+                 "Tile bytecode 13.4 or newer)">;
+
 def CodegenOptions : ComponentOptions<"Codegen"> {
   let clCategory = "TensorIR Codegen Options";
   let invocationMember = "codegen";
   let options = [
       CompilerBackendOpt,
+      EnumOption<"hostTarget", "host-target", HostTargetEnum, "Auto",
+                 "Host execution target: auto uses native on supported pipelines, "
+                 "interpreter otherwise">,
+      EnumOption<"hostArch", "host-arch", HostArchEnum, "Native",
+                 "Host architecture">,
+      EnumOption<"hostOS", "host-os", HostOSEnum, "Linux",
+                 "Host operating system. Ignored if 'host-arch=native'.">,
       Option<"ctaCount", "cta-count", "int32_t", "1",
               "Number of cooperative thread arrays", 1, [PositiveTrait<>]>,
       TileShapeOption<"tileSize", "tile-size", "int32_t",
@@ -82,10 +96,11 @@ def CudaTileOptions : ComponentOptions<"CudaTile"> {
   let invocationMember = "cudaTile";
   let verifyFunction =
       "mlir::nv_tensor_ir::backend::cuda_tile::verifyCudaTileOptions";
-  let options = [StringOption<
+  let options = [
+       StringOption<
            "bytecodeVersion", "bytecode-version",
            "CUDA Tile bytecode target: default, current, compatibility, or a "
-           "dotted version", "\"default\"", 0>,
+           "dotted version", "\"default\"", /*emitTypedCAPI=*/0>,
        Option<"warpCount", "warp-count", "int32_t", "4",
               "Number of worker warps per CTA", 1, [PositiveTrait<>]>,
        Option<"reductionTileSize", "reduction-tile-size", "int64_t", "128",
@@ -102,6 +117,7 @@ def CudaTileOptions : ComponentOptions<"CudaTile"> {
        Option<"smCount", "sm-count", "int32_t", "0",
               "SM count of the target device, for persistent kernels", 1,
               [RangeTrait<0, 2147483647>]>,
+       AutoGdcInsertionOpt,
        CudaTileCodegenStrategyOpt, CudaTileArtifactKindOpt, PersistenceModeOpt];
 }
 

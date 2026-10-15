@@ -20,6 +20,30 @@
 
 namespace mlir::nv_tensor_ir {
 
+/// Physical per-step view of a contiguous scan_slice output. The sequential axis is
+/// removed from shape/strides and its stride is used for the loop offset.
+struct ScanSliceOutputSlice {
+  SmallVector<int64_t> shape;
+  SmallVector<int64_t> strides;
+  int64_t scanStride;
+};
+
+/// Compute the per-step view of a scan_slice output stored in contiguous row-major
+/// order. `outputType` describes the full stacked output and must have a static
+/// shape; `scanDimension` must be a valid axis of that type.
+///
+/// Returns the shape and physical strides with the scan axis removed, plus
+/// `scanStride`, the offset between consecutive scan indices. All strides are
+/// measured in elements. The remaining strides retain the full output layout;
+/// the slice itself need not be contiguous. Step i starts at i * scanStride.
+/// For example, shape [2, 5, 8] with scanDimension = 1 gives shape [2, 8],
+/// strides [40, 1], and scanStride = 8.
+ScanSliceOutputSlice getScanSliceOutputSlice(TensorType outputType,
+                                             int64_t scanDimension);
+
+/// Streaming results are stored by the scan_slice loop, rather than the graph.
+bool isStreamingScanSliceResult(Value value);
+
 //===----------------------------------------------------------------------===//
 // Error handling macros
 //===----------------------------------------------------------------------===//
@@ -97,30 +121,15 @@ bool isEmptyRegionGraphOp(nv_tensor_ir::GraphOp graphOp);
 /// Returns true if any input or output tensor in the graph has dynamic shape.
 bool hasDynamicInputOrOutputTensor(nv_tensor_ir::GraphOp graphOp);
 
-/// Get layout attribute for an operation or block argument.
-Attribute getLayoutSourceAttr(Value value);
-
-/// Return the ABI-ordered per-result layouts attached by multi-output layout
-/// normalization. An absent attribute returns an empty vector for the legacy
-/// single-result representation. Malformed attributes emit a diagnostic on
-/// `resultsOp` and return failure.
-FailureOr<SmallVector<LayoutSourceAttrInterface>>
-getResultLayouts(Operation *resultsOp);
-
-/// Return the ABI-ordered physical output views attached by multi-output
-/// layout normalization. Each view is a TensorSourceAttr in root-carrier
-/// coordinates. An absent attribute returns an empty vector for the legacy
-/// single-result representation. Malformed attributes emit a diagnostic on
-/// `resultsOp` and return failure.
-FailureOr<SmallVector<TensorSourceAttr>> getResultViews(Operation *resultsOp);
-
 /// Derive root-carrier dimensions that every CTA tile must cover completely.
 /// A dimension is fixed when at least one physical result view has zero stride
 /// in that dimension; partitioning it would give the same output element more
 /// than one writer CTA. The result has root rank and uses zero for unconstrained
-/// dimensions. An absent result_views attribute returns an empty vector.
+/// dimensions. Empty `views` return an empty vector. Diagnostics are emitted on
+/// `diagnosticOp`.
 FailureOr<SmallVector<int64_t>>
-deriveResultFixedTileSizes(Operation *resultsOp);
+deriveResultFixedTileSizes(ArrayRef<TensorSourceAttr> views,
+                           Operation *diagnosticOp);
 
 /// Get block argument index offsets for a dynamic layout.
 /// By convention, a tensor block argument is followed by the dynamic

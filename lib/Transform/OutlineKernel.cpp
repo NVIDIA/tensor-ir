@@ -272,9 +272,8 @@ struct OutlineKernelPass
       if (foralls.empty()) {
         continue;
       }
-      // Downstream conversion currently erases each dispatch wrapper and
-      // cannot preserve a sequence of host launches. Keep the one-kernel
-      // restriction until host functions can be JIT-compiled.
+      // Keep the one-kernel restriction until the runtime can execute a
+      // sequence of launches through the retained host wrapper.
       if (foralls.size() != 1) {
         func.emitError("expected exactly one mapped scf.forall to outline");
         signalPassFailure();

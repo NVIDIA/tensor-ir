@@ -8,24 +8,16 @@
 #include "tensor_ir/Options/Options.h"
 #include "tensor_ir/Transform/Passes.h"
 
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
+#include "cuda_tile/Dialect/CudaTile/Transforms/Passes.h"
+
 namespace mlir::nv_tensor_ir {
-
-namespace {
-
-static StringRef getPersistenceName(PersistenceMode persistence) {
-  switch (persistence) {
-  case PersistenceMode::None:
-    return "none";
-  case PersistenceMode::Static:
-    return "static";
-  }
-  llvm_unreachable("unknown TensorIR persistence mode");
-}
-
-} // namespace
 
 Status buildGraphAnalysisPipeline(mlir::OpPassManager &pm,
                                   const CompilerInvocation &opts) {
@@ -38,11 +30,6 @@ Status buildGraphAnalysisPipeline(mlir::OpPassManager &pm,
       nv_tensor_ir::createMaterializeDefaultStridesPass());
   if (opts.cudaTile.codegenStrategy ==
       CudaTileCodegenStrategy::LayoutPropagation) {
-    pm.addNestedPass<nv_tensor_ir::GraphOp>(
-        nv_tensor_ir::createLayoutPropagationAnnotationPass());
-    pm.addNestedPass<nv_tensor_ir::GraphOp>(
-        nv_tensor_ir::createLayoutPropagationNormalizationPass());
-
     if (opts.codegen.tileSize.empty() && opts.cudaTile.maxTileCandidates > 0) {
       TileAnalyzerPassOptions tileOpts;
       tileOpts.max_candidates = opts.cudaTile.maxTileCandidates;
@@ -51,9 +38,6 @@ Status buildGraphAnalysisPipeline(mlir::OpPassManager &pm,
       pm.addNestedPass<nv_tensor_ir::GraphOp>(
           nv_tensor_ir::createTileAnalyzerPass(tileOpts));
     }
-
-    pm.addNestedPass<nv_tensor_ir::GraphOp>(
-        nv_tensor_ir::createGraphSplittingPass());
   } else {
     pm.addNestedPass<nv_tensor_ir::GraphOp>(
         nv_tensor_ir::createDiscoverIterationSpaceInfoPass());
@@ -87,31 +71,81 @@ void buildTensorIRTiledProgramFormationPipeline(
   TileReductionsPassOptions stripMiningOptions;
   stripMiningOptions.reduction_tile_size = opts.cudaTile.reductionTileSize;
   stripMiningOptions.persistence =
-      getPersistenceName(opts.cudaTile.persistenceMode).str();
+      stringifyPersistenceMode(opts.cudaTile.persistenceMode).str();
   stripMiningOptions.sm_count = opts.cudaTile.smCount;
   stripMiningOptions.occupancy = opts.cudaTile.occupancy;
   pm.addNestedPass<func::FuncOp>(
       nv_tensor_ir::createTileReductionsPass(stripMiningOptions));
-}
-
-void buildTensorIRKernelOutliningPipeline(mlir::OpPassManager &pm) {
   pm.addPass(nv_tensor_ir::createOutlineKernelPass());
+
+  buildHostToLLVMPipeline(pm, opts);
 }
 
-void buildTensorIRTiledProgramPipeline(mlir::OpPassManager &pm,
-                                       const CompilerInvocation &opts) {
-  buildTensorIRTiledProgramFormationPipeline(pm, opts);
-  if (opts.cudaTile.codegenStrategy ==
-      CudaTileCodegenStrategy::LayoutPropagation) {
-    buildTensorIRKernelOutliningPipeline(pm);
+void buildHostToLLVMPipeline(OpPassManager &pm,
+                             const CompilerInvocation &opts) {
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  pm.addNestedPass<func::FuncOp>(createSCFToControlFlowPass());
+  pm.addPass(createHostAbiBridgePass());
+  pm.addPass(createHostToLLVMPass());
+  pm.addNestedPass<LLVM::LLVMFuncOp>(createCanonicalizerPass());
+  pm.addNestedPass<LLVM::LLVMFuncOp>(createCSEPass());
+
+  if (opts.getEffectiveHostTarget() == HostTarget::Native) {
+    HostToObjectPassOptions options{};
+    options.hostArch = opts.codegen.hostArch;
+    options.hostOS = opts.codegen.hostOS;
+    pm.addPass(createHostToObjectPass(options));
   }
 }
 
-void buildTensorToCudaTileConversionOnlyPipeline(
-    mlir::OpPassManager &pm, const CompilerInvocation &opts) {
+namespace {
+struct HostToLLVMPassOptions
+    : public PassPipelineOptions<HostToLLVMPassOptions> {
+  Option<HostArch> hostArch{
+      *this, "host-arch", llvm::cl::init(HostArch::Native),
+      llvm::cl::values(
+          clEnumValN(HostArch::Native, "native", "Host architecture"),
+          clEnumValN(HostArch::X86_64, "x86_64", "X86_64"),
+          clEnumValN(HostArch::AArch64, "aarch64", "AArch64"))};
+  Option<HostOS> hostOS{
+      *this, "host-os", llvm::cl::init(HostOS::Linux),
+      llvm::cl::values(clEnumValN(HostOS::Linux, "linux", "Linux"),
+                       clEnumValN(HostOS::Windows, "windows", "Windows"))};
+};
+} // namespace
+
+void registerHostToLLVMPipeline() {
+  PassPipelineRegistration<HostToLLVMPassOptions> registration(
+      "tir-host-to-llvm-pipeline",
+      "Lower outlined host dispatch to LLVM, preserving GPU kernel bodies",
+      [](OpPassManager &pm, const HostToLLVMPassOptions &options) {
+        CompilerInvocation inv;
+        inv.codegen.hostTarget = HostTarget::Native;
+        inv.codegen.hostArch = options.hostArch;
+        inv.codegen.hostOS = options.hostOS;
+        buildHostToLLVMPipeline(pm, inv);
+      });
+}
+
+Status
+buildTensorToCudaTileConversionOnlyPipeline(mlir::OpPassManager &pm,
+                                            const CompilerInvocation &opts) {
+  AutoGdcInsertion autoGdc = opts.cudaTile.autoGdcInsertion;
+  if (autoGdc != AutoGdcInsertion::None &&
+      autoGdc != AutoGdcInsertion::Conservative) {
+    return Status::InvalidArgument(
+        "Only conservative automatic GDC insertion is supported");
+  }
+  auto target = opts.getKernelSmTarget();
+  if (failed(target)) {
+    return Status::InvalidArgument("Invalid target SM '" +
+                                   opts.deviceTarget.kernelTarget + "'");
+  }
+
   TensorToCudaTileConversionPassOptions options;
   // AffineMap reads tile_size directly from the pass option. The staged
   // layout-propagation path consumes its selected tile during formation.
+  options.targetBytecodeVersion = opts.cudaTile.bytecodeVersion;
   options.num_ctas = opts.codegen.ctaCount;
   options.occupancy = opts.cudaTile.occupancy;
   options.num_warps = opts.cudaTile.warpCount;
@@ -126,15 +160,25 @@ void buildTensorToCudaTileConversionOnlyPipeline(
   pm.addPass(nv_tensor_ir::createTensorToCudaTileConversionPass(options));
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+  pm.addNestedPass<mlir::cuda_tile::ModuleOp>(
+      mlir::cuda_tile::createSynthesizeDebugInfoScopesPass());
+  // GDC (PDL) instructions require Hopper or newer.
+  if (autoGdc == AutoGdcInsertion::Conservative &&
+      target->getComputeCapabilityVersion() >= 90) {
+    mlir::OpPassManager &entryPm =
+        pm.nest<mlir::cuda_tile::ModuleOp>().nest<mlir::cuda_tile::EntryOp>();
+    entryPm.addPass(nv_tensor_ir::createCudaTileInsertGdcWaitPass());
+  }
+  return Status::Ok();
 }
 
 Status buildTensorToCudaTileConversionPipeline(mlir::OpPassManager &pm,
                                                const CompilerInvocation &opts) {
   TIR_RETURN_IF_ERROR(buildGraphAnalysisPipeline(pm, opts));
   buildTileSelectionPipeline(pm, opts);
-  buildTensorIRTiledProgramPipeline(pm, opts);
-  buildTensorToCudaTileConversionOnlyPipeline(pm, opts);
-  return Status::Ok();
+  buildTensorIRTiledProgramFormationPipeline(pm, opts);
+
+  return buildTensorToCudaTileConversionOnlyPipeline(pm, opts);
 }
 
 } // namespace mlir::nv_tensor_ir

@@ -33,12 +33,9 @@ module {
 // CHECK-SAME: %[[ARG0:[^,]*]]: tile<ptr<f32>>, %[[M0:[^,]*]]: tile<i32>, %[[N0:[^,]*]]: tile<i32>, %[[K0:[^,]*]]: tile<i32>
 // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^,]*]]: tile<i32>, %[[NR:[^,]*]]: tile<i32>, %[[KR:[^,]*]]: tile<i32>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
-// CHECK-DAG: %[[C7:.*]] = constant <i32: 7>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[MROUND:.*]] = addi %[[MR]], %[[C7]]
-// CHECK: %[[COUNT0:.*]] = divi %[[MROUND]], %[[C8]] unsigned
-// CHECK: %[[NROUND:.*]] = addi %[[NR]], %[[C7]]
-// CHECK: %[[COUNT1:.*]] = divi %[[NROUND]], %[[C8]] unsigned
+// CHECK: %[[COUNT0:.*]] = divi %[[MR]], %[[C8]] unsigned rounding<positive_inf>
+// CHECK: %[[COUNT1:.*]] = divi %[[NR]], %[[C8]] unsigned rounding<positive_inf>
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[IDX1:.*]] = remi %[[TEMP]], %[[COUNT1]] unsigned
@@ -153,15 +150,12 @@ module {
 // CHECK-SAME: %[[ARG0:[^,]*]]: tile<ptr<f32>>, %[[M0:[^,]*]]: tile<i32>, %[[N0:[^,]*]]: tile<i32>, %[[K0:[^,]*]]: tile<i32>
 // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^,]*]]: tile<i32>, %[[NR:[^,]*]]: tile<i32>, %[[KR:[^,]*]]: tile<i32>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
-// CHECK-DAG: %[[C7:.*]] = constant <i32: 7>
 // The multiplications by the constant 1 may or may not be folded away depending
 // on the build, so the strides are captured at their use rather than their def.
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK: %[[SR:.*]] = muli %{{.*}}, %[[NR]]
-// CHECK: %[[MROUND:.*]] = addi %[[MR]], %[[C7]]
-// CHECK: %[[COUNT0:.*]] = divi %[[MROUND]], %[[C8]] unsigned
-// CHECK: %[[NROUND:.*]] = addi %[[NR]], %[[C7]]
-// CHECK: %[[COUNT1:.*]] = divi %[[NROUND]], %[[C8]] unsigned
+// CHECK: %[[COUNT0:.*]] = divi %[[MR]], %[[C8]] unsigned rounding<positive_inf>
+// CHECK: %[[COUNT1:.*]] = divi %[[NR]], %[[C8]] unsigned rounding<positive_inf>
 // CHECK: %[[S0:.*]] = muli %{{.*}}, %[[N0]]
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
@@ -219,12 +213,9 @@ module {
 // CHECK-SAME: %[[ARG0:[^,]*]]: tile<ptr<f32>>, %[[M0:[^,]*]]: tile<i32>, %[[N0:[^,]*]]: tile<i32>, %[[K0:[^,]*]]: tile<i32>, %[[S0:[^,]*]]: tile<i32>, %[[T0:[^,]*]]: tile<i32>, %[[U0:[^,]*]]: tile<i32>
 // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^,]*]]: tile<i32>, %[[NR:[^,]*]]: tile<i32>, %[[KR:[^,]*]]: tile<i32>, %[[SR:[^,]*]]: tile<i32>, %[[TR:[^,]*]]: tile<i32>, %[[UR:[^,]*]]: tile<i32>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
-// CHECK-DAG: %[[C7:.*]] = constant <i32: 7>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[MROUND:.*]] = addi %[[MR]], %[[C7]]
-// CHECK: %[[COUNT0:.*]] = divi %[[MROUND]], %[[C8]] unsigned
-// CHECK: %[[NROUND:.*]] = addi %[[NR]], %[[C7]]
-// CHECK: %[[COUNT1:.*]] = divi %[[NROUND]], %[[C8]] unsigned
+// CHECK: %[[COUNT0:.*]] = divi %[[MR]], %[[C8]] unsigned rounding<positive_inf>
+// CHECK: %[[COUNT1:.*]] = divi %[[NR]], %[[C8]] unsigned rounding<positive_inf>
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[IDX1:.*]] = remi %[[TEMP]], %[[COUNT1]] unsigned
@@ -255,12 +246,9 @@ module {
 // CHECK-SAME: %[[ARG0:[^,]*]]: tile<ptr<f32>>, %[[M0:[^,]*]]: tile<i32>, %[[N0:[^,]*]]: tile<i32>, %[[S0:[^,]*]]: tile<i32>, %[[T0:[^,]*]]: tile<i32>
 // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^,]*]]: tile<i32>, %[[NR:[^,]*]]: tile<i32>, %[[SR:[^,]*]]: tile<i32>, %[[TR:[^,]*]]: tile<i32>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
-// CHECK-DAG: %[[C7:.*]] = constant <i32: 7>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[MROUND:.*]] = addi %[[MR]], %[[C7]]
-// CHECK: %[[COUNT0:.*]] = divi %[[MROUND]], %[[C8]] unsigned
-// CHECK: %[[NROUND:.*]] = addi %[[NR]], %[[C7]]
-// CHECK: %[[COUNT1:.*]] = divi %[[NROUND]], %[[C8]] unsigned
+// CHECK: %[[COUNT0:.*]] = divi %[[MR]], %[[C8]] unsigned rounding<positive_inf>
+// CHECK: %[[COUNT1:.*]] = divi %[[NR]], %[[C8]] unsigned rounding<positive_inf>
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[IDX1:.*]] = remi %[[TEMP]], %[[COUNT1]] unsigned
@@ -292,10 +280,8 @@ module {
 // CHECK-SAME: %[[ARG1:[^,]*]]: tile<ptr<f32>>, %[[M1:[^,]*]]: tile<i32>, %[[N1:[^,]*]]: tile<i32>
 // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^,]*]]: tile<i32>, %[[NR:[^,]*]]: tile<i32>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
-// CHECK-DAG: %[[C7:.*]] = constant <i32: 7>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[MROUND:.*]] = addi %[[MR]], %[[C7]]
-// CHECK: %[[COUNT0:.*]] = divi %[[MROUND]], %[[C8]] unsigned
+// CHECK: %[[COUNT0:.*]] = divi %[[MR]], %[[C8]] unsigned rounding<positive_inf>
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]]], strides = [%[[S0:.*]], 1]
@@ -329,10 +315,8 @@ module {
 // CHECK-SAME: %[[ARG1:[^,]*]]: tile<ptr<f32>>, %[[M1:[^,]*]]: tile<i32>
 // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^,]*]]: tile<i32>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
-// CHECK-DAG: %[[C7:.*]] = constant <i32: 7>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[MROUND:.*]] = addi %[[MR]], %[[C7]]
-// CHECK: %[[COUNT0:.*]] = divi %[[MROUND]], %[[C8]] unsigned
+// CHECK: %[[COUNT0:.*]] = divi %[[MR]], %[[C8]] unsigned rounding<positive_inf>
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], 128], strides = [128, 1]
@@ -367,10 +351,8 @@ module {
 // CHECK-SAME: %[[ARG1:[^,]*]]: tile<ptr<f32>>, %[[M1:[^,]*]]: tile<i32>, %[[N1:[^,]*]]: tile<i32>
 // CHECK-SAME: %[[OUT:[^,]*]]: tile<ptr<f32>>, %[[MR:[^,]*]]: tile<i32>, %[[NR:[^,]*]]: tile<i32>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
-// CHECK-DAG: %[[C7:.*]] = constant <i32: 7>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[MROUND:.*]] = addi %[[MR]], %[[C7]]
-// CHECK: %[[COUNT0:.*]] = divi %[[MROUND]], %[[C8]] unsigned
+// CHECK: %[[COUNT0:.*]] = divi %[[MR]], %[[C8]] unsigned rounding<positive_inf>
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[N0]], %[[M0]]], strides = [1, %[[S0:.*]]]

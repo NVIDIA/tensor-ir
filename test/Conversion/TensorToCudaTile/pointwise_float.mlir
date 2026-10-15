@@ -2,8 +2,8 @@
 // RUN: tensor_ir-opt -layout-propagation-pipeline -split-input-file %s | FileCheck %s --check-prefixes=CHECK,LAYOUT
 
 // Verify lowering of pointwise operations for a floating point type (F32).
-// Exp is additionally checked for f16/bf16 because those follow XLA's
-// approximate-f32-then-round-back policy.
+// Exp is additionally checked for f16/bf16, which use full f32 evaluation
+// before rounding back to the input dtype.
 // Activations, comparisons and type conversions are tested separately.
 // Float pow (fpowf) is covered in pointwise_float_pow.mlir.
 
@@ -69,7 +69,7 @@ nv_tensor_ir.graph @test_exp_op(%arg0: tensor<128xf32>) -> tensor<128xf32> {
 // CHECK-LABEL: @test_exp_op_bf16
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[BF16_TILE:tile<[0-9]+xbf16>]]
 // CHECK: %[[UP:.*]] = ftof %[[ARG0]] : [[BF16_TILE]] -> [[F32_TILE:tile<[0-9]+xf32>]]
-// CHECK: %[[EXP:.*]] = exp %[[UP]] rounding<approx> : [[F32_TILE]]
+// CHECK: %[[EXP:.*]] = exp %[[UP]] : [[F32_TILE]]
 // CHECK: %[[RESULT:.*]] = ftof %[[EXP]] : [[F32_TILE]] -> [[BF16_TILE]]
 // CHECK: store_view_tko weak %[[RESULT]]
 nv_tensor_ir.graph @test_exp_op_bf16(%arg0: tensor<128xbf16>) -> tensor<128xbf16> {
@@ -82,7 +82,7 @@ nv_tensor_ir.graph @test_exp_op_bf16(%arg0: tensor<128xbf16>) -> tensor<128xbf16
 // CHECK-LABEL: @test_exp_op_f16
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[F16_TILE:tile<[0-9]+xf16>]]
 // CHECK: %[[UP:.*]] = ftof %[[ARG0]] : [[F16_TILE]] -> [[F32_TILE:tile<[0-9]+xf32>]]
-// CHECK: %[[EXP:.*]] = exp %[[UP]] rounding<approx> : [[F32_TILE]]
+// CHECK: %[[EXP:.*]] = exp %[[UP]] : [[F32_TILE]]
 // CHECK: %[[RESULT:.*]] = ftof %[[EXP]] : [[F32_TILE]] -> [[F16_TILE]]
 // CHECK: store_view_tko weak %[[RESULT]]
 nv_tensor_ir.graph @test_exp_op_f16(%arg0: tensor<128xf16>) -> tensor<128xf16> {
@@ -294,13 +294,19 @@ nv_tensor_ir.graph @test_div_op_bf16(%arg0: tensor<128xbf16>,
 
 // -----
 
+// Floored `mod` lowers to `remf` plus a sign-conditional select.
 // CHECK-LABEL: @test_mod_op
-// CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xf32>]]
-// CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
-// CHECK: %[[DIV:.*]] = divf %[[ARG0]], %[[ARG1]] : [[TILE]]
-// CHECK: %[[FLOOR:.*]] = floor %[[DIV]] : [[TILE]]
-// CHECK: %[[MUL:.*]] = mulf %[[FLOOR]], %[[ARG1]] : [[TILE]]
-// CHECK: %[[RESULT:.*]] = subf %[[ARG0]], %[[MUL]] : [[TILE]]
+// CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xf32>]]
+// CHECK-DAG: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
+// CHECK-DAG: %[[ZERO:.*]] = constant <f32: 0.000000e+00> : [[TILE]]
+// CHECK: %[[REM:.*]] = remf %[[ARG0]], %[[ARG1]] : [[TILE]]
+// CHECK-DAG: %[[NONZERO:.*]] = cmpf not_equal ordered %[[REM]], %[[ZERO]] : [[TILE]]
+// CHECK-DAG: %[[REM_NEG:.*]] = cmpf less_than ordered %[[REM]], %[[ZERO]] : [[TILE]]
+// CHECK-DAG: %[[RHS_NEG:.*]] = cmpf less_than ordered %[[ARG1]], %[[ZERO]] : [[TILE]]
+// CHECK: %[[SIGNS_DIFFER:.*]] = xori %[[REM_NEG]], %[[RHS_NEG]]
+// CHECK: %[[FIX:.*]] = andi %[[NONZERO]], %[[SIGNS_DIFFER]]
+// CHECK: %[[FIXED:.*]] = addf %[[REM]], %[[ARG1]] : [[TILE]]
+// CHECK: %[[RESULT:.*]] = select %[[FIX]], %[[FIXED]], %[[REM]]
 // CHECK: store_view_tko weak %[[RESULT]]
 nv_tensor_ir.graph @test_mod_op(%arg0: tensor<128xf32>,
                                 %arg1: tensor<128xf32>) -> tensor<128xf32> {
@@ -310,8 +316,38 @@ nv_tensor_ir.graph @test_mod_op(%arg0: tensor<128xf32>,
 
 // -----
 
-// `rem` is the truncated counterpart of `mod` and lowers to a single
-// `cuda_tile.remf` (no div/floor/mul/sub expansion).
+// f16 and bf16 `mod`: same lowering.
+// CHECK-LABEL: @test_mod_op_f16
+// CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xf16>]]
+// CHECK-DAG: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
+// CHECK: %[[REM:.*]] = remf %[[ARG0]], %[[ARG1]] : [[TILE]]
+// CHECK: %[[FIXED:.*]] = addf %[[REM]], %[[ARG1]] : [[TILE]]
+// CHECK: %[[RESULT:.*]] = select %{{.*}}, %[[FIXED]], %[[REM]]
+// CHECK: store_view_tko weak %[[RESULT]]
+nv_tensor_ir.graph @test_mod_op_f16(%arg0: tensor<128xf16>,
+                                    %arg1: tensor<128xf16>) -> tensor<128xf16> {
+  %out = mod %arg0, %arg1 : tensor<128xf16>
+  results %out : tensor<128xf16>
+}
+
+// -----
+
+// CHECK-LABEL: @test_mod_op_bf16
+// CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xbf16>]]
+// CHECK-DAG: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
+// CHECK: %[[REM:.*]] = remf %[[ARG0]], %[[ARG1]] : [[TILE]]
+// CHECK: %[[FIXED:.*]] = addf %[[REM]], %[[ARG1]] : [[TILE]]
+// CHECK: %[[RESULT:.*]] = select %{{.*}}, %[[FIXED]], %[[REM]]
+// CHECK: store_view_tko weak %[[RESULT]]
+nv_tensor_ir.graph @test_mod_op_bf16(%arg0: tensor<128xbf16>,
+                                     %arg1: tensor<128xbf16>) -> tensor<128xbf16> {
+  %out = mod %arg0, %arg1 : tensor<128xbf16>
+  results %out : tensor<128xbf16>
+}
+
+// -----
+
+// `rem` lowers to a single `cuda_tile.remf`.
 // CHECK-LABEL: @test_rem_op
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xf32>]]
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]

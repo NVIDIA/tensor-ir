@@ -19,14 +19,14 @@ namespace mlir::nv_tensor_ir::backend::cuda_tile {
 StatusOr<mlir::cuda_tile::BytecodeVersion>
 resolveBytecodeVersion(llvm::StringRef spelling);
 
-/// Returns CUDA Tile's compatibility version, with a 13.3 minimum.
+/// Returns CUDA Tile's compatibility version, with a 13.4 minimum.
 inline mlir::cuda_tile::BytecodeVersion getDefaultBytecodeVersion() {
   using mlir::cuda_tile::BytecodeVersion;
   const auto &compatibility = BytecodeVersion::kCurrentCompatibilityVersion;
   auto minimum = BytecodeVersion::fromVersion(/*verMajor=*/13,
-                                              /*verMinor=*/3,
+                                              /*verMinor=*/4,
                                               /*verTag=*/0);
-  assert(minimum && "bytecode version 13.3 must be supported");
+  assert(minimum && "bytecode version 13.4 must be supported");
   return std::max(compatibility, *minimum);
 }
 

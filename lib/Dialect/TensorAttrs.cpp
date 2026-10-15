@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Dialect/TensorIRAttrs.h"
 #include "tensor_ir/Support/TCutegen.h"
 
@@ -659,6 +660,126 @@ LayoutSourceAttrInterface TensorSourceAttr::normalize() const {
 
   return TensorSourceAttr::get(getContext(), getTensorId(), getOffset(),
                                flat.toString(), getDynamicValueMapping());
+}
+
+//===----------------------------------------------------------------------===//
+// ScanSliceInputAttr and ScanSliceSourceAttr
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+ScanSliceInputAttr::verify(::llvm::function_ref<InFlightDiagnostic()> emitError,
+                           TensorSourceAttr source, int64_t scanDimension,
+                           int64_t scanExtent, int64_t scanStride) {
+  if (scanDimension < 0) {
+    return emitError() << "ScanSlice input dimension must be non-negative";
+  }
+  if (scanExtent <= 0) {
+    return emitError() << "ScanSlice input extent must be positive";
+  }
+  if (scanStride == kDynamic) {
+    return emitError() << "ScanSlice input stride must be static";
+  }
+  return success();
+}
+
+LogicalResult ScanSliceSourceAttr::verify(
+    ::llvm::function_ref<InFlightDiagnostic()> emitError,
+    LayoutSourceAttrInterface carry, DenseI64ArrayAttr outputDimensions,
+    ArrayAttr inputs) {
+  if (inputs.empty()) {
+    return emitError() << "ScanSlice source requires at least one side input";
+  }
+  SmallVector<int64_t> carryShape = carry.getShape();
+  for (Attribute inputAttr : inputs) {
+    auto input = dyn_cast<ScanSliceInputAttr>(inputAttr);
+    if (!input) {
+      return emitError()
+             << "ScanSlice source inputs must be scan_slice input attributes";
+    }
+    if (failed(
+            getScanSliceInputAxes(carryShape, input.getSource().getShape()))) {
+      return emitError() << "ScanSlice input non-unit dimensions must match a "
+                            "prefix of the non-unit carry dimensions";
+    }
+  }
+  for (int64_t dimension : outputDimensions.asArrayRef()) {
+    if (dimension < 0) {
+      return emitError() << "ScanSlice output dimensions must be non-negative";
+    }
+  }
+  return success();
+}
+
+SmallVector<int64_t> ScanSliceSourceAttr::getShape() const {
+  return getCarry().getShape();
+}
+
+LayoutSourceAttrInterface
+ScanSliceSourceAttr::reshape(ArrayRef<int64_t> newShape) const {
+  // Region conversion uses the logical carry axes directly. Until it can
+  // transport those axes, reject transformations that change their profile.
+  if (!llvm::equal(newShape, getShape())) {
+    return nullptr;
+  }
+  return *this;
+}
+
+LayoutSourceAttrInterface
+ScanSliceSourceAttr::broadcast(ArrayRef<int64_t> newShape) const {
+  return reshape(newShape);
+}
+
+LayoutSourceAttrInterface
+ScanSliceSourceAttr::transpose(ArrayRef<int64_t> permutation) const {
+  if (permutation.size() != getShape().size()) {
+    return nullptr;
+  }
+  for (auto [index, dimension] : llvm::enumerate(permutation)) {
+    if (dimension != static_cast<int64_t>(index)) {
+      return nullptr;
+    }
+  }
+  return *this;
+}
+
+LayoutSourceAttrInterface
+ScanSliceSourceAttr::slice(ArrayRef<int64_t> starts, ArrayRef<int64_t> limits,
+                           ArrayRef<int64_t> strides) const {
+  auto shape = getShape();
+  if (starts.size() != shape.size() || limits.size() != shape.size() ||
+      strides.size() != shape.size()) {
+    return nullptr;
+  }
+  for (auto [start, limit, stride, extent] :
+       llvm::zip_equal(starts, limits, strides, shape)) {
+    if (start != 0 || limit != extent || stride != 1) {
+      return nullptr;
+    }
+  }
+  return *this;
+}
+
+LayoutSourceAttrInterface ScanSliceSourceAttr::normalize() const {
+  // The region currently lowers directly in logical carry coordinates.
+  // Preserve every axis, including unit axes, as a normalization constraint.
+  // CompositeSourceAttr combines this profile with the other graph sources;
+  // this does not select the scan_slice carry as the graph's carrier anchor.
+  SmallVector<int64_t> normalizedShape = getShape();
+  auto normalizeSource = [&](LayoutSourceAttrInterface source) {
+    source = source.normalize();
+    if (source && source.getShape() != normalizedShape) {
+      source = source.reshape(normalizedShape);
+    }
+    return source;
+  };
+  LayoutSourceAttrInterface carry = normalizeSource(getCarry());
+  if (!carry) {
+    return nullptr;
+  }
+  // Side inputs retain their native slice shapes and physical strides. They
+  // do not participate in the surrounding graph's iteration-space normalization.
+  return ScanSliceSourceAttr::get(getContext(), carry, getOutputDimensions(),
+                                  getInputs());
 }
 
 //===----------------------------------------------------------------------===//
@@ -1496,9 +1617,11 @@ SmallVector<int64_t> extractSizes(const tcg::Layout &layout, int64_t start,
       parts.push_back(part);
     }
   }
-  // Build the shape from the components sorted by stride.
+  // Operand shapes use last-dimension-fastest factor order. For example,
+  // batch factors (2,3):(3,1) must stay (2,3), not become (3,2).
+  // A transposed output view can expose both factors separately.
   llvm::sort(parts, [](const auto &lhs, const auto &rhs) {
-    return lhs.stride().as_int() < rhs.stride().as_int();
+    return lhs.stride().as_int() > rhs.stride().as_int();
   });
 
   SmallVector<int64_t> result;
@@ -1737,7 +1860,7 @@ MatmulSourceAttr::slice(ArrayRef<int64_t> starts, ArrayRef<int64_t> limits,
 
 LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
   LLVM_DEBUG(llvm::dbgs() << "Computing iteration space for matmul\n");
-  std::string_view tab = "    ";
+  [[maybe_unused]] static constexpr llvm::StringRef kTab = "    ";
 
   // [1] Compute LHS iteration space and get boundaries.
   auto lhsIterSpace = normalizeAndSplit(getLhs(), {getB(), getM(), getK()});
@@ -1764,7 +1887,7 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
   // [3] Normalize output layout.
   auto output =
       normalizeLayout(getCuteLayout(), {getB(), getM(), getN(), getK()});
-  LLVM_DEBUG(llvm::dbgs() << tab << "Normalized output layout: "
+  LLVM_DEBUG(llvm::dbgs() << kTab << "Normalized output layout: "
                           << output.toString() << "\n");
 
   // [4] Compute iteration space for batch dimensions.
@@ -1784,7 +1907,7 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
     }
     batchShape = std::move(*batchIterSpace);
     LLVM_DEBUG({
-      llvm::dbgs() << tab << "Batch dimensions: (";
+      llvm::dbgs() << kTab << "Batch dimensions: (";
       llvm::interleaveComma(batchShape, llvm::dbgs());
       llvm::dbgs() << ")\n";
     });
@@ -1801,7 +1924,7 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
     return nullptr;
   }
   LLVM_DEBUG({
-    llvm::dbgs() << tab << "Noncontracting LHS: (";
+    llvm::dbgs() << kTab << "Noncontracting LHS: (";
     llvm::interleaveComma(*mShape, llvm::dbgs());
     llvm::dbgs() << ")\n";
   });
@@ -1817,7 +1940,7 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
     return nullptr;
   }
   LLVM_DEBUG({
-    llvm::dbgs() << tab << "Noncontracting RHS: (";
+    llvm::dbgs() << kTab << "Noncontracting RHS: (";
     llvm::interleaveComma(*nShape, llvm::dbgs());
     llvm::dbgs() << ")\n";
   });
@@ -1834,7 +1957,7 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
     return nullptr;
   }
   LLVM_DEBUG({
-    llvm::dbgs() << tab << "Contracting dimension: (";
+    llvm::dbgs() << kTab << "Contracting dimension: (";
     llvm::interleaveComma(*kShape, llvm::dbgs());
     llvm::dbgs() << ")\n";
   });
@@ -1880,7 +2003,7 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
   profile.insert(profile.end(), kShape->begin(), kShape->end());
 
   auto viewLayout = normalizeLayout(getCuteLayout(), profile);
-  LLVM_DEBUG(llvm::dbgs() << tab << "Resulting output layout: "
+  LLVM_DEBUG(llvm::dbgs() << kTab << "Resulting output layout: "
                           << viewLayout.toString() << "\n");
 
   // Separate the contracting dimensions.

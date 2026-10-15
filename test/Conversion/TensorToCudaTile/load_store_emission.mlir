@@ -162,3 +162,56 @@ module {
     results %add2 : tensor<64x64xf32>
   }
 }
+
+// -----
+
+// ============================================================================
+// Per-tensor `nv_tensor_ir.allow_tma = false` is forwarded as an
+// `allow_tma = false` optimization hint on the access of that tensor only.
+// ============================================================================
+
+// CHECK-LABEL: entry @allow_tma_false_input
+//       CHECK:   %[[T:.+]], {{.*}} = load_view_tko weak %{{.+}}[%{{.+}}] optimization_hints = <default = {allow_tma = false}>
+//       CHECK:   %[[NEG:.+]] = negf %[[T]]
+//   CHECK-NOT:   optimization_hints
+//       CHECK:   store_view_tko weak %[[NEG]], %{{.+}}[%{{.+}}] :
+nv_tensor_ir.graph @allow_tma_false_input(
+    %arg0: tensor<64xf32> {nv_tensor_ir.allow_tma = false}) ->
+    (tensor<64xf32>)
+    attributes {tile_size = array<i32: 32>} {
+  %out = neg %arg0 : tensor<64xf32>
+  results %out : tensor<64xf32>
+}
+
+// -----
+
+// CHECK-LABEL: entry @allow_tma_false_output
+//       CHECK:   %[[T:.+]], {{.*}} = load_view_tko weak %{{.+}}[%{{.+}}] :
+//       CHECK:   %[[NEG:.+]] = negf %[[T]]
+//       CHECK:   store_view_tko weak %[[NEG]], %{{.+}}[%{{.+}}] optimization_hints = <default = {allow_tma = false}>
+nv_tensor_ir.graph @allow_tma_false_output(
+    %arg0: tensor<64xf32>) ->
+    (tensor<64xf32> {nv_tensor_ir.allow_tma = false})
+    attributes {tile_size = array<i32: 32>} {
+  %out = neg %arg0 : tensor<64xf32>
+  results %out : tensor<64xf32>
+}
+
+// -----
+
+// Tests that the hint survives strip-mining of the reduction dimension, which
+// rebuilds the input load inside the reduction loop.
+
+// CHECK-LABEL: entry @allow_tma_false_reduction_loop
+//       CHECK:   %[[LOOP:.+]] = for %[[IV:.+]] in
+//       CHECK:     load_view_tko weak %{{.+}}[%{{.+}}, %[[IV]]] optimization_hints = <default = {allow_tma = false}>
+//       CHECK:   %[[RED:.+]] = reduce %[[LOOP]]
+//       CHECK:   store_view_tko weak %[[RED]], %{{.+}}[%{{.+}}] :
+nv_tensor_ir.graph @allow_tma_false_reduction_loop(
+    %arg0: tensor<64x16384xf32> {nv_tensor_ir.allow_tma = false}) ->
+    (tensor<64x1xf32>)
+    attributes {tile_size = array<i32: 32>} {
+  %out = reduce(%arg0) <dimensions = [1], reduction_mode = <add>>
+    : tensor<64x16384xf32> -> tensor<64x1xf32>
+  results %out : tensor<64x1xf32>
+}

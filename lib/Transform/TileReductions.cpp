@@ -30,15 +30,19 @@
 //      in a grid-stride scf.for loop inside each persistent block.
 
 #include "tensor_ir/Dialect/TensorIR.h"
+#include "tensor_ir/Options/OptionsEnums.h"
 #include "tensor_ir/Transform/Passes.h" // IWYU pragma: keep
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/Transforms/RegionUtils.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/Support/MathExtras.h"
 
 #include <cstdint>
@@ -49,7 +53,10 @@ namespace mlir::nv_tensor_ir {
 #define GEN_PASS_DEF_TILEREDUCTIONSPASS
 #include "tensor_ir/Transform/Passes.h.inc"
 
-namespace {
+} // namespace mlir::nv_tensor_ir
+
+using namespace mlir;
+using namespace mlir::nv_tensor_ir;
 
 /// Partition a multi-dimensional contracting shape into power-of-two tile
 /// extents such that their product does not exceed `reductionTileSize`.
@@ -141,12 +148,16 @@ static Value createSplat(OpBuilder &builder, Location loc,
 /// If true, out-of-bounds elements can be padded directly at the memory
 /// boundary via TilePaddingAttr on LoadOp, avoiding expensive explicit
 /// masking. Layout operations have already folded into access descriptors,
-/// so only floating-point type conversions (ConvertOp) can safely preserve
-/// neutrality.
+/// so only tile transposes and floating-point type conversions (ConvertOp) can
+/// safely preserve neutrality.
 static bool isLoadPaddingNeutral(Value value) {
   while (Operation *op = value.getDefiningOp()) {
     if (isa<LoadOp>(op)) {
       return true;
+    }
+    if (auto transpose = dyn_cast<TransposeOp>(op)) {
+      value = transpose.getInput();
+      continue;
     }
     auto convert = dyn_cast<ConvertOp>(op);
     if (!convert ||
@@ -385,6 +396,7 @@ static Value applyPaddingMask(OpBuilder &builder, Location loc, Value tile,
                                 neutralTile);
 }
 
+namespace {
 /// Plan describing how a reduction operation's contracting dimensions will be
 /// strip-mined.
 struct ReductionTilingPlan {
@@ -397,6 +409,7 @@ struct ReductionTilingPlan {
   /// Operand tile shape with contracting dimensions replaced by their tile sizes.
   SmallVector<int64_t> operandTileShape;
 };
+} // namespace
 
 /// Validate contracting dimensions and derive the reduction tiling plan.
 ///
@@ -437,6 +450,7 @@ createReductionTilingPlan(Operation *op, RankedTensorType inputType,
   return plan;
 }
 
+namespace {
 /// Loop nest and coordinate state generated for strip-mined contractions.
 struct ContractionLoopNest {
   /// Generated scf.for loops, from outermost to innermost.
@@ -449,6 +463,7 @@ struct ContractionLoopNest {
   /// Combined boolean in-bounds mask across all contracting dimensions.
   Value mask;
 };
+} // namespace
 
 /// Construct an scf.for loop nest over contracting dimensions where extent > tile.
 ///
@@ -511,16 +526,18 @@ mapContractionCoordinates(ArrayRef<int64_t> dimensions,
 ///
 /// The innermost loop yields the updated partial accumulator `values`. Each
 /// enclosing loop yields the results of its immediately nested child loop.
-static void setContractionLoopYields(SmallVectorImpl<scf::ForOp> &loops,
+static void setContractionLoopYields(RewriterBase &rewriter,
+                                     SmallVectorImpl<scf::ForOp> &loops,
                                      ValueRange values) {
   assert(!loops.empty() && "expected at least one contraction loop");
-  cast<scf::YieldOp>(loops.back().getBody()->getTerminator())
-      .getResultsMutable()
-      .assign(values);
+  auto setYield = [&](scf::ForOp loop, ValueRange yielded) {
+    auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+    rewriter.modifyOpInPlace(
+        yield, [&] { yield.getResultsMutable().assign(yielded); });
+  };
+  setYield(loops.back(), values);
   for (size_t index = loops.size() - 1; index > 0; --index) {
-    cast<scf::YieldOp>(loops[index - 1].getBody()->getTerminator())
-        .getResultsMutable()
-        .assign(loops[index].getResults());
+    setYield(loops[index - 1], loops[index].getResults());
   }
 }
 
@@ -616,27 +633,40 @@ static Value createDegenerateReductionEpilogue(OpBuilder &builder, Location loc,
   return DivOp::create(builder, loc, type, accumulated, divisorTile);
 }
 
+namespace {
 /// Clones the upstream producer DAG feeding a contraction, shrinking tile
 /// shapes to the strip-mined size and substituting contracting coordinates
 /// with loop induction variables.
 ///
 /// Replaces LoadOps with smaller tiled loads indexed by contracting loop
 /// induction variables, re-splats constants, and recursively clones
-/// pointwise and iota operations. Cloned values are memoized to preserve
-/// reconvergent DAG structure.
+/// pointwise, iota, and transpose operations. Cloned values are memoized to
+/// preserve reconvergent DAG structure.
 class ProducerCloner {
 public:
   ProducerCloner(ArrayRef<int64_t> tileShape,
                  const DenseMap<unsigned, Value> &contractingCoordinates,
-                 TilePaddingAttr loadPadding, OpBuilder &builder)
+                 TilePaddingAttr loadPadding, RewriterBase &rewriter)
       : tileShape(tileShape), contractingCoordinates(contractingCoordinates),
-        loadPadding(loadPadding), builder(builder) {}
+        loadPadding(loadPadding), builder(rewriter) {}
 
   FailureOr<Value> clone(Value value) {
+    SmallVector<int64_t> identity =
+        llvm::to_vector(llvm::seq<int64_t>(tileShape.size()));
+    return clone(value, identity);
+  }
+
+private:
+  /// Clone `value`, whose dimension i is dimension `dimensions[i]` of the
+  /// contraction operand. Transposes between the operand and a producer
+  /// permute the strip-mined tile shape and contracting coordinates.
+  FailureOr<Value> clone(Value value, ArrayRef<int64_t> dimensions) {
     if (!isa<RankedTensorType>(value.getType())) {
       return value;
     }
-    if (auto found = cache.find(value); found != cache.end()) {
+    std::pair<Value, Attribute> key{value,
+                                    builder.getDenseI64ArrayAttr(dimensions)};
+    if (auto found = cache.find(key); found != cache.end()) {
       return found->second;
     }
     Operation *op = value.getDefiningOp();
@@ -644,25 +674,53 @@ public:
       return emitError(value.getLoc())
              << "strip-mined producer unexpectedly captures a block argument";
     }
+    if (dimensions.size() != tileShape.size()) {
+      return op->emitError(
+          "strip-mined producer rank does not match the contraction tile");
+    }
+    SmallVector<int64_t> shape = llvm::map_to_vector(
+        dimensions, [&](int64_t dimension) { return tileShape[dimension]; });
 
     if (auto load = dyn_cast<LoadOp>(op)) {
       SmallVector<OpFoldResult> indices = load.getMixedIndices();
       for (auto [dimension, coordinate] : contractingCoordinates) {
-        if (dimension >= indices.size()) {
+        auto position = llvm::find(dimensions, dimension);
+        if (position == dimensions.end() ||
+            static_cast<size_t>(position - dimensions.begin()) >=
+                indices.size()) {
           return load.emitError(
               "contracting dimension is outside the tile-access rank");
         }
-        indices[dimension] = coordinate;
+        indices[position - dimensions.begin()] = coordinate;
       }
       Value result = LoadOp::create(
           builder, load.getLoc(),
           RankedTensorType::get(
-              tileShape,
-              cast<RankedTensorType>(load.getType()).getElementType()),
+              shape, cast<RankedTensorType>(load.getType()).getElementType()),
           load.getBase(), load.getMixedOffset(), load.getMixedSizes(),
-          load.getMixedStrides(), indices, load.getAlignmentAttr(),
-          loadPadding);
-      cache[value] = result;
+          load.getMixedStrides(), indices, load.getAlignmentAttr(), loadPadding,
+          load.getAllowTma());
+      cache[key] = result;
+      return result;
+    }
+
+    if (auto transpose = dyn_cast<TransposeOp>(op)) {
+      // Result dimension i is input dimension permutation[i].
+      ArrayRef<int64_t> permutation = transpose.getPermutation();
+      SmallVector<int64_t> inputDimensions(dimensions.size());
+      for (auto [resultDimension, inputDimension] :
+           llvm::enumerate(permutation)) {
+        inputDimensions[inputDimension] = dimensions[resultDimension];
+      }
+      FailureOr<Value> input = clone(transpose.getInput(), inputDimensions);
+      if (failed(input)) {
+        return failure();
+      }
+      auto type = RankedTensorType::get(
+          shape, cast<RankedTensorType>(transpose.getType()).getElementType());
+      Value result = TransposeOp::create(builder, transpose.getLoc(), type,
+                                         *input, permutation);
+      cache[key] = result;
       return result;
     }
 
@@ -673,7 +731,7 @@ public:
             "strip mining requires tensor constants to be splats");
       }
       auto oldType = cast<RankedTensorType>(constant.getType());
-      auto newType = RankedTensorType::get(tileShape, oldType.getElementType());
+      auto newType = RankedTensorType::get(shape, oldType.getElementType());
       Attribute splat =
           oldType.getElementType().isFloat()
               ? Attribute(builder.getFloatAttr(oldType.getElementType(),
@@ -681,12 +739,49 @@ public:
               : Attribute(builder.getIntegerAttr(oldType.getElementType(),
                                                  dense.getSplatValue<APInt>()));
       Value result = createSplat(builder, constant.getLoc(), newType, splat);
-      cache[value] = result;
+      cache[key] = result;
       return result;
     }
 
-    if ((!isa<PointwiseOpInterface>(op) && !isa<IotaOp>(op)) ||
-        op->getNumRegions() != 0) {
+    if (auto iota = dyn_cast<IotaOp>(op)) {
+      Location loc = iota.getLoc();
+      Type elementType = iota.getType().getElementType();
+      auto type = RankedTensorType::get(shape, elementType);
+      Value result =
+          IotaOp::create(builder, loc, type, iota.getDimension(), ValueRange{});
+      if (auto coordinate =
+              contractingCoordinates.find(dimensions[iota.getDimension()]);
+          coordinate != contractingCoordinates.end()) {
+        // FormGrid has already added the coarse tile origin. Strip mining
+        // must also advance local indices within that coarse tile: otherwise
+        // loads advance while an iota-based causal mask repeats its first K
+        // chunk. Any original value stride remains in the surrounding DAG.
+        Value extent = arith::ConstantIndexOp::create(
+            builder, loc, shape[iota.getDimension()]);
+        Value offset =
+            arith::MulIOp::create(builder, loc, coordinate->second, extent);
+        unsigned width = elementType.isFloat()
+                             ? 64
+                             : cast<IntegerType>(elementType).getWidth();
+        Value scalar = arith::IndexCastOp::create(
+            builder, loc, builder.getIntegerType(width), offset);
+        if (elementType.isFloat()) {
+          scalar = arith::UIToFPOp::create(builder, loc, elementType, scalar);
+        } else if (scalar.getType() != elementType) {
+          // Preserve the iota's integer width and signedness.
+          scalar = UnrealizedConversionCastOp::create(
+                       builder, loc, TypeRange{elementType}, scalar)
+                       .getResult(0);
+        }
+        Value offsetTile =
+            SplatOp::create(builder, loc, type, scalar, ValueRange{});
+        result = AddOp::create(builder, loc, result, offsetTile);
+      }
+      cache[key] = result;
+      return result;
+    }
+
+    if (!isa<PointwiseOpInterface>(op) || op->getNumRegions() != 0) {
       return op->emitError(
           "strip mining cannot clone this contraction producer");
     }
@@ -696,30 +791,35 @@ public:
         mapping.map(operand, operand);
         continue;
       }
-      FailureOr<Value> clonedOperand = clone(operand);
+      FailureOr<Value> clonedOperand = clone(operand, dimensions);
       if (failed(clonedOperand)) {
         return failure();
       }
       mapping.map(operand, *clonedOperand);
     }
     Operation *cloned = builder.clone(*op, mapping);
+    builder.modifyOpInPlace(cloned, [&] {
+      for (auto [original, result] :
+           llvm::zip(op->getResults(), cloned->getResults())) {
+        if (auto type = dyn_cast<RankedTensorType>(original.getType())) {
+          result.setType(RankedTensorType::get(shape, type.getElementType()));
+        }
+      }
+    });
     for (auto [original, result] :
          llvm::zip(op->getResults(), cloned->getResults())) {
-      if (auto type = dyn_cast<RankedTensorType>(original.getType())) {
-        result.setType(RankedTensorType::get(tileShape, type.getElementType()));
-      }
-      cache[original] = result;
+      cache[{original, key.second}] = result;
     }
-    return cache.lookup(value);
+    return cache.lookup(key);
   }
 
-private:
   ArrayRef<int64_t> tileShape;
   const DenseMap<unsigned, Value> &contractingCoordinates;
   TilePaddingAttr loadPadding;
-  OpBuilder &builder;
-  DenseMap<Value, Value> cache;
+  RewriterBase &builder;
+  DenseMap<std::pair<Value, Attribute>, Value> cache;
 };
+} // namespace
 
 /// Recursively collect all producer operations upstream of a value up to LoadOps.
 static void collectProducerOps(Value value, SmallVectorImpl<Operation *> &ops,
@@ -742,15 +842,15 @@ static void collectProducerOps(Value value, SmallVectorImpl<Operation *> &ops,
 
 /// Erase upstream producer operations that have become dead after their
 /// strip-mined counterparts were cloned inside contraction loops.
-static void eraseDeadProducerOps(ValueRange values) {
+static void eraseDeadProducerOps(RewriterBase &rewriter, ValueRange values) {
   DenseSet<Operation *> seen;
   SmallVector<Operation *> producerOps;
   for (Value value : values) {
     collectProducerOps(value, producerOps, seen);
   }
   for (Operation *op : llvm::reverse(producerOps)) {
-    if (op->use_empty()) {
-      op->erase();
+    if (mlir::isOpTriviallyDead(op)) {
+      rewriter.eraseOp(op);
     }
   }
 }
@@ -783,7 +883,7 @@ static bool hasNestedContraction(Value value, DenseSet<Operation *> &seen) {
 /// types, and maps the terminator yields to updated accumulator tiles.
 static FailureOr<SmallVector<Value>>
 liftReductionBody(ReduceUDOp reduce, ValueRange accumulators, ValueRange tiles,
-                  ArrayRef<int64_t> tileShape, OpBuilder &builder) {
+                  ArrayRef<int64_t> tileShape, RewriterBase &builder) {
   Block &body = reduce.getBodyRegion().front();
   size_t inputCount = reduce.getNumOperands();
   if (body.getNumArguments() != inputCount * 2 ||
@@ -817,6 +917,62 @@ liftReductionBody(ReduceUDOp reduce, ValueRange accumulators, ValueRange tiles,
     }
   }
 
+  auto liftConstant = [&](arith::ConstantOp constant) -> LogicalResult {
+    if (!constant.getType().isIntOrFloat()) {
+      return constant.emitError(
+          "strip mining requires an integer or floating-point constant");
+    }
+    auto type = RankedTensorType::get(tileShape, constant.getType());
+    auto value = cast<TypedAttr>(
+        DenseElementsAttr::get(type, ArrayRef<Attribute>{constant.getValue()}));
+    auto tensorConstant =
+        arith::ConstantOp::create(builder, constant.getLoc(), type, value);
+    builder.modifyOpInPlace(tensorConstant, [&] {
+      tensorConstant->setAttr("nv_tensor_ir.strip_mined_reduction_body",
+                              builder.getUnitAttr());
+    });
+    mapping.map(constant.getResult(), tensorConstant);
+    return success();
+  };
+
+  // The body may capture scalars, including constants hoisted by canonicalize.
+  // Map these before cloning so every operand (including yields) is tile-shaped.
+  llvm::SetVector<Value> captures;
+  getUsedValuesDefinedAbove(reduce.getBodyRegion(), captures);
+  for (Value capture : captures) {
+    if (auto constant = capture.getDefiningOp<arith::ConstantOp>()) {
+      if (failed(liftConstant(constant))) {
+        return failure();
+      }
+      continue;
+    }
+    Type elementType = capture.getType();
+    if (!elementType.isIntOrFloat()) {
+      return reduce.emitError(
+          "strip mining requires integer or floating-point captures");
+    }
+    auto liftedType = RankedTensorType::get(tileShape, elementType);
+    Value scalar = capture;
+    // TensorIR integer tensors use explicit signedness, unlike scalar arith.
+    if (auto integer = dyn_cast<IntegerType>(elementType);
+        integer && integer.isSignless() && integer.getWidth() != 1) {
+      elementType = IntegerType::get(builder.getContext(), integer.getWidth(),
+                                     IntegerType::Signed);
+      scalar = UnrealizedConversionCastOp::create(
+                   builder, reduce.getLoc(), TypeRange{elementType}, scalar)
+                   .getResult(0);
+    }
+    Value tensor = SplatOp::create(
+        builder, reduce.getLoc(), RankedTensorType::get(tileShape, elementType),
+        scalar, ValueRange{});
+    if (tensor.getType() != liftedType) {
+      tensor = UnrealizedConversionCastOp::create(builder, reduce.getLoc(),
+                                                  TypeRange{liftedType}, tensor)
+                   .getResult(0);
+    }
+    mapping.map(capture, tensor);
+  }
+
   for (Operation &operation : body.without_terminator()) {
     if (operation.getDialect() !=
             builder.getContext()->getLoadedDialect<arith::ArithDialect>() ||
@@ -826,18 +982,9 @@ liftReductionBody(ReduceUDOp reduce, ValueRange accumulators, ValueRange tiles,
           "user-defined reduction body");
     }
     if (auto constant = dyn_cast<arith::ConstantOp>(operation)) {
-      if (!constant.getType().isIntOrFloat()) {
-        return constant.emitError(
-            "strip mining requires an integer or floating-point constant");
+      if (failed(liftConstant(constant))) {
+        return failure();
       }
-      auto type = RankedTensorType::get(tileShape, constant.getType());
-      auto value = cast<TypedAttr>(DenseElementsAttr::get(
-          type, ArrayRef<Attribute>{constant.getValue()}));
-      auto tensorConstant =
-          arith::ConstantOp::create(builder, constant.getLoc(), type, value);
-      tensorConstant->setAttr("nv_tensor_ir.strip_mined_reduction_body",
-                              builder.getUnitAttr());
-      mapping.map(constant.getResult(), tensorConstant);
       continue;
     }
     if (operation.getNumResults() != 1 ||
@@ -846,10 +993,12 @@ liftReductionBody(ReduceUDOp reduce, ValueRange accumulators, ValueRange tiles,
           "strip mining requires single-result scalar arithmetic");
     }
     Operation *clone = builder.clone(operation, mapping);
-    clone->setAttr("nv_tensor_ir.strip_mined_reduction_body",
-                   builder.getUnitAttr());
-    clone->getResult(0).setType(
-        RankedTensorType::get(tileShape, operation.getResult(0).getType()));
+    builder.modifyOpInPlace(clone, [&] {
+      clone->setAttr("nv_tensor_ir.strip_mined_reduction_body",
+                     builder.getUnitAttr());
+      clone->getResult(0).setType(
+          RankedTensorType::get(tileShape, operation.getResult(0).getType()));
+    });
     mapping.map(operation.getResult(0), clone->getResult(0));
   }
 
@@ -881,8 +1030,14 @@ liftReductionBody(ReduceUDOp reduce, ValueRange accumulators, ValueRange tiles,
 /// 5. Clone producer DAG with shrunken tile shape and loop induction variables.
 /// 6. Apply prologue (abs, square, zero-filtering) and accumulation step.
 /// 7. Wire yields, clean up dead producers, and apply epilogue (avg, norm2).
-static LogicalResult stripMineReduction(ReduceOp reduce,
+static LogicalResult stripMineReduction(RewriterBase &builder, ReduceOp reduce,
                                         int64_t reductionTileSize) {
+  if (reduce->hasAttr("nv_tensor_ir.scan_slice_reduction")) {
+    builder.modifyOpInPlace(reduce, [&] {
+      reduce->removeAttr("nv_tensor_ir.scan_slice_reduction");
+    });
+    return success();
+  }
   // 1. Plan strip-mining and check whether contraction fits in a single tile.
   auto inputType = cast<RankedTensorType>(reduce.getInput().getType());
   SmallVector<int32_t> dimensions(reduce.getDimensions().begin(),
@@ -914,7 +1069,7 @@ static LogicalResult stripMineReduction(ReduceOp reduce,
   }
 
   // 2. Initialize the partial accumulator tile with the reduction identity.
-  OpBuilder builder(reduce);
+  builder.setInsertionPoint(reduce);
   Location loc = reduce.getLoc();
   ArrayRef<int64_t> tileShape = plan.operandTileShape;
   auto tileType = RankedTensorType::get(tileShape, inputType.getElementType());
@@ -953,8 +1108,9 @@ static LogicalResult stripMineReduction(ReduceOp reduce,
 
   Value oldInput = reduce.getInput();
   if (loopNest.loops.empty()) {
-    reduce.getInputMutable().assign(*tile);
-    eraseDeadProducerOps(ValueRange{oldInput});
+    builder.modifyOpInPlace(reduce,
+                            [&] { reduce.getInputMutable().assign(*tile); });
+    eraseDeadProducerOps(builder, ValueRange{oldInput});
     return success();
   }
 
@@ -962,8 +1118,10 @@ static LogicalResult stripMineReduction(ReduceOp reduce,
   Value reductionTile =
       createReductionPrologue(builder, loc, reduce.getReductionMode(), *tile);
   if (reductionTile != *tile) {
-    reduce->setAttr("nv_tensor_ir.reduction_prologue_applied",
-                    builder.getUnitAttr());
+    builder.modifyOpInPlace(reduce, [&] {
+      reduce->setAttr("nv_tensor_ir.reduction_prologue_applied",
+                      builder.getUnitAttr());
+    });
   }
   Value combined =
       createAccumulatorStep(builder, loc, reduce.getReductionMode(),
@@ -971,10 +1129,12 @@ static LogicalResult stripMineReduction(ReduceOp reduce,
   if (!combined) {
     return reduce.emitError("unsupported reduction accumulation mode");
   }
-  setContractionLoopYields(loopNest.loops, combined);
+  setContractionLoopYields(builder, loopNest.loops, combined);
 
-  reduce.getInputMutable().assign(loopNest.loops.front().getResult(0));
-  eraseDeadProducerOps(ValueRange{oldInput});
+  builder.modifyOpInPlace(reduce, [&] {
+    reduce.getInputMutable().assign(loopNest.loops.front().getResult(0));
+  });
+  eraseDeadProducerOps(builder, ValueRange{oldInput});
 
   // 6. Handle degenerate local reductions or apply normalization epilogues.
   bool hasDegenerateLocalReduction = llvm::all_of(
@@ -991,14 +1151,15 @@ static LogicalResult stripMineReduction(ReduceOp reduce,
                    builder, loc, TypeRange{reduce.getType()}, result)
                    .getResult(0);
     }
-    reduce.replaceAllUsesWith(result);
-    reduce.erase();
+    builder.replaceOp(reduce, result);
   } else if (reduce.getReductionMode() == ReductionMode::avg) {
-    reduce.setReductionMode(ReductionMode::add);
+    builder.modifyOpInPlace(
+        reduce, [&] { reduce.setReductionMode(ReductionMode::add); });
     builder.setInsertionPointAfter(reduce);
     Value result = createDegenerateReductionEpilogue(
         builder, loc, ReductionMode::avg, reduce.getResult(), reductionSize);
-    reduce.getResult().replaceAllUsesExcept(result, result.getDefiningOp());
+    builder.replaceAllUsesExcept(reduce.getResult(), result,
+                                 result.getDefiningOp());
   }
   return success();
 }
@@ -1010,7 +1171,8 @@ static LogicalResult stripMineReduction(ReduceOp reduce,
 /// 4. Clone producer DAGs for all inputs with shrunken tile shapes.
 /// 5. Lift the user-defined reduction body from scalar arithmetic to tensor tiles.
 /// 6. Wire yields, update reduce inputs, and clean up dead producers.
-static LogicalResult stripMineReduction(ReduceUDOp reduce,
+static LogicalResult stripMineReduction(RewriterBase &builder,
+                                        ReduceUDOp reduce,
                                         int64_t reductionTileSize) {
   // 1. Plan strip-mining and check whether contraction fits in a single tile.
   if (reduce.getInputs().empty()) {
@@ -1038,7 +1200,7 @@ static LogicalResult stripMineReduction(ReduceUDOp reduce,
   }
 
   // 2. Initialize partial accumulators for each input using its identity.
-  OpBuilder builder(reduce);
+  builder.setInsertionPoint(reduce);
   Location loc = reduce.getLoc();
   ArrayRef<int64_t> tileShape = plan.operandTileShape;
 
@@ -1090,8 +1252,9 @@ static LogicalResult stripMineReduction(ReduceUDOp reduce,
 
   SmallVector<Value> oldInputs(reduce.getInputs());
   if (loopNest.loops.empty()) {
-    reduce.getInputsMutable().assign(tiles);
-    eraseDeadProducerOps(oldInputs);
+    builder.modifyOpInPlace(reduce,
+                            [&] { reduce.getInputsMutable().assign(tiles); });
+    eraseDeadProducerOps(builder, oldInputs);
     return success();
   }
 
@@ -1101,11 +1264,13 @@ static LogicalResult stripMineReduction(ReduceUDOp reduce,
   if (failed(combined)) {
     return failure();
   }
-  setContractionLoopYields(loopNest.loops, *combined);
+  setContractionLoopYields(builder, loopNest.loops, *combined);
 
   // 6. Wire yields through loop nest and clean up dead producers.
-  reduce.getInputsMutable().assign(loopNest.loops.front().getResults());
-  eraseDeadProducerOps(oldInputs);
+  builder.modifyOpInPlace(reduce, [&] {
+    reduce.getInputsMutable().assign(loopNest.loops.front().getResults());
+  });
+  eraseDeadProducerOps(builder, oldInputs);
   return success();
 }
 
@@ -1118,15 +1283,21 @@ static DenseI64ArrayAttr getMatmulArray(MatmulOp matmul, StringRef name) {
 ///
 /// Once strip-mining has formed explicit contraction loops and shapes, these
 /// temporary annotations are dead and must be removed before downstream conversion.
-static void removeMatmulFormationAttrs(MatmulOp matmul) {
-  matmul->removeAttr("nv_tensor_ir.contraction_shape");
-  matmul->removeAttr("nv_tensor_ir.lhs_source_shape");
-  matmul->removeAttr("nv_tensor_ir.rhs_source_shape");
-  matmul->removeAttr("nv_tensor_ir.lhs_contracting_dimensions");
-  matmul->removeAttr("nv_tensor_ir.rhs_contracting_dimensions");
+static void removeMatmulFormationAttrs(RewriterBase &rewriter,
+                                       MatmulOp matmul) {
+  rewriter.modifyOpInPlace(matmul, [&] {
+    matmul->removeAttr("nv_tensor_ir.contraction_shape");
+    matmul->removeAttr("nv_tensor_ir.lhs_source_shape");
+    matmul->removeAttr("nv_tensor_ir.rhs_source_shape");
+    matmul->removeAttr("nv_tensor_ir.lhs_contracting_dimensions");
+    matmul->removeAttr("nv_tensor_ir.rhs_contracting_dimensions");
+  });
   for (Value operand : {matmul.getA(), matmul.getB()}) {
-    if (Operation *producer = operand.getDefiningOp()) {
-      producer->removeAttr("nv_tensor_ir.matmul_input_reshape");
+    Operation *producer = operand.getDefiningOp();
+    if (producer && producer->hasAttr("nv_tensor_ir.matmul_input_reshape")) {
+      rewriter.modifyOpInPlace(producer, [&] {
+        producer->removeAttr("nv_tensor_ir.matmul_input_reshape");
+      });
     }
   }
 }
@@ -1142,7 +1313,7 @@ static void removeMatmulFormationAttrs(MatmulOp matmul) {
 /// 7. Apply padding masks if load padding is not neutral.
 /// 8. Reshape LHS/RHS to canonical MMA shapes ([..., tileK] and [..., tileK, N]).
 /// 9. Emit inner MatmulOp with carried accumulator, wire yields, and replace original.
-static LogicalResult stripMineMatmul(MatmulOp matmul,
+static LogicalResult stripMineMatmul(RewriterBase &builder, MatmulOp matmul,
                                      int64_t contractionTileSize) {
   // 1. Unpack and validate matmul formation metadata.
   DenseI64ArrayAttr contractionShapeAttr =
@@ -1173,7 +1344,7 @@ static LogicalResult stripMineMatmul(MatmulOp matmul,
   SmallVector<int64_t> contractionTileShape =
       calculateReductionTileShape(contractionShape, contractionTileSize);
   if (contractionTileShape == contractionShape) {
-    removeMatmulFormationAttrs(matmul);
+    removeMatmulFormationAttrs(builder, matmul);
     return success();
   }
 
@@ -1208,7 +1379,7 @@ static LogicalResult stripMineMatmul(MatmulOp matmul,
   Value rhsSource = unwrapFormationReshape(matmul.getB());
 
   // 4. Initialize result accumulator tensor with zeros.
-  OpBuilder builder(matmul);
+  builder.setInsertionPoint(matmul);
   Location loc = matmul.getLoc();
   TilePaddingAttr lhsLoadPadding;
   if (isLoadPaddingNeutral(lhsSource)) {
@@ -1315,22 +1486,23 @@ static LogicalResult stripMineMatmul(MatmulOp matmul,
   Value oldLhs = matmul.getA();
   Value oldRhs = matmul.getB();
   if (loopNest.loops.empty()) {
-    matmul->setOperand(0, localLhs);
-    matmul->setOperand(1, localRhs);
-    removeMatmulFormationAttrs(matmul);
-    eraseDeadProducerOps(ValueRange{oldLhs, oldRhs});
+    builder.modifyOpInPlace(matmul, [&] {
+      matmul->setOperand(0, localLhs);
+      matmul->setOperand(1, localRhs);
+    });
+    removeMatmulFormationAttrs(builder, matmul);
+    eraseDeadProducerOps(builder, ValueRange{oldLhs, oldRhs});
     return success();
   }
 
   Value localResult =
       MatmulOp::create(builder, loc, resultType, localLhs, localRhs, carried);
-  setContractionLoopYields(loopNest.loops, localResult);
+  setContractionLoopYields(builder, loopNest.loops, localResult);
 
   // 9. Wire yields and replace original MatmulOp.
   Value result = loopNest.loops.front().getResult(0);
-  matmul.replaceAllUsesWith(result);
-  matmul.erase();
-  eraseDeadProducerOps(ValueRange{oldLhs, oldRhs});
+  builder.replaceOp(matmul, result);
+  eraseDeadProducerOps(builder, ValueRange{oldLhs, oldRhs});
   return success();
 }
 
@@ -1348,7 +1520,8 @@ static LogicalResult stripMineMatmul(MatmulOp matmul,
 /// Dynamic persistence intentionally remains on the legacy no-op path; static
 /// persistence is useful even when the logical grid extent is only known at
 /// runtime.
-static LogicalResult formStaticPersistence(func::FuncOp function,
+static LogicalResult formStaticPersistence(RewriterBase &builder,
+                                           func::FuncOp function,
                                            int64_t smCount, int64_t occupancy) {
   // 1. Verify static persistent grid limit does not overflow 32-bit index.
   int64_t persistentGridLimit;
@@ -1368,7 +1541,7 @@ static LogicalResult formStaticPersistence(func::FuncOp function,
           "static persistence requires a rank-one destination-free forall");
     }
 
-    OpBuilder outerBuilder(forallOp);
+    builder.setInsertionPoint(forallOp);
     Location loc = forallOp.getLoc();
     OpFoldResult mixedTotalTiles = forallOp.getMixedUpperBound().front();
     Value totalTiles;
@@ -1380,19 +1553,20 @@ static LogicalResult formStaticPersistence(func::FuncOp function,
       }
       int64_t grid = std::max<int64_t>(1, persistentGridLimit);
       totalTiles =
-          arith::ConstantIndexOp::create(outerBuilder, loc, total).getResult();
-      gridSize =
-          arith::ConstantIndexOp::create(outerBuilder, loc, grid).getResult();
-      forallOp.setStaticUpperBound({grid});
+          arith::ConstantIndexOp::create(builder, loc, total).getResult();
+      gridSize = arith::ConstantIndexOp::create(builder, loc, grid).getResult();
+      builder.modifyOpInPlace(forallOp,
+                              [&] { forallOp.setStaticUpperBound({grid}); });
     } else {
       totalTiles = mixedTotalTiles.dyn_cast<Value>();
-      Value limit = arith::ConstantIndexOp::create(outerBuilder, loc,
-                                                   persistentGridLimit);
-      Value one = arith::ConstantIndexOp::create(outerBuilder, loc, 1);
-      Value bounded =
-          arith::MinUIOp::create(outerBuilder, loc, totalTiles, limit);
-      gridSize = arith::MaxUIOp::create(outerBuilder, loc, bounded, one);
-      forallOp.getDynamicUpperBoundMutable().assign(gridSize);
+      Value limit =
+          arith::ConstantIndexOp::create(builder, loc, persistentGridLimit);
+      Value one = arith::ConstantIndexOp::create(builder, loc, 1);
+      Value bounded = arith::MinUIOp::create(builder, loc, totalTiles, limit);
+      gridSize = arith::MaxUIOp::create(builder, loc, bounded, one);
+      builder.modifyOpInPlace(forallOp, [&] {
+        forallOp.getDynamicUpperBoundMutable().assign(gridSize);
+      });
     }
 
     // 3. Wrap the per-tile computation in a grid-stride scf.for loop.
@@ -1401,24 +1575,25 @@ static LogicalResult formStaticPersistence(func::FuncOp function,
     for (Operation &op : body->without_terminator()) {
       bodyOps.push_back(&op);
     }
-    OpBuilder bodyBuilder = OpBuilder::atBlockBegin(body);
+    builder.setInsertionPointToStart(body);
     auto serialLoop = scf::ForOp::create(
-        bodyBuilder, loc, forallOp.getInductionVar(0), totalTiles, gridSize);
+        builder, loc, forallOp.getInductionVar(0), totalTiles, gridSize);
     Operation *serialTerminator = serialLoop.getBody()->getTerminator();
     for (Operation *op : bodyOps) {
-      op->moveBefore(serialTerminator);
+      builder.moveOpBefore(op, serialTerminator);
     }
-    forallOp.getInductionVar(0).replaceUsesWithIf(
-        serialLoop.getInductionVar(), [&](OpOperand &use) {
+    builder.replaceUsesWithIf(
+        forallOp.getInductionVar(0), serialLoop.getInductionVar(),
+        [&](OpOperand &use) {
           return serialLoop->isProperAncestor(use.getOwner());
         });
   }
   return success();
 }
 
+namespace {
 struct TileReductionsPass
-    : public impl::TileReductionsPassBase<TileReductionsPass> {
-  using Base = impl::TileReductionsPassBase<TileReductionsPass>;
+    : public nv_tensor_ir::impl::TileReductionsPassBase<TileReductionsPass> {
   using Base::Base;
 
   void runOnOperation() override {
@@ -1431,15 +1606,18 @@ struct TileReductionsPass
       signalPassFailure();
       return;
     }
-    if (persistence != "none" && persistence != "static" &&
-        persistence != "dynamic") {
+
+    std::optional<PersistenceMode> persitenceMode =
+        symbolizePersistenceMode(::llvm::StringRef(persistence));
+    if (!persitenceMode) {
       getOperation().emitError()
-          << "persistence must be none, static, or dynamic, got '"
-          << persistence << "'";
+          << "invalid persistence mode '" << persistence << "'";
       signalPassFailure();
       return;
     }
-    if (occupancy < 1 || (persistence == "static" && sm_count < 1)) {
+
+    if (occupancy < 1 ||
+        (*persitenceMode == PersistenceMode::Static && sm_count < 1)) {
       getOperation().emitError(
           "static persistence requires sm-count >= 1 and occupancy >= 1");
       signalPassFailure();
@@ -1454,32 +1632,33 @@ struct TileReductionsPass
     getOperation().walk(
         [&](ReduceUDOp reduce) { userDefinedReductions.push_back(reduce); });
     getOperation().walk([&](MatmulOp matmul) { matmuls.push_back(matmul); });
+    IRRewriter rewriter(&getContext());
     for (ReduceOp reduce : reductions) {
-      if (failed(stripMineReduction(reduce, reduction_tile_size))) {
+      if (failed(stripMineReduction(rewriter, reduce, reduction_tile_size))) {
         signalPassFailure();
         return;
       }
     }
     for (ReduceUDOp reduce : userDefinedReductions) {
-      if (failed(stripMineReduction(reduce, reduction_tile_size))) {
+      if (failed(stripMineReduction(rewriter, reduce, reduction_tile_size))) {
         signalPassFailure();
         return;
       }
     }
     for (MatmulOp matmul : matmuls) {
-      if (failed(stripMineMatmul(matmul, reduction_tile_size))) {
+      if (failed(stripMineMatmul(rewriter, matmul, reduction_tile_size))) {
         signalPassFailure();
         return;
       }
     }
 
     // 3. Apply static persistence to limit the launch grid and serialize tiles.
-    if (persistence == "static" &&
-        failed(formStaticPersistence(getOperation(), sm_count, occupancy))) {
+    if (*persitenceMode == PersistenceMode::Static &&
+        failed(formStaticPersistence(rewriter, getOperation(), sm_count,
+                                     occupancy))) {
       signalPassFailure();
     }
   }
 };
 
 } // namespace
-} // namespace mlir::nv_tensor_ir

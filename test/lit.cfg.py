@@ -5,6 +5,7 @@
 
 import importlib.util
 import os
+import shutil
 
 import lit.formats
 import lit.util
@@ -134,8 +135,19 @@ tools = [
     "FileCheck",
     "not",
     "split-file",
+    "mlir-runner",
+    add_runtime("mlir_c_runner_utils"),
     ToolSubst("%PYTHON", config.python_executable, unresolved="ignore"),
 ]
+
+cuda_tile_translate = None
+if config.cuda_tile_tools_dir:
+    cuda_tile_translate = shutil.which(
+        os.path.abspath(os.path.join(config.cuda_tile_tools_dir, "cuda-tile-translate"))
+    )
+if cuda_tile_translate:
+    config.available_features.add("cuda-tile-translate")
+    tools.append(ToolSubst("cuda-tile-translate", cuda_tile_translate))
 
 
 

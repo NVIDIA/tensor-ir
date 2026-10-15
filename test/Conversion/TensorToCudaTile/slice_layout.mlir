@@ -8,10 +8,8 @@ nv_tensor_ir.graph @slice_reshape_row_major_output(
     attributes {tile_size = array<i32: 2, 16>} {
   // Slice offsets use the pipeline's i32 index type.
   // CHECK: %[[C768:.+]] = constant <i32: 768> : tile<i32>
-  // CHECK: %[[C8:.+]] = constant <i32: 8> : tile<i32>
-  // CHECK: %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
-  // CHECK: %[[COORD0:.+]] = remi %[[BID_X]], %[[C8]] unsigned : tile<i32>
-  // CHECK: %[[COORD1:.+]] = divi %[[BID_X]], %[[C8]] unsigned : tile<i32>
+  // CHECK: %[[COORD1:.+]] = constant <i32: 0> : tile<i32>
+  // CHECK: %[[COORD0:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
   // CHECK: %[[PTR:.+]] = offset %[[ARG0]], %[[C768]] : tile<ptr<f32>>, tile<i32> -> tile<ptr<f32>>
   // CHECK: %[[VIN:.+]] = make_tensor_view %[[PTR]], shape = [16, 16], strides = [1, 16] : tensor_view<16x16xf32, strides=[1,16]>
   // CHECK: %[[PIN:.+]] = make_partition_view %[[VIN]] : partition_view<tile=(2x16), tensor_view<16x16xf32, strides=[1,16]>>
@@ -34,8 +32,8 @@ nv_tensor_ir.graph @slice_reshape_col_major_output(
     -> (tensor<16x16xf32> {nv_tensor_ir.stride = "(1,16)"})
     attributes {tile_size = array<i32: 16, 2>} {
   // Slice offsets use the pipeline's i32 index type.
-  // CHECK: %[[C768:.+]] = constant <i32: 768> : tile<i32>
-  // CHECK: %[[C0:.+]] = constant <i32: 0> : tile<i32>
+  // CHECK-DAG: %[[C768:.+]] = constant <i32: 768> : tile<i32>
+  // CHECK-DAG: %[[C0:.+]] = constant <i32: 0> : tile<i32>
   // CHECK: %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
   // CHECK: %[[PTR:.+]] = offset %[[ARG0]], %[[C768]] : tile<ptr<f32>>, tile<i32> -> tile<ptr<f32>>
   // CHECK: %[[VIN:.+]] = make_tensor_view %[[PTR]], shape = [16, 16], strides = [1, 16] : tensor_view<16x16xf32, strides=[1,16]>
@@ -54,8 +52,8 @@ nv_tensor_ir.graph @slice_reshape_col_major_output(
 
 // CHECK-LABEL: entry @reshape_slice
 // CHECK-SAME: (%[[ARG0:.+]]: tile<ptr<f32>>, %[[OUT:.+]]: tile<ptr<f32>>)
-// CHECK: %[[C528:.+]] = constant <i32: 528> : tile<i32>
-// CHECK: %[[C0:.+]] = constant <i32: 0> : tile<i32>
+// CHECK-DAG: %[[C528:.+]] = constant <i32: 528> : tile<i32>
+// CHECK-DAG: %[[C0:.+]] = constant <i32: 0> : tile<i32>
 // CHECK: %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
 // CHECK: %[[PTR:.+]] = offset %[[ARG0]], %[[C528]] : tile<ptr<f32>>, tile<i32> -> tile<ptr<f32>>
 // CHECK: %[[VIN:.+]] = make_tensor_view %[[PTR]], shape = [16, 16], strides = [1, 32] : tensor_view<16x16xf32, strides=[1,32]>
@@ -82,13 +80,13 @@ module {
 // CHECK-LABEL: entry @slice_reshape_slice
 // CHECK-SAME: (%[[ARG0:.+]]: tile<ptr<f32>>, %[[OUT:.+]]: tile<ptr<f32>>)
 // CHECK: %[[C0:.+]] = constant <i32: 0> : tile<i32>
-// CHECK: %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
+// CHECK-NOT: get_tile_block_id
 // CHECK: %[[VIN:.+]] = make_tensor_view %[[ARG0]], shape = [8, 8], strides = [1, 16] : tensor_view<8x8xf32, strides=[1,16]>
 // CHECK: %[[PIN:.+]] = make_partition_view %[[VIN]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[1,16]>>
-// CHECK: %[[TILE:.+]], %{{.*}} = load_view_tko weak %[[PIN]][%[[C0]], %[[BID_X]]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[1,16]>>, tile<i32> -> tile<8x8xf32>, token
+// CHECK: %[[TILE:.+]], %{{.*}} = load_view_tko weak %[[PIN]][%[[C0]], %[[C0]]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[1,16]>>, tile<i32> -> tile<8x8xf32>, token
 // CHECK: %[[VOUT:.+]] = make_tensor_view %[[OUT]], shape = [8, 8], strides = [8, 1] : tensor_view<8x8xf32, strides=[8,1]>
 // CHECK: %[[POUT:.+]] = make_partition_view %[[VOUT]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[8,1]>>
-// CHECK: store_view_tko weak %[[TILE]], %[[POUT]][%[[C0]], %[[BID_X]]] : tile<8x8xf32>, partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[8,1]>>, tile<i32> -> token
+// CHECK: store_view_tko weak %[[TILE]], %[[POUT]][%[[C0]], %[[C0]]] : tile<8x8xf32>, partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[8,1]>>, tile<i32> -> token
 
 module {
   nv_tensor_ir.graph @slice_reshape_slice(
@@ -107,16 +105,16 @@ module {
 
 // CHECK-LABEL: entry @slice_transpose_slice
 // CHECK-SAME: (%[[ARG0:.+]]: tile<ptr<f32>>, %[[OUT:.+]]: tile<ptr<f32>>)
-// CHECK: %[[C256:.+]] = constant <i32: 256> : tile<i32>
-// CHECK: %[[C0:.+]] = constant <i32: 0> : tile<i32>
-// CHECK: %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
+// CHECK-DAG: %[[C256:.+]] = constant <i32: 256> : tile<i32>
+// CHECK-DAG: %[[C0:.+]] = constant <i32: 0> : tile<i32>
+// CHECK-NOT: get_tile_block_id
 // CHECK: %[[PTR:.+]] = offset %[[ARG0]], %[[C256]] : tile<ptr<f32>>, tile<i32> -> tile<ptr<f32>>
 // CHECK: %[[VIN:.+]] = make_tensor_view %[[PTR]], shape = [8, 8], strides = [1, 32] : tensor_view<8x8xf32, strides=[1,32]>
 // CHECK: %[[PIN:.+]] = make_partition_view %[[VIN]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[1,32]>>
-// CHECK: %[[TILE:.+]], %{{.*}} = load_view_tko weak %[[PIN]][%[[C0]], %[[BID_X]]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[1,32]>>, tile<i32> -> tile<8x8xf32>, token
+// CHECK: %[[TILE:.+]], %{{.*}} = load_view_tko weak %[[PIN]][%[[C0]], %[[C0]]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[1,32]>>, tile<i32> -> tile<8x8xf32>, token
 // CHECK: %[[VOUT:.+]] = make_tensor_view %[[OUT]], shape = [8, 8], strides = [8, 1] : tensor_view<8x8xf32, strides=[8,1]>
 // CHECK: %[[POUT:.+]] = make_partition_view %[[VOUT]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[8,1]>>
-// CHECK: store_view_tko weak %[[TILE]], %[[POUT]][%[[C0]], %[[BID_X]]] : tile<8x8xf32>, partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[8,1]>>, tile<i32> -> token
+// CHECK: store_view_tko weak %[[TILE]], %[[POUT]][%[[C0]], %[[C0]]] : tile<8x8xf32>, partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[8,1]>>, tile<i32> -> token
 
 module {
   nv_tensor_ir.graph @slice_transpose_slice(
@@ -134,17 +132,17 @@ module {
 
 // CHECK-LABEL: entry @pw_slice_pw_transpose_reshape_pw_slice
 // CHECK-SAME: (%[[ARG0:.+]]: tile<ptr<f32>>, %[[OUT:.+]]: tile<ptr<f32>>)
-// CHECK: %[[C0:.+]] = constant <i32: 0> : tile<i32>
-// CHECK: %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
+// CHECK-DAG: %[[C0:.+]] = constant <i32: 0> : tile<i32>
+// CHECK-NOT: get_tile_block_id
 // CHECK: %[[VIN:.+]] = make_tensor_view %[[ARG0]], shape = [8, 8], strides = [32, 2] : tensor_view<8x8xf32, strides=[32,2]>
 // CHECK: %[[PIN:.+]] = make_partition_view %[[VIN]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[32,2]>>
-// CHECK: %[[TILE:.+]], %{{.*}} = load_view_tko weak %[[PIN]][%[[C0]], %[[BID_X]]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[32,2]>>, tile<i32> -> tile<8x8xf32>, token
+// CHECK: %[[TILE:.+]], %{{.*}} = load_view_tko weak %[[PIN]][%[[C0]], %[[C0]]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[32,2]>>, tile<i32> -> tile<8x8xf32>, token
 // CHECK: %[[ADD:.+]] = addf %[[TILE]], %[[TILE]] : tile<8x8xf32>
 // CHECK: %[[MUL:.+]] = mulf %[[ADD]], %[[ADD]] : tile<8x8xf32>
 // CHECK: %[[ABS:.+]] = absf %[[MUL]] : tile<8x8xf32>
 // CHECK: %[[VOUT:.+]] = make_tensor_view %[[OUT]], shape = [8, 8], strides = [8, 1] : tensor_view<8x8xf32, strides=[8,1]>
 // CHECK: %[[POUT:.+]] = make_partition_view %[[VOUT]] : partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[8,1]>>
-// CHECK: store_view_tko weak %[[ABS]], %[[POUT]][%[[C0]], %[[BID_X]]] : tile<8x8xf32>, partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[8,1]>>, tile<i32> -> token
+// CHECK: store_view_tko weak %[[ABS]], %[[POUT]][%[[C0]], %[[C0]]] : tile<8x8xf32>, partition_view<tile=(8x8), tensor_view<8x8xf32, strides=[8,1]>>, tile<i32> -> token
 
 module {
   nv_tensor_ir.graph @pw_slice_pw_transpose_reshape_pw_slice(

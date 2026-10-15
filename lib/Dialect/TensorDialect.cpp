@@ -48,6 +48,26 @@ tcutegen::Shape getShapeRef(RankedTensorType tensorType) {
 
 } // namespace mlir::nv_tensor_ir
 
+LogicalResult TensorIRDialect::verifyOperationAttribute(Operation *op,
+                                                        NamedAttribute attr) {
+  StringRef name = attr.getName().strref();
+  if (name == getKernelOrdinalAttrName()) {
+    bool isDeviceFunction = isa<FunctionOpInterface>(op);
+    if (!isa<gpu::LaunchFuncOp>(op) && !isDeviceFunction) {
+      return op->emitOpError(
+          "\"" + getKernelOrdinalAttrName() +
+          "\" attribute is only supported on function-like operations");
+    }
+    auto ordinal = dyn_cast<IntegerAttr>(attr.getValue());
+    if (!ordinal || !ordinal.getType().isSignlessInteger(32) ||
+        ordinal.getInt() < 0) {
+      return op->emitOpError("expects kernel_ordinal to be a nonnegative i32");
+    }
+    return success();
+  }
+  return success();
+}
+
 static LogicalResult verifyTensorSignatureAttribute(Operation *op, Type type,
                                                     NamedAttribute attr,
                                                     bool isInput) {
@@ -159,7 +179,8 @@ static LogicalResult verifyTensorSignatureAttribute(Operation *op, Type type,
   }
 
   if (attrName == TensorIRDialect::getAllowTMAAttrName()) {
-    if (failed(requireTensorType())) {
+    // Memref arguments in bufferized functions also carry allow_tma attributes.
+    if (!isa<MemRefType>(type) && failed(requireTensorType())) {
       return failure();
     }
     if (!isa<BoolAttr>(attr.getValue())) {
@@ -201,6 +222,14 @@ static LogicalResult verifyTensorSignatureAttribute(Operation *op, Type type,
       return op->emitOpError() << "expects iter_space_dim_domains is "
                                   "`IterSpaceDimDomainsAttr`, but got "
                                << attr.getValue();
+    }
+    return success();
+  }
+
+  if (attrName == TensorIRDialect::getRuntimeContextAttrName()) {
+    if (!isInput || !isa<UnitAttr>(attr.getValue())) {
+      return op->emitOpError()
+             << "expects runtime_context to be a unit attribute on an argument";
     }
     return success();
   }

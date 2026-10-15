@@ -4,7 +4,7 @@
 // Reductions with small contracting dimension (no loop)
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_add_small
+// CHECK-LABEL: entry @test_reduce_add_small
 // CHECK-SAME: (%[[RED_IN_PTR:.+]]: tile<ptr<f32>>, %[[RED_OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[0.000000e+00 : f32]
@@ -26,7 +26,7 @@ nv_tensor_ir.graph @test_reduce_add_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_avg_small
+// CHECK-LABEL: entry @test_reduce_avg_small
 // CHECK: %[[C16:.*]] = constant <f32: 1.600000e+01>
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[0.000000e+00 : f32]
@@ -47,7 +47,7 @@ nv_tensor_ir.graph @test_reduce_avg_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_norm1_small
+// CHECK-LABEL: entry @test_reduce_norm1_small
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[ABS:.*]] = absf %[[ARG0]]
 // CHECK: %[[REDUCE:.*]] = reduce %[[ABS]] dim=1 identities=[0.000000e+00 : f32]
@@ -67,7 +67,7 @@ nv_tensor_ir.graph @test_reduce_norm1_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_norm2_small
+// CHECK-LABEL: entry @test_reduce_norm2_small
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[SQR:.*]] = mulf %[[ARG0]], %[[ARG0]]
 // CHECK: %[[REDUCE:.*]] = reduce %[[SQR]] dim=1 identities=[0.000000e+00 : f32]
@@ -88,7 +88,7 @@ nv_tensor_ir.graph @test_reduce_norm2_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_mul_small
+// CHECK-LABEL: entry @test_reduce_mul_small
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[1.000000e+00 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
@@ -107,7 +107,7 @@ nv_tensor_ir.graph @test_reduce_mul_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_mul_no_zeros_small
+// CHECK-LABEL: entry @test_reduce_mul_no_zeros_small
 // CHECK-DAG: %[[ZERO:.*]] = constant <f32: 0.000000e+00>
 // CHECK-DAG: %[[ONE:.*]] = constant <f32: 1.000000e+00>
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
@@ -130,7 +130,7 @@ nv_tensor_ir.graph @test_reduce_mul_no_zeros_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_max_small
+// CHECK-LABEL: entry @test_reduce_max_small
 // CHECK-SAME: (%[[IN:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[IN_VIEW:.*]] = make_tensor_view %[[IN]], shape = [64, 16], strides = [16, 1]
 // CHECK: %[[IN_PVIEW:.*]] = make_partition_view %[[IN_VIEW]] : partition_view<tile=(32x16), tensor_view<64x16xf32, strides=[16,1]>>
@@ -154,7 +154,7 @@ nv_tensor_ir.graph @test_reduce_max_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_amax_small
+// CHECK-LABEL: entry @test_reduce_amax_small
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[ABS:.*]] = absf %[[ARG0]]
 // CHECK: %[[REDUCE:.*]] = reduce %[[ABS]] dim=1 identities=[0.000000e+00 : f32]
@@ -174,7 +174,7 @@ nv_tensor_ir.graph @test_reduce_amax_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_min_small
+// CHECK-LABEL: entry @test_reduce_min_small
 // CHECK-SAME: (%[[IN:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[IN_VIEW:.*]] = make_tensor_view %[[IN]], shape = [64, 16], strides = [16, 1]
 // CHECK: %[[IN_PVIEW:.*]] = make_partition_view %[[IN_VIEW]] : partition_view<tile=(32x16), tensor_view<64x16xf32, strides=[16,1]>>
@@ -202,7 +202,7 @@ nv_tensor_ir.graph @test_reduce_min_small(
 // Reductions with large contracting dimension (loop)
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_add_large
+// CHECK-LABEL: entry @test_reduce_add_large
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x128xf32>
@@ -225,7 +225,7 @@ nv_tensor_ir.graph @test_reduce_add_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_avg_large
+// CHECK-LABEL: entry @test_reduce_avg_large
 // CHECK-DAG: %[[C8192:.*]] = constant <f32: 8.192000e+03> : tile<32x1xf32>
 // CHECK-DAG: %[[ACCUM:.*]] = constant <f32: 0.000000e+00>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
@@ -252,7 +252,7 @@ nv_tensor_ir.graph @test_reduce_avg_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_norm1_large
+// CHECK-LABEL: entry @test_reduce_norm1_large
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x128xf32>
@@ -276,7 +276,7 @@ nv_tensor_ir.graph @test_reduce_norm1_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_norm2_large
+// CHECK-LABEL: entry @test_reduce_norm2_large
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x128xf32>
@@ -301,7 +301,7 @@ nv_tensor_ir.graph @test_reduce_norm2_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_mul_large
+// CHECK-LABEL: entry @test_reduce_mul_large
 // CHECK: %[[ACCUM:.*]] = constant <f32: 1.000000e+00>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x128xf32>
@@ -324,7 +324,7 @@ nv_tensor_ir.graph @test_reduce_mul_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_mul_no_zeros_large
+// CHECK-LABEL: entry @test_reduce_mul_no_zeros_large
 // CHECK-DAG: %[[ZERO:.*]] = constant <f32: 0.000000e+00>
 // CHECK-DAG: %[[ACCUM:.*]] = constant <f32: 1.000000e+00>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
@@ -350,7 +350,7 @@ nv_tensor_ir.graph @test_reduce_mul_no_zeros_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_max_large
+// CHECK-LABEL: entry @test_reduce_max_large
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0xFF800000>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} padding_value = neg_inf{{.*}} -> tile<32x128xf32>
@@ -373,7 +373,7 @@ nv_tensor_ir.graph @test_reduce_max_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_amax_large
+// CHECK-LABEL: entry @test_reduce_amax_large
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x128xf32>
@@ -397,7 +397,7 @@ nv_tensor_ir.graph @test_reduce_amax_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_min_large
+// CHECK-LABEL: entry @test_reduce_min_large
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0x7F800000>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} padding_value = pos_inf{{.*}} -> tile<32x128xf32>

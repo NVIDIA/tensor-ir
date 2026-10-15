@@ -28,6 +28,23 @@ def CompilerBackendEnum : CompilerOptionEnum<
     ]> {
 }
 
+def HostTargetEnum : CompilerOptionEnum<
+    "HostTarget", "Host execution target",
+    [CompilerOptionEnumCase<"Native", 0, "native">,
+     CompilerOptionEnumCase<"Interpreter", 1, "interpreter">,
+     CompilerOptionEnumCase<"Auto", 2, "auto">]>;
+
+def HostArchEnum : CompilerOptionEnum<
+    "HostArch", "Host architecture",
+    [CompilerOptionEnumCase<"Native", 0, "native", "current process architecture">,
+     CompilerOptionEnumCase<"X86_64", 1, "x86_64", "x86_64">,
+     CompilerOptionEnumCase<"AArch64", 2, "aarch64">]>;
+
+def HostOSEnum : CompilerOptionEnum<
+    "HostOS", "Host operating system",
+    [CompilerOptionEnumCase<"Windows", 0, "windows">,
+     CompilerOptionEnumCase<"Linux", 1, "linux">]>;
+
 def CudaTileCodegenStrategyEnum : CompilerOptionEnum<
     "CudaTileCodegenStrategy", "TensorIR-to-CUDA-Tile lowering strategy",
     [CompilerOptionEnumCase<"AffineMap", 0, "affine-map">,
@@ -47,6 +64,18 @@ def PersistenceModeEnum : CompilerOptionEnum<
     [CompilerOptionEnumCase<"None", 0, "none">,
      CompilerOptionEnumCase<"Static", 1, "static">,
     ]> {
+}
+
+def AutoGdcInsertionEnum : CompilerOptionEnum<
+    "AutoGdcInsertion",
+    "Automatic grid dependency control insertion for Programmatic Dependent "
+    "Launch",
+    [CompilerOptionEnumCase<"None", 0, "none",
+                            "Do not insert grid dependency control">,
+     CompilerOptionEnumCase<
+         "Conservative", 1, "conservative",
+         "Wait for the preceding grid before any global memory access; "
+         "dependent grids are triggered implicitly when predecessors exit">]> {
 }
 
 

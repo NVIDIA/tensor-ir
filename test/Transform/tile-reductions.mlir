@@ -1,4 +1,9 @@
-// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,layout-propagation-annotation,layout-propagation-normalization,tile-selection,graph-splitting),tir-bufferize,func.func(tir-form-grid,tir-tile-reductions{reduction-tile-size=128}))' --split-input-file | FileCheck %s
+// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph( \
+// RUN:    materialize-default-strides, \
+// RUN:    tile-selection), \
+// RUN:    tir-bufferize, \
+// RUN:    func.func(tir-form-grid,tir-tile-reductions{reduction-tile-size=128}))' \
+// RUN:   --split-input-file | FileCheck %s
 
 // CHECK-LABEL: func.func @large_add_dispatch
 // CHECK: %[[ZERO:.*]] = nv_tensor_ir.constant dense<0.000000e+00> : tensor<32x128xf32>
@@ -134,4 +139,33 @@ nv_tensor_ir.graph @tail_avg(%input: tensor<64x500xf32>)
   %result = reduce(%input) <dimensions = [1], reduction_mode = <avg>>
       : tensor<64x500xf32> -> tensor<64x1xf32>
   results %result : tensor<64x1xf32>
+}
+
+// -----
+
+// Grid formation reuses %shared for the reduction through a transpose. Strip
+// mining clones the transposed producers with the contracting coordinate on
+// the producers' own contracting dimension.
+// CHECK-LABEL: func.func @strip_mined_transposed_producer_dispatch
+//       CHECK: scf.for %[[K:[^ ]+]] = {{.*}} -> (tensor<1x16x128xf32>) {
+//       CHECK:   %[[DOUT:.*]] = nv_tensor_ir.load %{{.*}}[%{{.*}}, %[[K]], 0] {{.*}} to tensor<1x128x16xf32>
+//       CHECK:   %[[Z:.*]] = nv_tensor_ir.load %{{.*}}[%{{.*}}, %[[K]], 0] {{.*}} to tensor<1x128x16xf32>
+//       CHECK:   %[[EXP:.*]] = nv_tensor_ir.exp %[[Z]] : tensor<1x128x16xf32>
+//       CHECK:   %[[SHARED:.*]] = nv_tensor_ir.mul %[[DOUT]], %[[EXP]] : tensor<1x128x16xf32>
+//       CHECK:   %[[TRANSPOSED:.*]] = nv_tensor_ir.transpose %[[SHARED]] permutation = [0, 2, 1] : tensor<1x128x16xf32> -> tensor<1x16x128xf32>
+//       CHECK:   %[[X:.*]] = nv_tensor_ir.load %{{.*}}[%{{.*}}, 0, %[[K]]] {{.*}} to tensor<1x16x128xf32>
+//       CHECK:   nv_tensor_ir.mul %[[TRANSPOSED]], %[[X]] : tensor<1x16x128xf32>
+//       CHECK: nv_tensor_ir.reduce
+nv_tensor_ir.graph @strip_mined_transposed_producer(
+    %z: tensor<2x256x16xf32>, %dout: tensor<2x256x16xf32>,
+    %x: tensor<2x256x16xf32>)
+    -> (tensor<2x256x16xf32>, tensor<2x1x16xf32>)
+    attributes {tile_size = array<i32: 1, 256, 16>} {
+  %exp = exp %z : tensor<2x256x16xf32>
+  %shared = mul %dout, %exp : tensor<2x256x16xf32>
+  %dx = neg %shared : tensor<2x256x16xf32>
+  %contribution = mul %shared, %x : tensor<2x256x16xf32>
+  %partial = reduce(%contribution) <dimensions = [1], reduction_mode = <add>>
+      : tensor<2x256x16xf32> -> tensor<2x1x16xf32>
+  results %dx, %partial : tensor<2x256x16xf32>, tensor<2x1x16xf32>
 }

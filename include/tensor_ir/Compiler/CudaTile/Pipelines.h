@@ -26,16 +26,20 @@ void buildTileSelectionPipeline(mlir::OpPassManager &pm,
 void buildTensorIRTiledProgramFormationPipeline(mlir::OpPassManager &pm,
                                                 const CompilerInvocation &opts);
 
-/// Outline formed TensorIR forall bodies as destination-passing GPU kernels.
-void buildTensorIRKernelOutliningPipeline(mlir::OpPassManager &pm);
+/// Lower top-level outlined dispatch completely to LLVM dialect. Device kernel
+/// bodies remain untouched in GPU modules for subsequent device conversion.
+void buildHostToLLVMPipeline(OpPassManager &pm, const CompilerInvocation &opts);
 
-/// Add all TensorIR tiled-program formation and outlining stages.
-void buildTensorIRTiledProgramPipeline(mlir::OpPassManager &pm,
-                                       const CompilerInvocation &opts);
+/// Register the same host pipeline for textual IR tests and reproducer replay.
+void registerHostToLLVMPipeline();
 
 /// Add TensorIR-to-CudaTile conversion and cleanup passes without analysis.
-void buildTensorToCudaTileConversionOnlyPipeline(
-    mlir::OpPassManager &pm, const CompilerInvocation &opts);
+/// With `auto-gdc-insertion=conservative` on SM90+, also add the PDL wait
+/// insertion pass. Unsupported insertion modes and invalid kernel targets
+/// return an error without adding passes.
+Status
+buildTensorToCudaTileConversionOnlyPipeline(mlir::OpPassManager &pm,
+                                            const CompilerInvocation &opts);
 
 /// Add the complete TensorIR-to-CudaTile analysis and conversion pipeline.
 /// Invalid kernel targets return an error without adding passes.

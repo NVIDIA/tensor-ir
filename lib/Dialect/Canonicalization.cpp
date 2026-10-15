@@ -17,10 +17,6 @@ static bool hasStaticShape(Value value) {
   return type && type.hasStaticShape();
 }
 
-static bool hasLayoutAnnotation(Operation *op) {
-  return op->hasAttr(TensorIRDialect::getLayoutAttrName());
-}
-
 static bool isUnsignedIntegerType(IntegerType type) {
   return type.getWidth() == 1 || type.isUnsigned();
 }
@@ -275,11 +271,7 @@ OpFoldResult ConvertOp::fold(FoldAdaptor) {
 OpFoldResult ReshapeOp::fold(FoldAdaptor) {
   auto inputType = getInput().getType();
   auto outputType = getOutput().getType();
-  if (hasLayoutAnnotation(getOperation())) {
-    return {};
-  }
-
-  if (inputType == outputType) {
+  if (inputType == outputType && inputType.hasStaticShape()) {
     return getInput();
   }
 
@@ -300,7 +292,7 @@ OpFoldResult ReshapeOp::fold(FoldAdaptor) {
 OpFoldResult TransposeOp::fold(FoldAdaptor) {
   auto inputType = getInput().getType();
   auto outputType = getOutput().getType();
-  if (hasLayoutAnnotation(getOperation()) || inputType != outputType) {
+  if (inputType != outputType) {
     return {};
   }
 
@@ -315,7 +307,7 @@ OpFoldResult TransposeOp::fold(FoldAdaptor) {
 OpFoldResult SliceOp::fold(FoldAdaptor) {
   auto inputType = getInput().getType();
   auto outputType = getOutput().getType();
-  if (hasLayoutAnnotation(getOperation()) || inputType != outputType ||
+  if (inputType != outputType ||
       llvm::any_of(getStarts(), [](int64_t start) { return start != 0; }) ||
       llvm::any_of(getStrides(), [](int64_t stride) { return stride != 1; }) ||
       !llvm::equal(getLimits(), inputType.getShape())) {
@@ -325,7 +317,7 @@ OpFoldResult SliceOp::fold(FoldAdaptor) {
 }
 
 OpFoldResult ConcatenateOp::fold(FoldAdaptor) {
-  if (hasLayoutAnnotation(getOperation()) || getInputs().size() != 1 ||
+  if (getInputs().size() != 1 ||
       getInputs().front().getType() != getOutput().getType()) {
     return {};
   }
@@ -335,7 +327,7 @@ OpFoldResult ConcatenateOp::fold(FoldAdaptor) {
 OpFoldResult ReduceOp::fold(FoldAdaptor) {
   auto inputType = getInput().getType();
   auto outputType = getOutput().getType();
-  if (hasLayoutAnnotation(getOperation()) || inputType != outputType) {
+  if (inputType != outputType) {
     return {};
   }
 

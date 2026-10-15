@@ -1,6 +1,7 @@
 add_tensor_ir_conversion_library(NVTensorIRToCudaTileConversion
   AffineMapImpl.cpp
   EmitHelpers.cpp
+  MinVersionInfo.cpp
   OutlinedComputeOps.cpp
   OutlinedKernelImpl.cpp
   PointwiseOps.cpp

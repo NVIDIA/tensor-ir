@@ -3,6 +3,7 @@
 
 #include "tensor_ir/Compiler/CudaTile/CudaTileFrontend.h"
 
+#include "tensor_ir/Analysis/LayoutPropagation.h"
 #include "tensor_ir/Compiler/CudaTile/KernelMetadataExtraction.h"
 #include "tensor_ir/Compiler/CudaTile/Pipelines.h"
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTile.h"
@@ -35,7 +36,7 @@ static bool isSupportedTensorIrOp(mlir::Operation *op) {
   return mlir::isa<
       GraphOp, ResultsOp,
       // Data movement.
-      TransposeOp, ConcatenateOp, SliceOp, ReshapeOp, BroadcastOp,
+      TransposeOp, ConcatenateOp, ScanSliceOp, SliceOp, ReshapeOp, BroadcastOp,
       // Type conversion.
       ConvertOp,
       // Unary pointwise.
@@ -166,14 +167,13 @@ static mlir::LogicalResult configureLayoutPropGridMetadata(
   llvm::ArrayRef<int32_t> tileSizes = tileSizeAttr.asArrayRef();
   argLayout.tileSizes.assign(tileSizes.begin(), tileSizes.end());
 
-  mlir::Operation *terminator = graphOp.getBody()->getTerminator();
-  auto iterationSpace = mlir::dyn_cast_if_present<LayoutSourceAttrInterface>(
-      terminator->getAttr(TensorIRDialect::getIterationSpaceAttrName()));
-  if (!iterationSpace) {
-    return graphOp.emitError(
-        "grid computation requires an iteration-space layout");
+  mlir::FailureOr<LayoutNormalization> normalization =
+      LayoutNormalization::compute(graphOp);
+  if (mlir::failed(normalization)) {
+    return mlir::failure();
   }
-  llvm::SmallVector<int64_t> iterationShape = iterationSpace.getShape();
+  llvm::SmallVector<int64_t> iterationShape =
+      normalization->iterationSpace.getShape();
   if (iterationShape.size() != tileSizes.size()) {
     return graphOp.emitError(
         "iteration-space rank does not match the selected tile rank");
@@ -292,12 +292,13 @@ static mlir::LogicalResult configureLayoutPropGridMetadata(
 }
 
 static mlir::FailureOr<std::string>
-getCudaTileEntryFunctionName(mlir::Operation *op,
+getCudaTileEntryFunctionName(mlir::ModuleOp module,
                              mlir::cuda_tile::ModuleOp &cudaTileModule) {
-  cudaTileModule = mlir::cuda_tile::extractCudaTileModuleOp(op);
-  if (!cudaTileModule) {
+  auto deviceModules = module.getOps<mlir::cuda_tile::ModuleOp>();
+  if (!llvm::hasSingleElement(deviceModules)) {
     return mlir::failure();
   }
+  cudaTileModule = *deviceModules.begin();
 
   auto entryOps = cudaTileModule.getOps<mlir::cuda_tile::EntryOp>();
   if (!llvm::hasSingleElement(entryOps)) {
@@ -431,17 +432,11 @@ static mlir::LogicalResult runLayoutPropagationLowering(
                          }))) {
     return mlir::failure();
   }
-  if (failed(runPipeline(module, options, timing, "Outline TensorIR kernel",
-                         [&](mlir::PassManager &pm) {
-                           buildTensorIRKernelOutliningPipeline(pm);
-                           return mlir::nv_tensor_ir::Status::Ok();
-                         }))) {
-    return mlir::failure();
-  }
+
   return runPipeline(module, options, timing, "Lower TensorIR to CudaTile",
                      [&](mlir::PassManager &pm) {
-                       buildTensorToCudaTileConversionOnlyPipeline(pm, options);
-                       return mlir::nv_tensor_ir::Status::Ok();
+                       return buildTensorToCudaTileConversionOnlyPipeline(
+                           pm, options);
                      });
 }
 
@@ -475,8 +470,7 @@ static mlir::LogicalResult runTensorIRLowering(
 }
 
 static std::string getRuntimeKernelName(mlir::ModuleOp module) {
-  auto moduleName = module->getAttrOfType<mlir::StringAttr>(
-      mlir::SymbolTable::getSymbolAttrName());
+  auto moduleName = module.getSymNameAttr();
   return moduleName ? moduleName.getValue().str() : "tensor_ir_rtk";
 }
 
@@ -623,13 +617,24 @@ lowerTensorIRToCudaTile(ModuleOp module, const CompilerInvocation &options,
     return failure();
   }
 
-  FailureOr<std::string> entryFunctionName = getCudaTileEntryFunctionName(
-      result.module->getOperation(), result.cudaTileModule);
+  FailureOr<std::string> entryFunctionName =
+      getCudaTileEntryFunctionName(*result.module, result.cudaTileModule);
   if (failed(entryFunctionName)) {
     return failure();
   }
 
   result.entryFunctionName = *entryFunctionName;
+
+  FailureOr<SmTarget> target = options.getKernelSmTarget();
+  if (failed(target)) {
+    return failure();
+  }
+  if (target->getComputeCapabilityVersion() >= 90) {
+    result.cudaTileModule.walk([&](::mlir::cuda_tile::GdcWaitTkoOp) {
+      result.usesPDL = true;
+      return WalkResult::interrupt();
+    });
+  }
   return result;
 }
 

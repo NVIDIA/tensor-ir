@@ -1,2 +1,2 @@
 add_subdirectory(TensorToCudaTile)
-
+add_subdirectory(TensorToLinalg)

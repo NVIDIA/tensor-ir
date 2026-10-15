@@ -22,9 +22,12 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 
 namespace tensor_ir::rt {
+
+class NativeHostModule;
 
 inline int requiredCudaDriverApiVersionForBytecode(
     ::mlir::cuda_tile::BytecodeVersion version) {
@@ -81,6 +84,8 @@ public:
   /// when the artifact carries bytecode.
   static StatusOr<IRuntimeKernelPtr> deserialize(llvm::MemoryBufferRef bytes);
 
+  ~CudaTileRuntimeKernel() override;
+
   Kind getKind() const override { return Kind::CudaTile; }
 
   // To implement LLVM-style polymorphism
@@ -120,9 +125,9 @@ public:
 
 private:
   explicit CudaTileRuntimeKernel(
-      std::unique_ptr<const TensorIRArtifact> artifact)
-      : artifact_(std::move(artifact)),
-        argPacker_(artifact_->getLaunchMetadata()) {}
+      std::unique_ptr<const TensorIRArtifact> artifact);
+
+  Status initializeDeviceState() const;
 
   void setGridComputer(std::unique_ptr<RuntimeGridComputer> computer) {
     gridComputer_ = std::move(computer);
@@ -150,6 +155,9 @@ private:
   std::unique_ptr<const TensorIRArtifact> artifact_;
   mutable llvm::SmallVector<char, 0> fallbackCubin_;
   TileIRFallbackAssembler tileIRFallbackAssembler_;
+
+  mutable std::shared_mutex stateMutex_;
+  mutable std::unique_ptr<NativeHostModule> hostModule_;
 
   mutable CUlibrary lib_ = nullptr;
   mutable CUkernel kernel_ = nullptr;

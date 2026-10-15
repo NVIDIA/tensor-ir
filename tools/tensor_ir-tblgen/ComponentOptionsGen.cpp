@@ -399,6 +399,18 @@ void ComponentEmitter::emitValidateImpl() {
   os << formatv("std::optional<std::string>\n{0}::validate() const {{\n",
                 comp.declStructName());
   for (const OptionInfo &opt : comp.options) {
+    if (opt.kind == OptionInfo::Kind::Enum) {
+      const EnumInfo &enumInfo = *opt.enumInfo;
+      os << formatv(R"(  if (!{0}::{1}(static_cast<{2}>({3}))) {
+    std::string error = "{4}: unrecognized enum value (got ";
+    llvm::raw_string_ostream(error) << static_cast<{2}>({3}) << ')';
+    return error;
+  }
+)",
+                    enumInfo.getCppNamespace(),
+                    enumInfo.getUnderlyingToSymbolFnName(),
+                    enumInfo.getUnderlyingType(), opt.varName, opt.argName);
+    }
     FmtContext ctx;
     ctx.withSelf(opt.varName);
     for (const Record *traitRec : opt.rec->getValueAsListOfDefs("traits")) {

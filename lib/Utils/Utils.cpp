@@ -22,6 +22,31 @@ namespace tcg = mlir::nv_tensor_ir::tcutegen;
 
 namespace mlir {
 namespace nv_tensor_ir {
+ScanSliceOutputSlice getScanSliceOutputSlice(TensorType outputType,
+                                             int64_t scanDimension) {
+  assert(outputType.hasStaticShape() && scanDimension >= 0 &&
+         scanDimension < outputType.getRank());
+  ScanSliceOutputSlice slice;
+  slice.shape.assign(outputType.getShape().begin(),
+                     outputType.getShape().end());
+  slice.strides.resize(slice.shape.size());
+  int64_t stride = 1;
+  for (int64_t dim = outputType.getRank() - 1; dim >= 0; --dim) {
+    slice.strides[dim] = stride;
+    stride *= slice.shape[dim];
+  }
+  slice.scanStride = slice.strides[scanDimension];
+  slice.shape.erase(slice.shape.begin() + scanDimension);
+  slice.strides.erase(slice.strides.begin() + scanDimension);
+  return slice;
+}
+
+bool isStreamingScanSliceResult(Value value) {
+  auto result = dyn_cast<OpResult>(value);
+  return result && isa<ScanSliceOp>(result.getOwner()) &&
+         result.getResultNumber() > 0;
+}
+
 namespace {
 
 FailureOr<SmallVector<TensorDescriptor::StaticOrDynamic>>
@@ -186,84 +211,9 @@ bool hasDynamicInputOrOutputTensor(nv_tensor_ir::GraphOp graphOp) {
   return false;
 }
 
-/// Get CuTe layout for a graph input or output.
-static std::optional<tcg::Layout> getLayoutForGraphInputOrOutput(Value value) {
-  if (auto tensorTy = dyn_cast<RankedTensorType>(value.getType());
-      tensorTy && isTensorType(value.getType())) {
-    tcg::Shape shape = getShapeRef(tensorTy);
-    auto stride = getStrideFromGraph(value);
-    if (succeeded(stride)) {
-      return tcg::Layout(shape, *stride);
-    }
-  }
-  return std::nullopt;
-}
-
-/// Get layout attribute for an operation or block argument.
-Attribute getLayoutSourceAttr(Value value) {
-  // If the value is a function argument, convert it to a tensor source.
-  if (auto blockArg = dyn_cast<BlockArgument>(value)) {
-    if (auto layout = getLayoutForGraphInputOrOutput(value);
-        layout.has_value()) {
-      return TensorSourceAttr::get(value.getContext(), blockArg.getArgNumber(),
-                                   /*offset=*/0, layout->toString(),
-                                   getDynamicValueMapping(*layout));
-    }
-    return nullptr;
-  }
-
-  // Get layout attribute from the operation.
-  return value.getDefiningOp()->getAttr(TensorIRDialect::getLayoutAttrName());
-}
-
-FailureOr<SmallVector<LayoutSourceAttrInterface>>
-getResultLayouts(Operation *resultsOp) {
-  SmallVector<LayoutSourceAttrInterface> result;
-  auto layouts = resultsOp->getAttrOfType<ArrayAttr>(
-      TensorIRDialect::getResultLayoutsAttrName());
-  if (!layouts) {
-    return result;
-  }
-
-  result.reserve(layouts.size());
-  for (auto [index, attr] : llvm::enumerate(layouts)) {
-    auto layout = dyn_cast<LayoutSourceAttrInterface>(attr);
-    if (!layout) {
-      resultsOp->emitError()
-          << "result_layouts[" << index
-          << "] must implement LayoutSourceAttrInterface, but got " << attr;
-      return failure();
-    }
-    result.push_back(layout);
-  }
-  return result;
-}
-
-FailureOr<SmallVector<TensorSourceAttr>> getResultViews(Operation *resultsOp) {
-  SmallVector<TensorSourceAttr> result;
-  auto views = resultsOp->getAttrOfType<ArrayAttr>(
-      TensorIRDialect::getResultViewsAttrName());
-  if (!views) {
-    return result;
-  }
-
-  result.reserve(views.size());
-  for (auto [index, attr] : llvm::enumerate(views)) {
-    auto view = dyn_cast<TensorSourceAttr>(attr);
-    if (!view) {
-      resultsOp->emitError()
-          << "result_views[" << index
-          << "] must be a TensorSourceAttr, but got " << attr;
-      return failure();
-    }
-    result.push_back(view);
-  }
-  return result;
-}
-
 FailureOr<SmallVector<int64_t>>
-deriveResultFixedTileSizes(Operation *resultsOp) {
-  MLIR_ASSIGN_OR_RETURN(auto views, getResultViews(resultsOp));
+deriveResultFixedTileSizes(ArrayRef<TensorSourceAttr> views,
+                           Operation *diagnosticOp) {
   if (views.empty()) {
     return SmallVector<int64_t>{};
   }
@@ -272,8 +222,8 @@ deriveResultFixedTileSizes(Operation *resultsOp) {
   SmallVector<int64_t> result(carrierShape.size(), 0);
   for (auto [resultIndex, view] : llvm::enumerate(views)) {
     if (view.getShape() != carrierShape) {
-      resultsOp->emitError()
-          << "result_views[" << resultIndex << "] has shape "
+      diagnosticOp->emitError()
+          << "result view " << resultIndex << " has shape "
           << vectorToString(view.getShape()) << ", expected carrier shape "
           << vectorToString(carrierShape);
       return failure();
@@ -285,7 +235,7 @@ deriveResultFixedTileSizes(Operation *resultsOp) {
       if (tcutegen::is_static(stride) && stride.as_int() == 0 &&
           carrierShape[dim] != 1) {
         if (ShapedType::isDynamic(carrierShape[dim])) {
-          resultsOp->emitError()
+          diagnosticOp->emitError()
               << "dynamic projected result dimension " << dim
               << " is not yet supported for multi-output layout propagation";
           return failure();
@@ -396,8 +346,9 @@ FailureOr<llvm::hash_code> getModuleHash(ModuleOp moduleOp) {
   size_t symNameCounter = 0;
   auto walkResult =
       clonedModuleOp->walk<WalkOrder::PreOrder>([&](Operation *op) {
-        if (op->hasAttr(SymbolTable::getSymbolAttrName())) {
-          StringAttr oldName = SymbolTable::getSymbolName(op);
+        if (auto symbol = dyn_cast<SymbolOpInterface>(op);
+            symbol && symbol.getNameAttr()) {
+          StringAttr oldName = symbol.getNameAttr();
 
           // Generate new anonymized name and replace all uses of the symbol
           std::string newNameStr = "__anno_" + std::to_string(symNameCounter++);

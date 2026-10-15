@@ -1,5 +1,4 @@
 // RUN: tensor_ir-opt -materialize-default-strides \
-// RUN:   -layout-propagation-annotation -layout-propagation-normalization \
 // RUN:   -tile-analyzer -tile-selection -verify-diagnostics=only-expected %s
 
 // expected-error @+1 {{Selected tile [2, 8] partitions result-projected iteration-space dimension 1; expected full tile size 16}}

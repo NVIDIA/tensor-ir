@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 
 from .dtypes import DataType, normalize_dtype, supports_scalar_attr
@@ -11,6 +12,7 @@ from .tracing import (
     MovementOp,
     NodeKind,
     TensorInfo,
+    TraceGraph,
     TracedTensor,
     UnaryOp,
     _check_binary_tensor_types,
@@ -21,6 +23,7 @@ from .tracing import (
     _contiguous_stride,
     _current_trace_graph,
     _matmul as _trace_matmul,
+    _trace_graph_context,
 )
 
 __all__ = [
@@ -66,6 +69,7 @@ __all__ = [
     "softplus",
     "splat",
     "sqrt",
+    "scan_slice",
     "sub",
     "swish",
     "tan",
@@ -225,8 +229,30 @@ def cos(value: object) -> TracedTensor:
     return _unary(UnaryOp.COS, value)
 
 
-def exp(value: object) -> TracedTensor:
-    return _unary(UnaryOp.EXP, value)
+def exp(value: object, *, rounding_mode: str = "full") -> TracedTensor:
+    """Compute exp with ``"full"`` (default) or ``"approx"`` accuracy.
+
+    CUDA Tile evaluates FP16/BF16 in FP32 before rounding back. Approximate
+    FP64 is not supported. Approximate exp requires Tile IR 13.3 or newer.
+    ``"full"`` selects CUDA Math accuracy, not correctly rounded results.
+    """
+    if not isinstance(rounding_mode, str):
+        raise TypeError("tir.exp rounding_mode must be a string")
+    if rounding_mode not in ("full", "approx"):
+        raise ValueError('tir.exp rounding_mode must be "full" or "approx"')
+    tensor = _ensure_traced(value, "exp")
+    dtype = tensor.tensor_info.dtype
+    if dtype not in (DataType.F16, DataType.BF16, DataType.F32, DataType.F64):
+        raise TypeError("tir.exp rounding_mode requires floating-point input")
+    if rounding_mode == "approx" and dtype == DataType.F64:
+        raise ValueError("tir.exp approx rounding_mode does not support FP64")
+    return tensor._graph.add_node(
+        NodeKind.UNARY,
+        UnaryOp.EXP,
+        (tensor._id,),
+        tensor.tensor_info,
+        kwargs={"rounding_mode": rounding_mode},
+    )
 
 
 def floor(value: object) -> TracedTensor:
@@ -453,6 +479,123 @@ def concatenate(values: object, *, dimension: int) -> TracedTensor:
         tuple(tensor._id for tensor in tensors),
         result_info,
         kwargs={"dimension": concat_dim},
+    )
+
+
+def scan_slice(
+    initial: object,
+    inputs: Sequence[object],
+    body: Callable[..., object],
+    *,
+    scan_dimensions: Sequence[int],
+    output_dimensions: Sequence[int],
+    reverse: bool = False,
+) -> tuple[TracedTensor, ...]:
+    """Trace a restricted user-defined recurrence into one Tensor IR scan_slice.
+
+    The body receives ``(carry, *input_slices)`` and returns
+    ``(next_carry, *step_outputs)``. This initial implementation supports one
+    carry and statically shaped scanned inputs. The final carry retains the
+    initial carry's shape and dtype. Convert it explicitly if needed; reshape
+    the output outside the kernel.
+    """
+    carry = _ensure_traced(initial, "scan_slice")
+    scanned = tuple(_ensure_traced(value, "scan_slice") for value in inputs)
+    if not scanned:
+        raise TypeError("tir.scan_slice expects at least one scanned input")
+    for value in scanned:
+        _check_same_graph(carry, value, "scan_slice")
+        if value._id not in carry._graph.input_ids:
+            raise ValueError("scan_slice inputs currently must be kernel arguments")
+    dimensions = tuple(int(dimension) for dimension in scan_dimensions)
+    if len(dimensions) != len(scanned):
+        raise ValueError("scan_dimensions must contain one entry per input")
+
+    extent = None
+    element_infos = []
+    carry_shape = carry.tensor_info.shape
+    carry_dimensions = tuple(size for size in carry_shape if size != 1)
+    for value, dimension in zip(scanned, dimensions, strict=True):
+        shape = value.tensor_info.shape
+        if dimension < 0 or dimension >= len(shape):
+            raise ValueError("scan dimension is out of range")
+        if extent is None:
+            extent = shape[dimension]
+        elif extent != shape[dimension]:
+            raise ValueError("all scanned inputs must have the same extent")
+        element_shape = shape[:dimension] + shape[dimension + 1 :]
+        slice_dimensions = tuple(size for size in element_shape if size != 1)
+        if carry_dimensions[: len(slice_dimensions)] != slice_dimensions:
+            raise ValueError(
+                "scan_slice input non-unit dimensions must match a prefix of the non-unit carry dimensions"
+            )
+        element_infos.append(
+            replace(
+                value.tensor_info,
+                shape=element_shape,
+                stride=_contiguous_stride(element_shape),
+            )
+        )
+
+    region = TraceGraph()
+    region_args = [region.add_input(replace(carry.tensor_info, name="carry"))]
+    region_args.extend(
+        region.add_input(replace(info, name=f"scan_slice_input_{index}"))
+        for index, info in enumerate(element_infos)
+    )
+    with _trace_graph_context(region):
+        body_result = body(*region_args)
+    body_results = body_result if isinstance(body_result, tuple) else (body_result,)
+    if not body_results or not all(
+        isinstance(value, TracedTensor) for value in body_results
+    ):
+        raise TypeError("scan_slice body must return traced tensors")
+    for value in body_results:
+        if value._graph is not region:
+            raise TypeError(
+                "scan_slice body cannot return values captured from the outer graph"
+            )
+    _check_same_tensor_type(
+        body_results[0].tensor_info, carry.tensor_info, "scan_slice carry result"
+    )
+
+    output_dims = tuple(int(dimension) for dimension in output_dimensions)
+    if len(output_dims) + 1 != len(body_results):
+        raise ValueError("output_dimensions must contain one entry per step output")
+    result_infos = [
+        replace(
+            carry.tensor_info,
+            stride=_contiguous_stride(carry_shape),
+        )
+    ]
+    for value, dimension in zip(body_results[1:], output_dims, strict=True):
+        info = value.tensor_info
+        if len(info.shape) != len(carry_shape) or any(
+            value_dim not in (1, carry_dim)
+            for value_dim, carry_dim in zip(info.shape, carry_shape, strict=True)
+        ):
+            raise ValueError(
+                "scan_slice step outputs must have carry rank and dimensions"
+                " matching the carry or one"
+            )
+        if dimension < 0 or dimension > len(info.shape):
+            raise ValueError("scan_slice output dimension is out of range")
+        shape = info.shape[:dimension] + (extent,) + info.shape[dimension:]
+        result_infos.append(
+            replace(info, shape=shape, stride=_contiguous_stride(shape))
+        )
+    region.result_ids = [value._id for value in body_results]
+    return carry._graph.add_multi_result_node(
+        NodeKind.SCAN_SLICE,
+        "scan_slice",
+        (carry._id, *(value._id for value in scanned)),
+        tuple(result_infos),
+        kwargs={
+            "scan_dimensions": dimensions,
+            "output_dimensions": output_dims,
+            "reverse": bool(reverse),
+            "region": region,
+        },
     )
 
 

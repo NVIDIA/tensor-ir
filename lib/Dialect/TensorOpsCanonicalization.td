@@ -14,10 +14,6 @@ include "tensor_ir/Dialect/TensorOps.td"
 def HasStaticShape : Constraint<CPred<"hasStaticShape($0)">,
                                 "has a static ranked tensor shape">;
 
-def HasNoLayoutAnnotation
-    : Constraint<CPred<"!hasLayoutAnnotation($0.getDefiningOp())">,
-                 "has no layout annotation">;
-
 def IsLosslessConvert
     : Constraint<CPred<"isLosslessConvert($0, $1)">,
                  "the conversion preserves every source value">;
@@ -47,8 +43,7 @@ def MergeSequentialBroadcasts
     : Pat<(TensorIR_BroadcastOp:$outer
               (TensorIR_BroadcastOp:$inner $input, $innerSizes),
               $outerSizes),
-          (TensorIR_BroadcastOp $input, $outerSizes),
-          [(HasNoLayoutAnnotation $inner), (HasNoLayoutAnnotation $outer)]>;
+          (TensorIR_BroadcastOp $input, $outerSizes)>;
 
 //===----------------------------------------------------------------------===//
 // ConvertOp
@@ -58,8 +53,7 @@ def MergeSequentialBroadcasts
 def MergeSequentialConverts
     : Pat<(TensorIR_ConvertOp:$outer(TensorIR_ConvertOp:$inner $input)),
           (TensorIR_ConvertOp $input),
-          [(HasNoLayoutAnnotation $inner), (HasNoLayoutAnnotation $outer),
-           (IsLosslessConvert $input, $inner)]>;
+          [(IsLosslessConvert $input, $inner)]>;
 
 //===----------------------------------------------------------------------===//
 // SplatOp
@@ -70,7 +64,7 @@ def MergeSequentialConverts
 def SplatConstant
     : Pat<(TensorIR_SplatOp:$output(TensorIR_ConstantOp $value), $dynamicSizes),
           (TensorIR_ConstantOp(BuildSplatElementsAttr $output, $value)),
-          [(HasNoLayoutAnnotation $output), (HasStaticShape $output)]>;
+          [(HasStaticShape $output)]>;
 
 //===----------------------------------------------------------------------===//
 // TransposeOp
@@ -82,8 +76,7 @@ def MergeSequentialTransposes
               (TensorIR_TransposeOp:$inner $input, $innerPermutation),
               $outerPermutation),
           (TensorIR_TransposeOp $input, (ComposePermutations $innerPermutation,
-                                            $outerPermutation)),
-          [(HasNoLayoutAnnotation $inner), (HasNoLayoutAnnotation $outer)]>;
+                                            $outerPermutation))>;
 
 //===----------------------------------------------------------------------===//
 // SliceOp
@@ -99,7 +92,6 @@ def MergeSequentialSlices
               (ComposeSliceLimits $innerStarts, $innerStrides, $outerStarts,
                   $outerLimits, $outerStrides, $innerLimits),
               (ComposeSliceStrides $innerStrides, $outerStrides)),
-          [(HasNoLayoutAnnotation $inner), (HasNoLayoutAnnotation $outer),
-           (CanComposeSlices $outer)]>;
+          [(CanComposeSlices $outer)]>;
 
 #endif // TENSOR_IR_OPS_CANONICALIZATION

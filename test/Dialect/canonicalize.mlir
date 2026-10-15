@@ -223,13 +223,13 @@ nv_tensor_ir.graph @keep_dynamic_reshapes(
 
 // -----
 
-// Identity view-like operations fold with dynamic shapes.
+// Preserve dynamic reshape sizes while folding other identity views.
 // CHECK-LABEL: nv_tensor_ir.graph @fold_dynamic_identity_views
 // CHECK-SAME:  %[[INPUT:.*]]: tensor<?x3xf32>
-// CHECK-NOT:   reshape
+// CHECK:       %[[RESHAPED:.*]] = reshape %[[INPUT]] dynamic_dims
 // CHECK-NOT:   concatenate
 // CHECK-NOT:   transpose
-// CHECK:       results %[[INPUT]], %[[INPUT]], %[[INPUT]]
+// CHECK:       results %[[RESHAPED]], %[[INPUT]], %[[INPUT]]
 nv_tensor_ir.graph @fold_dynamic_identity_views(
     %input: tensor<?x3xf32>, %rows: index)
     -> (tensor<?x3xf32>, tensor<?x3xf32>, tensor<?x3xf32>) {
@@ -337,62 +337,4 @@ nv_tensor_ir.graph @commutative_constants(
   results %add, %mul, %max, %min, %and, %or
       : tensor<4xf32>, tensor<4xf32>, tensor<4xf32>, tensor<4xf32>,
         tensor<4xi1>, tensor<4xi1>
-}
-
-// -----
-
-// Layout-annotated operations must not be rebuilt by canonicalization.
-// CHECK-LABEL: nv_tensor_ir.graph @preserve_layout_annotations
-// CHECK-SAME:  %[[B_INPUT:.*]]: tensor<1x1xf32>
-// CHECK-SAME:  %[[C_INPUT:.*]]: tensor<4xf16>
-// CHECK-SAME:  %[[T_INPUT:.*]]: tensor<2x3xf32>
-// CHECK-SAME:  %[[S_INPUT:.*]]: tensor<20xf32>
-// CHECK:       %[[SCALAR:.*]] = constant 2.500000e+00 : f32
-// CHECK:       %[[B0:.*]] = broadcast %[[B_INPUT]] {{.*}}layout
-// CHECK:       %[[B1:.*]] = broadcast %[[B0]]
-// CHECK:       %[[C0:.*]] = convert %[[C_INPUT]]
-// CHECK:       %[[C1:.*]] = convert %[[C0]] {{.*}}layout
-// CHECK:       %[[SPLAT:.*]] = splat %[[SCALAR]] {{.*}}layout
-// CHECK:       %[[T0:.*]] = transpose %[[T_INPUT]] {{.*}}layout
-// CHECK:       %[[T1:.*]] = transpose %[[T0]]
-// CHECK:       %[[S0:.*]] = slice %[[S_INPUT]]
-// CHECK:       %[[S1:.*]] = slice %[[S0]] {{.*}}layout
-// CHECK:       results %[[B1]], %[[C1]], %[[SPLAT]], %[[T1]], %[[S1]]
-nv_tensor_ir.graph @preserve_layout_annotations(
-    %broadcast_input: tensor<1x1xf32>,
-    %convert_input: tensor<4xf16>,
-    %transpose_input: tensor<2x3xf32>,
-    %slice_input: tensor<20xf32>)
-    -> (tensor<4x8xf32>, tensor<4xf64>, tensor<4xf32>,
-        tensor<2x3xf32>, tensor<2xf32>) {
-  %b0 = broadcast %broadcast_input
-      {layout = #nv_tensor_ir.tensor_source<-1, 0, "(4,1):(1,0)">}
-      : tensor<1x1xf32> -> tensor<4x1xf32>
-  %b1 = broadcast %b0 : tensor<4x1xf32> -> tensor<4x8xf32>
-
-  %c0 = convert %convert_input : tensor<4xf16> -> tensor<4xf32>
-  %c1 = convert %c0
-      {layout = #nv_tensor_ir.tensor_source<-1, 0, "(4):(1)">}
-      : tensor<4xf32> -> tensor<4xf64>
-
-  %scalar = constant 2.5 : f32
-  %splat = splat %scalar
-      {layout = #nv_tensor_ir.tensor_source<-1, 0, "(4):(0)">}
-      : tensor<4xf32>
-
-  %t0 = transpose %transpose_input permutation = [1, 0]
-      {layout = #nv_tensor_ir.tensor_source<-1, 0, "(3,2):(2,1)">}
-      : tensor<2x3xf32> -> tensor<3x2xf32>
-  %t1 = transpose %t0 permutation = [1, 0]
-      : tensor<3x2xf32> -> tensor<2x3xf32>
-
-  %s0 = slice %slice_input starts = [2] limits = [18] strides = [2]
-      : tensor<20xf32> -> tensor<8xf32>
-  %s1 = slice %s0 starts = [1] limits = [7] strides = [3]
-      {layout = #nv_tensor_ir.tensor_source<-1, 0, "(2):(1)">}
-      : tensor<8xf32> -> tensor<2xf32>
-
-  results %b1, %c1, %splat, %t1, %s1
-      : tensor<4x8xf32>, tensor<4xf64>, tensor<4xf32>,
-        tensor<2x3xf32>, tensor<2xf32>
 }

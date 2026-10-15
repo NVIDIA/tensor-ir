@@ -28,12 +28,14 @@
 //    - Prepares coarse tiles for ReduceOps and MatmulOps, attaching formation
 //      metadata for the downstream TileReductionsPass.
 // 4. Cleanup: Erases the bufferization bridges and dead untiled computation,
-//    and strips analysis-only attributes (layouts, iteration spaces, tile
-//    sizes) so downstream passes operate on explicit SSA values and types.
+//    and strips analysis-only attributes (tile sizes) so downstream passes
+//    operate on explicit SSA values and types.
 
+#include "tensor_ir/Analysis/LayoutPropagation.h"
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Support/TCutegen.h"
 #include "tensor_ir/Transform/Passes.h" // IWYU pragma: keep
+#include "tensor_ir/Utils/LayoutPermutation.h"
 #include "tensor_ir/Utils/Utils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -43,6 +45,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Ptr/IR/PtrOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
@@ -56,6 +59,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
+#include <optional>
 
 namespace mlir::nv_tensor_ir {
 
@@ -84,6 +89,8 @@ struct BoundaryAccess {
   OpFoldResult offset;
   /// Known memory alignment in bytes.
   IntegerAttr alignment;
+  /// Whether the backend may use TMA for accesses to the buffer.
+  bool allowTma = true;
   /// Flattened sequence of dynamic sizes followed by dynamic strides, indexed
   /// by the dynamic-value mapping of a TensorSourceAttr.
   SmallVector<Value> dynamicValues;
@@ -93,9 +100,9 @@ struct BoundaryAccess {
 
 /// Synthesize a default TensorSourceAttr from a boundary access descriptor.
 ///
-/// Used when an explicit output view attribute (result_views) is omitted on the
-/// function. Encodes the boundary access's static and dynamic sizes/strides into
-/// a CuTe Layout and derives the corresponding dynamic value mapping.
+/// Used when layout normalization records no explicit output views. Encodes
+/// the boundary access's static and dynamic sizes/strides into a CuTe Layout
+/// and derives the corresponding dynamic value mapping.
 static TensorSourceAttr buildTensorSource(MLIRContext *context,
                                           const BoundaryAccess &access) {
   tcg::Shape shape;
@@ -115,59 +122,116 @@ static TensorSourceAttr buildTensorSource(MLIRContext *context,
     }
   }
   tcg::Layout layout(shape, stride);
-  int64_t offset =
-      isa<Attribute>(access.offset)
-          ? cast<IntegerAttr>(cast<Attribute>(access.offset)).getInt()
-          : ShapedType::kDynamic;
-  return TensorSourceAttr::get(context, /*tensorId=*/-1, offset,
+  // The physical buffer offset is applied separately from the logical view
+  // offset when access metadata is created.
+  return TensorSourceAttr::get(context, /*tensorId=*/-1, /*offset=*/0,
                                layout.toString(),
                                getDynamicValueMapping(layout));
 }
 
-/// Unpack the layout provenance for each operand of an operation.
+/// Remap the operand layouts of a multi-source pointwise operation into the
+/// requested iteration space.
 ///
-/// Layout propagation annotates each operation with a layout source describing
-/// how its results are derived from input tensors. Different operation kinds
-/// represent operand provenance differently:
-/// - Pointwise ops with >1 operands: CompositeSourceAttr containing one layout
-///   per operand.
-/// - ConcatenateOp: ConcatSourceAttr containing the layouts of the concatenated
-///   sub-tensors.
-/// - ReduceOp / ReduceUDOp: ReductionSourceAttr containing the operand source
-///   layout (or a composite if multiple inputs).
-/// - MatmulOp: MatmulSourceAttr containing LHS, RHS, and optional accumulator.
-/// - Single-operand / uniform ops: The operation's own layout is shared across
-///   operands.
+/// Layout propagation assigns the operation the deduplicated union of its
+/// operand sources. The requested layout lists the same sources, in the same
+/// order, expressed in the iteration space. Each operand receives the
+/// requested counterparts of its own propagated sources.
 static FailureOr<SmallVector<LayoutSourceAttrInterface>>
-getOperandLayouts(Operation *op) {
-  auto layout = op->getAttrOfType<LayoutSourceAttrInterface>(
-      TensorIRDialect::getLayoutAttrName());
-  if (!layout) {
-    return op->emitError("missing layout attribute; run graph-splitting "
-                         "before tir-form-grid");
+remapPointwiseOperandLayouts(Operation *op, CompositeSourceAttr annotated,
+                             LayoutSourceAttrInterface requested,
+                             const LayoutPropagationAnalysis &propagation) {
+  auto target = dyn_cast<CompositeSourceAttr>(requested);
+  if (!target || target.size() != annotated.size()) {
+    return op->emitError("expected matching composite layout");
   }
 
-  if (isa<PointwiseOpInterface>(op) && op->getNumOperands() > 1) {
-    auto composite = dyn_cast<CompositeSourceAttr>(layout);
-    if (!composite || composite.size() != op->getNumOperands()) {
-      return op->emitError("expected one composite layout source per operand");
+  ArrayRef<LayoutSourceAttrInterface> annotatedSources = annotated.getSources();
+  SmallVector<LayoutSourceAttrInterface> operandLayouts;
+  for (Value operand : op->getOperands()) {
+    if (!isa<RankedTensorType>(operand.getType())) {
+      operandLayouts.push_back(nullptr);
+      continue;
     }
-    return SmallVector<LayoutSourceAttrInterface>(composite.getSources());
+    LayoutSourceAttrInterface operandLayout = propagation.getLayout(operand);
+    if (!operandLayout) {
+      return op->emitError("missing operand layout");
+    }
+    ArrayRef<LayoutSourceAttrInterface> operandSources(operandLayout);
+    if (auto composite = dyn_cast<CompositeSourceAttr>(operandLayout)) {
+      operandSources = composite.getSources();
+    }
+
+    SmallVector<LayoutSourceAttrInterface> remappedSources;
+    for (LayoutSourceAttrInterface source : operandSources) {
+      auto it = llvm::find(annotatedSources, source);
+      if (it == annotatedSources.end()) {
+        return op->emitError("composite layout mapping error");
+      }
+      remappedSources.push_back(
+          target.getSource(std::distance(annotatedSources.begin(), it)));
+    }
+    operandLayouts.push_back(
+        remappedSources.size() == 1
+            ? remappedSources.front()
+            : CompositeSourceAttr::get(op->getContext(), remappedSources));
+  }
+  return operandLayouts;
+}
+
+/// Derive the layout of each operand from the layout requested of `op`.
+///
+/// Requested layouts are expressed in the normalized iteration space, and a
+/// value with several users may be requested in several layouts. The forward
+/// layout of `op` only supplies operand provenance for multi-source pointwise
+/// operations. Operands that need no tile (scalars, pruned concatenation
+/// sources, and streaming scan_slice inputs) receive a null layout.
+static FailureOr<SmallVector<LayoutSourceAttrInterface>>
+inferOperandLayouts(Operation *op, LayoutSourceAttrInterface layout,
+                    const LayoutPropagationAnalysis &propagation) {
+  SmallVector<LayoutSourceAttrInterface> operandLayouts(op->getNumOperands());
+  if (isa<PointwiseOpInterface>(op) && !isa<BroadcastOp>(op)) {
+    auto annotated = dyn_cast_or_null<CompositeSourceAttr>(
+        propagation.getLayout(op->getResult(0)));
+    if (annotated && op->getNumOperands() > 1) {
+      return remapPointwiseOperandLayouts(op, annotated, layout, propagation);
+    }
+    llvm::fill(operandLayouts, layout);
+    return operandLayouts;
+  }
+  if (isa<ReshapeOp, TransposeOp, BroadcastOp, SliceOp>(op)) {
+    operandLayouts.front() = layout;
+    return operandLayouts;
   }
   if (isa<ConcatenateOp>(op)) {
     auto concat = dyn_cast<ConcatSourceAttr>(layout);
     if (!concat) {
       return op->emitError("expected concatenation layout");
     }
-    return SmallVector<LayoutSourceAttrInterface>(concat.getSources());
+    ArrayRef<int32_t> argumentIndex = concat.getArgumentIndex();
+    if (argumentIndex.empty()) {
+      if (concat.size() != op->getNumOperands()) {
+        return op->emitError("operand layouts cannot be inferred");
+      }
+      return SmallVector<LayoutSourceAttrInterface>(concat.getSources());
+    }
+    if (argumentIndex.size() != concat.size()) {
+      return op->emitError("invalid argument index for concatenation layout");
+    }
+    for (auto [sourceIndex, operandIndex] : llvm::enumerate(argumentIndex)) {
+      if (operandIndex < 0 ||
+          static_cast<size_t>(operandIndex) >= op->getNumOperands()) {
+        return op->emitError("invalid argument index for concatenation layout");
+      }
+      operandLayouts[operandIndex] = concat.getSource(sourceIndex);
+    }
+    return operandLayouts;
   }
-  if (auto reduction = dyn_cast<ReductionSourceAttr>(layout);
-      reduction && isa<ReduceOp>(op)) {
-    return SmallVector<LayoutSourceAttrInterface>{reduction.getSource()};
-  }
-  if (auto reduction = dyn_cast<ReductionSourceAttr>(layout);
-      reduction && isa<ReduceUDOp>(op)) {
-    if (op->getNumOperands() > 1) {
+  if (isa<ReduceOp, ReduceUDOp>(op)) {
+    auto reduction = dyn_cast<ReductionSourceAttr>(layout);
+    if (!reduction) {
+      return op->emitError("expected reduction layout");
+    }
+    if (isa<ReduceUDOp>(op) && op->getNumOperands() > 1) {
       auto composite = dyn_cast<CompositeSourceAttr>(reduction.getSource());
       if (!composite || composite.size() != op->getNumOperands()) {
         return op->emitError(
@@ -175,18 +239,30 @@ getOperandLayouts(Operation *op) {
       }
       return SmallVector<LayoutSourceAttrInterface>(composite.getSources());
     }
-    return SmallVector<LayoutSourceAttrInterface>{reduction.getSource()};
+    operandLayouts.front() = reduction.getSource();
+    return operandLayouts;
   }
-  if (auto matmul = dyn_cast<MatmulSourceAttr>(layout);
-      matmul && isa<MatmulOp>(op)) {
-    SmallVector<LayoutSourceAttrInterface> result{matmul.getLhs(),
-                                                  matmul.getRhs()};
-    if (op->getNumOperands() == 3) {
-      result.push_back(layout);
+  if (isa<MatmulOp>(op)) {
+    auto matmul = dyn_cast<MatmulSourceAttr>(layout);
+    if (!matmul) {
+      return op->emitError("expected matmul layout");
     }
-    return result;
+    operandLayouts[0] = matmul.getLhs();
+    operandLayouts[1] = matmul.getRhs();
+    return operandLayouts;
   }
-  return SmallVector<LayoutSourceAttrInterface>(op->getNumOperands(), layout);
+  if (isa<ScanSliceOp>(op)) {
+    auto scanSlice = dyn_cast<ScanSliceSourceAttr>(layout);
+    if (!scanSlice) {
+      return op->emitError("expected scan_slice source layout");
+    }
+    operandLayouts.front() = scanSlice.getCarry();
+    return operandLayouts;
+  }
+  if (llvm::any_of(op->getOperandTypes(), llvm::IsaPred<RankedTensorType>)) {
+    return op->emitError("operand layouts cannot be inferred");
+  }
+  return operandLayouts;
 }
 
 /// Extract a single concrete TensorSourceAttr from a layout source attribute.
@@ -212,14 +288,10 @@ getSingleTensorSource(LayoutSourceAttrInterface layout) {
 /// They must not survive into downstream lowering passes, which expect purely
 /// concrete SSA operations with explicit types.
 static void removeAnalysisAttrs(Operation *op) {
-  op->removeAttr(TensorIRDialect::getLayoutAttrName());
   op->removeAttr(TensorIRDialect::getIterSpaceMapAttrName());
   op->removeAttr(TensorIRDialect::getIterSpaceIdAttrName());
   op->removeAttr(TensorIRDialect::getIterSpaceIdsAttrName());
   op->removeAttr(TensorIRDialect::getIterSpaceDimDomainsAttrName());
-  op->removeAttr(TensorIRDialect::getIterationSpaceAttrName());
-  op->removeAttr(TensorIRDialect::getResultLayoutsAttrName());
-  op->removeAttr(TensorIRDialect::getResultViewsAttrName());
   op->removeAttr(TensorIRDialect::getTileSizeAttrName());
   op->removeAttr(TensorIRDialect::getTileCandidatesAttrName());
 }
@@ -334,6 +406,9 @@ static FailureOr<BoundaryAccess> getBoundaryAccess(OpBuilder &builder,
       std::max(1u, type.getElementType().getIntOrFloatBitWidth() / 8);
   access.alignment =
       builder.getI64IntegerAttr(alignment ? alignment.getInt() : elementBytes);
+  auto allowTma = function.getArgAttrOfType<BoolAttr>(
+      argument.getArgNumber(), TensorIRDialect::getAllowTMAAttrName());
+  access.allowTma = !allowTma || allowTma.getValue();
   return access;
 }
 
@@ -466,20 +541,32 @@ static Value materializeIndex(OpBuilder &builder, Location loc,
 ///   coord[N-1] = linear;
 ///
 /// Dimensions with a tile count of 1 are optimized to constant 0 without
-/// emitting modulo or division operations.
+/// emitting modulo or division operations. The last dimension with another
+/// tile count takes the remaining linear index.
 static SmallVector<Value>
 delinearize(OpBuilder &builder, Location loc, Value linear,
             ArrayRef<OpFoldResult> dimensionTileCounts) {
+  auto isSingleTile = [](OpFoldResult count) {
+    return getConstantIntValue(count) == 1;
+  };
+  size_t lastTiled = dimensionTileCounts.size();
+  for (size_t dimension = dimensionTileCounts.size(); dimension > 0;
+       --dimension) {
+    if (!isSingleTile(dimensionTileCounts[dimension - 1])) {
+      lastTiled = dimension - 1;
+      break;
+    }
+  }
   SmallVector<Value> result;
   result.reserve(dimensionTileCounts.size());
   Value zero;
   for (size_t dimension = 0; dimension < dimensionTileCounts.size();
        ++dimension) {
-    if (dimension + 1 == dimensionTileCounts.size()) {
+    if (dimension == lastTiled) {
       result.push_back(linear);
-      break;
+      continue;
     }
-    if (getConstantIntValue(dimensionTileCounts[dimension]) == 1) {
+    if (dimension > lastTiled || isSingleTile(dimensionTileCounts[dimension])) {
       if (!zero) {
         zero = arith::ConstantIndexOp::create(builder, loc, 0);
       }
@@ -497,7 +584,7 @@ delinearize(OpBuilder &builder, Location loc, Value linear,
 
 /// Determine the logical output view for a result store.
 ///
-/// Returns the view from resultViews if provided by pass options or metadata.
+/// Returns the view from resultViews if layout normalization provides one.
 /// Otherwise, synthesizes a layout from the physical output buffer and reshapes
 /// it into the normalized iteration-space carrier shape.
 static FailureOr<TensorSourceAttr>
@@ -547,9 +634,10 @@ struct ReductionTilePlan {
 /// preserved, broadcasted, or reduced. Derives inputTileShape, rawResultShape,
 /// and unbroadcastShape without emitting any IR.
 static FailureOr<ReductionTilePlan>
-planReductionTile(Operation *op, ArrayRef<int64_t> outputTileShape) {
-  auto layout = op->getAttrOfType<ReductionSourceAttr>(
-      TensorIRDialect::getLayoutAttrName());
+planReductionTile(Operation *op, LayoutSourceAttrInterface requested,
+                  ArrayRef<int64_t> outputTileShape,
+                  const LayoutPropagationAnalysis &propagation) {
+  auto layout = dyn_cast<ReductionSourceAttr>(requested);
   if (!layout) {
     return op->emitError("expected reduction layout");
   }
@@ -575,12 +663,7 @@ planReductionTile(Operation *op, ArrayRef<int64_t> outputTileShape) {
   SmallVector<int64_t> reductionShape = layout.getReductionShape();
   inputTileShape.append(reductionShape);
   MLIR_ASSIGN_OR_RETURN(SmallVector<LayoutSourceAttrInterface> operandLayouts,
-                        getOperandLayouts(op));
-  if (operandLayouts.size() != op->getNumOperands()) {
-    return op->emitError() << "expected " << op->getNumOperands()
-                           << " reduction operand layouts, got "
-                           << operandLayouts.size();
-  }
+                        inferOperandLayouts(op, layout, propagation));
   SmallVector<int32_t> reductionDimensions;
   for (size_t dimension = inputTileShape.size() - reductionShape.size();
        dimension < inputTileShape.size(); ++dimension) {
@@ -649,9 +732,9 @@ struct MatmulTilePlan {
 /// thresholds. Computes operand tile shapes and the permutation needed to
 /// restore the canonical MMA output to the logical result tile shape.
 static FailureOr<MatmulTilePlan>
-planMatmulTile(MatmulOp matmul, ArrayRef<int64_t> outputTileShape) {
-  auto layout = matmul->getAttrOfType<MatmulSourceAttr>(
-      TensorIRDialect::getLayoutAttrName());
+planMatmulTile(MatmulOp matmul, LayoutSourceAttrInterface requested,
+               ArrayRef<int64_t> outputTileShape) {
+  auto layout = dyn_cast<MatmulSourceAttr>(requested);
   if (!layout) {
     return matmul.emitError("expected matmul layout");
   }
@@ -790,6 +873,37 @@ planMatmulTile(MatmulOp matmul, ArrayRef<int64_t> outputTileShape) {
                         std::move(permutation)};
 }
 
+/// Map per-dimension values (tile extents or carry axes) through unit-only reshapes.
+/// Match logical extents, not tile extents: a tiled non-unit dimension may
+/// itself have tile size one and must not be mistaken for an inserted axis.
+static FailureOr<SmallVector<int64_t>>
+mapScanSliceDimensions(ArrayRef<int64_t> inputShape,
+                       ArrayRef<int64_t> inputValues,
+                       ArrayRef<int64_t> outputShape, int64_t unitValue = 1) {
+  SmallVector<int64_t> outputValues;
+  size_t inputDim = 0;
+  for (int64_t extent : outputShape) {
+    if (extent == 1) {
+      outputValues.push_back(unitValue);
+      continue;
+    }
+    while (inputDim < inputShape.size() && inputShape[inputDim] == 1) {
+      ++inputDim;
+    }
+    if (inputDim == inputShape.size() || inputShape[inputDim] != extent) {
+      return failure();
+    }
+    outputValues.push_back(inputValues[inputDim++]);
+  }
+  while (inputDim < inputShape.size() && inputShape[inputDim] == 1) {
+    ++inputDim;
+  }
+  if (inputDim != inputShape.size()) {
+    return failure();
+  }
+  return outputValues;
+}
+
 /// Memoization cache for recursively materialized tile values.
 ///
 /// TensorIR graphs frequently exhibit reconvergent dataflow (e.g. an input or
@@ -830,6 +944,33 @@ public:
     return {};
   }
 
+  /// Find a tile of `source` that holds the requested tile with permuted
+  /// dimensions. Returns the tile and the `nv_tensor_ir.transpose` permutation
+  /// that produces the requested tile from it.
+  std::optional<std::pair<Value, SmallVector<int64_t>>>
+  lookupPermuted(Value source, LayoutSourceAttrInterface layout,
+                 ArrayRef<Value> coordinates,
+                 ArrayRef<int64_t> tileShape) const {
+    size_t rank = tileShape.size();
+    for (const Entry &entry : entries) {
+      auto entryLayout = dyn_cast<LayoutSourceAttrInterface>(entry.layout);
+      if (entry.source != source || !entryLayout ||
+          entry.tileShape.size() != rank) {
+        continue;
+      }
+      auto permutation = findLayoutPermutation(
+          entryLayout, layout, [&](unsigned candidate, unsigned dimension) {
+            return entry.tileShape[candidate] == tileShape[dimension] &&
+                   isEqualConstantIntOrValue(entry.coordinates[candidate],
+                                             coordinates[dimension]);
+          });
+      if (succeeded(permutation)) {
+        return std::make_pair(entry.tile, std::move(*permutation));
+      }
+    }
+    return std::nullopt;
+  }
+
   void insert(Value source, Attribute layout, ArrayRef<Value> coordinates,
               ArrayRef<int64_t> tileShape, Value tile) {
     entries.push_back({source, layout, SmallVector<Value>(coordinates),
@@ -857,10 +998,14 @@ private:
 /// speculated before them.
 class TileMaterializer {
 public:
-  /// Maps each boundary bufferization.to_tensor result to its buffer metadata.
+  /// Maps boundary tensors to their input or output buffer metadata. ScanSlice
+  /// histories use the output metadata to emit stores inside the carry loop.
   explicit TileMaterializer(
-      const llvm::DenseMap<Value, BoundaryAccess> &inputAccesses)
-      : inputAccesses(inputAccesses) {}
+      const LayoutPropagationAnalysis &propagation,
+      const llvm::DenseMap<Value, BoundaryAccess> &inputAccesses,
+      const llvm::DenseMap<Value, BoundaryAccess> &outputAccesses)
+      : propagation(propagation), inputAccesses(inputAccesses),
+        outputAccesses(outputAccesses) {}
 
   /// Recursively materialize a tile of `value` conforming to `expectedLayout`
   /// at the given `coordinates` with shape `tileShape`.
@@ -881,8 +1026,16 @@ public:
              << "bufferized TensorIR functions cannot have tensor arguments";
     }
 
-    if (Value found = computedValues.lookup(value, /*layout=*/{}, coordinates,
+    if (!expectedLayout) {
+      return emitError(value.getLoc())
+             << "tiled value has no iteration-space layout";
+    }
+    if (Value found = computedValues.lookup(value, expectedLayout, coordinates,
                                             tileShape)) {
+      return found;
+    }
+    if (Value found = reusePermutedTile(computedValues, value, expectedLayout,
+                                        coordinates, tileShape, builder)) {
       return found;
     }
 
@@ -892,35 +1045,45 @@ public:
              << "tiled value is not defined in the TensorIR graph body";
     }
 
-    if (auto concat = dyn_cast<ConcatenateOp>(op)) {
+    if (auto scanSlice = dyn_cast<ScanSliceOp>(op)) {
+      if (value != scanSlice.getResults().front()) {
+        return scanSlice.emitError(
+            "streaming scan_slice outputs cannot be materialized as tiles");
+      }
       MLIR_ASSIGN_OR_RETURN(
-          Value result,
-          materializeConcatenate(concat, coordinates, tileShape, builder));
-      computedValues.insert(value, /*layout=*/{}, coordinates, tileShape,
+          Value result, materializeScanSlice(scanSlice, expectedLayout,
+                                             coordinates, tileShape, builder));
+      computedValues.insert(value, expectedLayout, coordinates, tileShape,
+                            result);
+      return result;
+    }
+    if (auto concat = dyn_cast<ConcatenateOp>(op)) {
+      MLIR_ASSIGN_OR_RETURN(Value result, materializeConcatenate(
+                                              concat, expectedLayout,
+                                              coordinates, tileShape, builder));
+      computedValues.insert(value, expectedLayout, coordinates, tileShape,
                             result);
       return result;
     }
     if (auto matmul = dyn_cast<MatmulOp>(op)) {
-      return materializeMatmul(matmul, coordinates, tileShape, builder);
+      return materializeMatmul(matmul, expectedLayout, coordinates, tileShape,
+                               builder);
     }
     if (isa<ReduceOp, ReduceUDOp>(op)) {
-      return materializeReduction(value, coordinates, tileShape, builder);
+      return materializeReduction(value, expectedLayout, coordinates, tileShape,
+                                  builder);
     }
     if (auto iota = dyn_cast<IotaOp>(op)) {
-      MLIR_ASSIGN_OR_RETURN(
-          Value result, materializeIota(iota, coordinates, tileShape, builder));
-      computedValues.insert(value, /*layout=*/{}, coordinates, tileShape,
+      MLIR_ASSIGN_OR_RETURN(Value result,
+                            materializeIota(iota, expectedLayout, coordinates,
+                                            tileShape, builder));
+      computedValues.insert(value, expectedLayout, coordinates, tileShape,
                             result);
       return result;
     }
 
     MLIR_ASSIGN_OR_RETURN(SmallVector<LayoutSourceAttrInterface> operandLayouts,
-                          getOperandLayouts(op));
-    if (operandLayouts.size() != op->getNumOperands()) {
-      return op->emitError()
-             << "expected " << op->getNumOperands() << " operand layouts, got "
-             << operandLayouts.size();
-    }
+                          inferOperandLayouts(op, expectedLayout, propagation));
 
     // These operations only modify logical addressing. Their analyzed layout
     // is passed to the underlying source load, so no tile compute remains.
@@ -928,7 +1091,7 @@ public:
       MLIR_ASSIGN_OR_RETURN(
           Value result, materialize(op->getOperand(0), operandLayouts.front(),
                                     coordinates, tileShape, builder));
-      computedValues.insert(value, /*layout=*/{}, coordinates, tileShape,
+      computedValues.insert(value, expectedLayout, coordinates, tileShape,
                             result);
       return result;
     }
@@ -968,7 +1131,7 @@ public:
                                        original.getSplatValue<APInt>());
       Value result = ConstantOp::create(builder, constant.getLoc(), resultType,
                                         cast<TypedAttr>(constantValue));
-      computedValues.insert(value, /*layout=*/{}, coordinates, tileShape,
+      computedValues.insert(value, expectedLayout, coordinates, tileShape,
                             result);
       return result;
     }
@@ -989,13 +1152,294 @@ public:
     }
     for (auto [original, cloned] :
          llvm::zip(op->getResults(), clone->getResults())) {
-      computedValues.insert(original, /*layout=*/{}, coordinates, tileShape,
+      computedValues.insert(original, expectedLayout, coordinates, tileShape,
                             cloned);
     }
-    return computedValues.lookup(value, /*layout=*/{}, coordinates, tileShape);
+    return computedValues.lookup(value, expectedLayout, coordinates, tileShape);
   }
 
 private:
+  /// Derive a requested tile from a cached tile of the same value whose
+  /// dimensions are permuted, instead of loading or computing it again.
+  Value reusePermutedTile(TileCache &cache, Value value,
+                          LayoutSourceAttrInterface layout,
+                          ArrayRef<Value> coordinates,
+                          ArrayRef<int64_t> tileShape, OpBuilder &builder) {
+    auto permuted = cache.lookupPermuted(value, layout, coordinates, tileShape);
+    if (!permuted) {
+      return {};
+    }
+    auto [tile, permutation] = *permuted;
+    Value result = tile;
+    if (!isIdentityPermutation(permutation)) {
+      auto type = RankedTensorType::get(
+          tileShape, cast<RankedTensorType>(tile.getType()).getElementType());
+      result =
+          TransposeOp::create(builder, value.getLoc(), type, tile, permutation);
+    }
+    cache.insert(value, layout, coordinates, tileShape, result);
+    return result;
+  }
+
+  /// Lower a recurrence to explicit tiled TensorIR inside an scf.for. Streaming
+  /// accesses are emitted here, before the ordinary outlined-kernel conversion.
+  FailureOr<Value> materializeScanSlice(ScanSliceOp scanSlice,
+                                        LayoutSourceAttrInterface layout,
+                                        ArrayRef<Value> coordinates,
+                                        ArrayRef<int64_t> tileShape,
+                                        OpBuilder &builder) {
+    auto source = dyn_cast<ScanSliceSourceAttr>(layout);
+    auto carryType = cast<TensorType>(scanSlice.getInputs().front().getType());
+    ArrayRef<int64_t> carryShape = carryType.getShape();
+    if (!source || tileShape.size() != carryShape.size()) {
+      return scanSlice.emitError(
+          "scan_slice requires a carry-ranked source layout and tile");
+    }
+    Block &body = scanSlice.getBody().front();
+    for (Operation &operation : body.without_terminator()) {
+      if (!isa<AddOp, MulOp, ExpOp, SubOp, DivOp, MinOp, MaxOp, NegOp, AbsOp,
+               LogOp, SqrtOp, RsqrtOp, ReciprocalOp, SinOp, CosOp, TanhFwdOp,
+               CeilOp, FloorOp, ConvertOp, ReshapeOp, BroadcastOp, ReduceOp>(
+              operation)) {
+        return operation.emitOpError("is not supported inside scan_slice");
+      }
+      if (auto reshape = dyn_cast<ReshapeOp>(operation)) {
+        auto input = reshape.getInput().getType().getShape();
+        auto output = reshape.getOutput().getType().getShape();
+        if (failed(mapScanSliceDimensions(input, input, output))) {
+          return reshape.emitError(
+              "scan_slice body reshape only supports inserting "
+              "or removing unit dimensions");
+        }
+      }
+    }
+    SmallVector<BoundaryAccess> stores;
+    for (Value output : scanSlice.getResults().drop_front()) {
+      if (!output.hasOneUse()) {
+        return scanSlice.emitError(
+            "scan_slice side results must have one boundary store");
+      }
+      auto store = dyn_cast<bufferization::MaterializeInDestinationOp>(
+          *output.user_begin());
+      auto access = outputAccesses.find(output);
+      if (!store || store.getSource() != output ||
+          access == outputAccesses.end()) {
+        return scanSlice.emitError(
+            "scan_slice side results must have one boundary store");
+      }
+      auto outputType = cast<TensorType>(output.getType());
+      int64_t stride = 1;
+      for (int64_t dim = outputType.getRank() - 1; dim >= 0; --dim) {
+        if (outputType.getDimSize(dim) != 1 &&
+            getConstantIntValue(access->second.strides[dim]) != stride) {
+          return scanSlice.emitError(
+              "scan_slice side outputs require contiguous strides");
+        }
+        stride *= outputType.getDimSize(dim);
+      }
+      stores.push_back(access->second);
+    }
+    MLIR_ASSIGN_OR_RETURN(Value carry,
+                          materialize(scanSlice.getInputs().front(),
+                                      source.getCarry(), coordinates, tileShape,
+                                      builder));
+    Location loc = scanSlice.getLoc();
+    int64_t extent = scanSlice.getScanExtent();
+    Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+    Value upper = arith::ConstantIndexOp::create(builder, loc, extent);
+    Value one = arith::ConstantIndexOp::create(builder, loc, 1);
+    auto loop =
+        scf::ForOp::create(builder, loc, zero, upper, one, ValueRange{carry});
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToEnd(loop.getBody());
+    Value step = loop.getInductionVar();
+    if (scanSlice.getReverse()) {
+      Value last = arith::ConstantIndexOp::create(builder, loc, extent - 1);
+      step = arith::SubIOp::create(builder, loc, last, step);
+    }
+    auto offsetAtStep = [&](OpFoldResult base, int64_t stride) -> Value {
+      Value strideValue = arith::ConstantIndexOp::create(builder, loc, stride);
+      Value offset = arith::MulIOp::create(builder, loc, step, strideValue);
+      Value baseValue = materializeIndex(builder, loc, base);
+      return arith::AddIOp::create(builder, loc, baseValue, offset);
+    };
+    IRMapping mapping;
+    mapping.map(body.getArgument(0), loop.getRegionIterArgs().front());
+    // Unit-only reshapes preserve axis identities. Track those identities to
+    // reject broadcasts/uses that would require data from a different tile.
+    SmallVector<int64_t> carryAxes;
+    for (auto [dim, extent] : llvm::enumerate(carryShape)) {
+      carryAxes.push_back(extent == 1 ? -1 : static_cast<int64_t>(dim));
+    }
+    DenseMap<Value, SmallVector<int64_t>> axes;
+    axes[body.getArgument(0)] = carryAxes;
+    for (auto [index, attribute] : llvm::enumerate(source.getInputs())) {
+      auto input = cast<ScanSliceInputAttr>(attribute);
+      auto view = cast<TensorSourceAttr>(input.getSource());
+      OpOperand &operand = scanSlice->getOpOperand(index + 1);
+      auto accessIt = inputAccesses.find(operand.get());
+      if (accessIt == inputAccesses.end()) {
+        return scanSlice.emitError(
+            "scan_slice inputs must be boundary tensors during formation");
+      }
+      const BoundaryAccess &access = accessIt->second;
+      MLIR_ASSIGN_OR_RETURN(auto descriptor,
+                            decodeLogicalDescriptor(view, access, scanSlice));
+      MLIR_ASSIGN_OR_RETURN(
+          auto metadata,
+          createAccessMetadata(builder, scanSlice, view, access, descriptor));
+      Value offset = offsetAtStep(metadata.offset, input.getScanStride());
+      BlockArgument argument = scanSlice.getBlockArgumentForOperand(operand);
+      auto argumentType = cast<TensorType>(argument.getType());
+      if (!llvm::equal(view.getShape(), argumentType.getShape())) {
+        return scanSlice.emitError(
+            "scan_slice input layout must retain the native slice shape");
+      }
+      auto inputAxes =
+          getScanSliceInputAxes(carryShape, argumentType.getShape());
+      if (failed(inputAxes)) {
+        return scanSlice.emitError(
+            "scan_slice input axes do not match the carry dimensions");
+      }
+      SmallVector<int64_t> inputShape;
+      SmallVector<OpFoldResult> indices;
+      for (int64_t axis : *inputAxes) {
+        inputShape.push_back(axis < 0 ? 1 : tileShape[axis]);
+        indices.push_back(axis < 0 ? OpFoldResult(builder.getIndexAttr(0))
+                                   : getAsOpFoldResult(coordinates[axis]));
+      }
+      auto type =
+          RankedTensorType::get(inputShape, argumentType.getElementType());
+      // metadata.alignment already accounts for the static source offset.
+      // Every step adds scanStride elements (also for reverse scans), so the
+      // view origin retains the gcd of that byte stride and its alignment.
+      // Factor out the element-byte gcd to avoid overflowing stride * bytes.
+      int64_t alignment = metadata.alignment.getInt();
+      int64_t elementBytes =
+          std::max(1u, access.elementType.getIntOrFloatBitWidth() / 8);
+      int64_t byteAlignment = std::gcd(alignment, elementBytes);
+      alignment = byteAlignment *
+                  std::gcd(alignment / byteAlignment, input.getScanStride());
+      Value tile = LoadOp::create(builder, loc, type, access.base, offset,
+                                  metadata.sizes, metadata.strides, indices,
+                                  builder.getI64IntegerAttr(alignment),
+                                  TilePaddingAttr{}, access.allowTma);
+      mapping.map(argument, tile);
+      axes[argument] = std::move(*inputAxes);
+    }
+    for (Operation &operation : body.without_terminator()) {
+      if (auto convert = dyn_cast<ConvertOp>(operation);
+          convert &&
+          convert.getInput().getType() == convert.getOutput().getType()) {
+        mapping.map(convert.getOutput(), mapping.lookup(convert.getInput()));
+        axes[convert.getOutput()] = axes.lookup(convert.getInput());
+        continue;
+      }
+      auto type = cast<TensorType>(operation.getResult(0).getType());
+      auto inputType = cast<TensorType>(operation.getOperand(0).getType());
+      auto tiledInput =
+          cast<TensorType>(mapping.lookup(operation.getOperand(0)).getType());
+      SmallVector<int64_t> resultShape(tiledInput.getShape());
+      auto resultAxes = axes.lookup(operation.getOperand(0));
+      if (isa<ReshapeOp>(operation)) {
+        auto reshaped = mapScanSliceDimensions(inputType.getShape(),
+                                               resultShape, type.getShape());
+        if (failed(reshaped)) {
+          return operation.emitError("cannot reshape scan_slice body tile");
+        }
+        resultShape = std::move(*reshaped);
+        resultAxes = *mapScanSliceDimensions(inputType.getShape(), resultAxes,
+                                             type.getShape(), -1);
+      } else if (isa<BroadcastOp>(operation)) {
+        // Broadcast uses positional carry axes only. A non-unit input axis
+        // must already be in its carry position; expanding a unit dimension
+        // binds that position to the corresponding carry axis.
+        for (auto [dim, axis] : llvm::enumerate(resultAxes)) {
+          if (axis != -1 && axis != static_cast<int64_t>(dim)) {
+            return operation.emitError(
+                "scan_slice body broadcast input axis must be "
+                "-1 or match its dimension position");
+          }
+        }
+        for (auto [dim, extent] : llvm::enumerate(type.getShape())) {
+          if (extent == 1) {
+            resultShape[dim] = 1;
+            resultAxes[dim] = -1;
+            continue;
+          }
+          if (dim >= carryShape.size() || extent != carryShape[dim]) {
+            return operation.emitError(
+                "scan_slice body broadcast dimensions must be one or match the "
+                "corresponding carry dimension");
+          }
+          resultShape[dim] = tileShape[dim];
+          resultAxes[dim] = dim;
+        }
+      } else if (auto reduce = dyn_cast<ReduceOp>(operation)) {
+        if (reduce.getReductionMode() != ReductionMode::add ||
+            reduce.getDimensions().size() != 1 ||
+            reduce.getDimensions().front() != inputType.getRank() - 1 ||
+            resultShape.back() != inputType.getShape().back()) {
+          return reduce.emitError(
+              "scan_slice supports only a fully tiled innermost add reduction");
+        }
+        resultShape.back() = 1;
+        resultAxes.back() = -1;
+      } else {
+        for (Value operand : operation.getOperands().drop_front()) {
+          if (axes.lookup(operand) != resultAxes) {
+            return operation.emitError(
+                "scan_slice body operands must use the same carry axes");
+          }
+        }
+      }
+      axes[operation.getResult(0)] = std::move(resultAxes);
+      Operation *clone = builder.clone(operation, mapping);
+      removeAnalysisAttrs(clone);
+      clone->getResult(0).setType(
+          RankedTensorType::get(resultShape, type.getElementType()));
+      if (isa<ReduceOp>(clone)) {
+        // The recurrence already supplies a complete reduction tile. Splitting
+        // its producer would incorrectly try to retile the loop-carried state.
+        clone->setAttr("nv_tensor_ir.scan_slice_reduction",
+                       builder.getUnitAttr());
+      }
+    }
+    auto yield = scanSlice.getBodyTerminator();
+    for (Value value : yield.getOperands()) {
+      auto type = cast<TensorType>(value.getType());
+      auto valueAxes = axes.lookup(value);
+      for (auto [dim, extent] : llvm::enumerate(type.getShape())) {
+        if (extent != 1 && valueAxes[dim] != carryAxes[dim]) {
+          return scanSlice.emitError(
+              "scan_slice body yield must preserve the carry axes");
+        }
+      }
+    }
+    for (auto [index, store] : llvm::enumerate(stores)) {
+      auto type = cast<TensorType>(scanSlice.getResults()[index + 1].getType());
+      auto slice =
+          getScanSliceOutputSlice(type, scanSlice.getOutputDimensions()[index]);
+      SmallVector<OpFoldResult> sizes;
+      SmallVector<OpFoldResult> strides;
+      SmallVector<OpFoldResult> indices = getAsOpFoldResult(coordinates);
+      for (auto [dim, size] : llvm::enumerate(slice.shape)) {
+        sizes.push_back(builder.getIndexAttr(size));
+        strides.push_back(builder.getIndexAttr(slice.strides[dim]));
+        if (size == 1) {
+          indices[dim] = builder.getIndexAttr(0);
+        }
+      }
+      Value offset = offsetAtStep(store.offset, slice.scanStride);
+      Value tile = mapping.lookup(yield.getOperand(index + 1));
+      StoreOp::create(builder, loc, tile, store.base, offset, sizes, strides,
+                      indices, builder.getI64IntegerAttr(1), store.allowTma);
+    }
+    Value nextCarry = mapping.lookup(yield.getOperand(0));
+    scf::YieldOp::create(builder, loc, nextCarry);
+    return loop.getResult(0);
+  }
+
   /// Materialize an IotaOp tile.
   ///
   /// Computes both the intra-tile index variations and the inter-tile global
@@ -1004,11 +1448,12 @@ private:
   /// computed as `coordinates[dim] * tileShape[dim] * stride`, summed into
   /// a scalar, splatted across the tile, and added to the local indices.
   /// Floating-point iotas are generated as unsigned integer and converted.
-  FailureOr<Value> materializeIota(IotaOp iota, ArrayRef<Value> coordinates,
+  FailureOr<Value> materializeIota(IotaOp iota,
+                                   LayoutSourceAttrInterface requested,
+                                   ArrayRef<Value> coordinates,
                                    ArrayRef<int64_t> tileShape,
                                    OpBuilder &builder) {
-    auto layout = iota->getAttrOfType<TensorSourceAttr>(
-        TensorIRDialect::getLayoutAttrName());
+    auto layout = dyn_cast<TensorSourceAttr>(requested);
     if (!layout || layout.getShape().size() != tileShape.size() ||
         coordinates.size() != tileShape.size()) {
       return iota.emitError(
@@ -1158,6 +1603,10 @@ private:
                                           coordinates, tileShape)) {
       return found;
     }
+    if (Value found = reusePermutedTile(loadedValues, input.getResult(), source,
+                                        coordinates, tileShape, builder)) {
+      return found;
+    }
     if (source.getShape().size() != tileShape.size()) {
       return input.emitError()
              << "iteration-space source rank " << source.getShape().size()
@@ -1190,7 +1639,7 @@ private:
     Value result = LoadOp::create(
         builder, loc, resultType, access.base, metadata.offset, metadata.sizes,
         metadata.strides, sourceCoordinates, metadata.alignment,
-        /*padding=*/TilePaddingAttr{});
+        /*padding=*/TilePaddingAttr{}, access.allowTma);
     loadedValues.insert(input.getResult(), source, coordinates, tileShape,
                         result);
     return result;
@@ -1204,11 +1653,11 @@ private:
   /// branch subtracts `threshold` from the coordinate and recurses on remaining
   /// sources. Uses CacheScope to isolate tiles materialized within each branch.
   FailureOr<Value> materializeConcatenate(ConcatenateOp concat,
+                                          LayoutSourceAttrInterface requested,
                                           ArrayRef<Value> coordinates,
                                           ArrayRef<int64_t> tileShape,
                                           OpBuilder &builder) {
-    auto layout = concat->getAttrOfType<ConcatSourceAttr>(
-        TensorIRDialect::getLayoutAttrName());
+    auto layout = dyn_cast<ConcatSourceAttr>(requested);
     if (!layout) {
       return concat.emitError("expected concatenation layout");
     }
@@ -1309,6 +1758,7 @@ private:
   /// Note: Contracting dimensions remain coarse here; strip-mining them into
   /// accumulation loops is handled by the subsequent TileReductionsPass.
   FailureOr<Value> materializeReduction(Value requestedResult,
+                                        LayoutSourceAttrInterface layout,
                                         ArrayRef<Value> coordinates,
                                         ArrayRef<int64_t> outputTileShape,
                                         OpBuilder &builder) {
@@ -1316,8 +1766,9 @@ private:
     if (coordinates.size() != outputTileShape.size()) {
       return op->emitError("reduction layout does not match the output tile");
     }
-    MLIR_ASSIGN_OR_RETURN(ReductionTilePlan plan,
-                          planReductionTile(op, outputTileShape));
+    MLIR_ASSIGN_OR_RETURN(
+        ReductionTilePlan plan,
+        planReductionTile(op, layout, outputTileShape, propagation));
     SmallVector<Value> inputCoordinates;
     for (size_t dimension : plan.inputDimensions) {
       inputCoordinates.push_back(coordinates[dimension]);
@@ -1364,10 +1815,10 @@ private:
             builder, op->getLoc(),
             RankedTensorType::get(outputTileShape, elementType), result);
       }
-      computedValues.insert(original, /*layout=*/{}, coordinates,
-                            outputTileShape, result);
+      computedValues.insert(original, layout, coordinates, outputTileShape,
+                            result);
     }
-    return computedValues.lookup(requestedResult, /*layout=*/{}, coordinates,
+    return computedValues.lookup(requestedResult, layout, coordinates,
                                  outputTileShape);
   }
 
@@ -1379,6 +1830,7 @@ private:
   /// contracting dimensions). Applies reshape, transposition (permutation),
   /// and broadcasting to reconstruct the expected output tile shape.
   FailureOr<Value> materializeMatmul(MatmulOp matmul,
+                                     LayoutSourceAttrInterface layout,
                                      ArrayRef<Value> coordinates,
                                      ArrayRef<int64_t> outputTileShape,
                                      OpBuilder &builder) {
@@ -1387,7 +1839,7 @@ private:
           "matmul coordinates do not match the output tile rank");
     }
     MLIR_ASSIGN_OR_RETURN(MatmulTilePlan plan,
-                          planMatmulTile(matmul, outputTileShape));
+                          planMatmulTile(matmul, layout, outputTileShape));
     auto buildOperandTile =
         [&](Value operand, LayoutSourceAttrInterface layout,
             const MatmulOperandTilePlan &operandPlan) -> FailureOr<Value> {
@@ -1467,7 +1919,7 @@ private:
           builder, matmul.getLoc(),
           RankedTensorType::get(outputTileShape, elementType), result);
     }
-    computedValues.insert(matmul.getResult(), /*layout=*/{}, coordinates,
+    computedValues.insert(matmul.getResult(), layout, coordinates,
                           outputTileShape, result);
     return result;
   }
@@ -1483,18 +1935,86 @@ private:
     llvm::ScopedHashTableScope<Value, Value> scalars;
   };
 
+  const LayoutPropagationAnalysis &propagation;
   const llvm::DenseMap<Value, BoundaryAccess> &inputAccesses;
+  const llvm::DenseMap<Value, BoundaryAccess> &outputAccesses;
   llvm::ScopedHashTable<Value, Value> computedScalars;
   llvm::ScopedHashTableScope<Value, Value> scalarScope{computedScalars};
   TileCache computedValues;
   TileCache loadedValues;
 };
 
+/// Rebuild the boundary layout of `tensor`, bridged from `buffer`. Tensor IDs
+/// are function argument numbers, which follow the graph signature.
+static FailureOr<TensorSourceAttr> getBoundarySource(func::FuncOp function,
+                                                     Value buffer, Value tensor,
+                                                     Operation *diagnosticOp) {
+  auto argument = dyn_cast<BlockArgument>(buffer);
+  auto type = dyn_cast<MemRefType>(buffer.getType());
+  auto tensorType = dyn_cast<RankedTensorType>(tensor.getType());
+  if (!argument || argument.getOwner() != &function.getBody().front() ||
+      !type || !tensorType) {
+    return diagnosticOp->emitError(
+        "bufferized TensorIR boundary must be a memref function argument");
+  }
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (failed(type.getStridesAndOffset(strides, offset))) {
+    return diagnosticOp->emitError()
+           << "bufferized TensorIR boundary must be strided, but got " << type;
+  }
+  tcg::Stride stride;
+  for (int64_t value : strides) {
+    if (ShapedType::isDynamic(value)) {
+      stride.appendDynamic();
+    } else {
+      stride.append(value);
+    }
+  }
+  tcg::Layout layout(getShapeRef(tensorType), stride);
+  return TensorSourceAttr::get(function.getContext(), argument.getArgNumber(),
+                               /*offset=*/0, layout.toString(),
+                               getDynamicValueMapping(layout));
+}
+
+/// Build the layout-propagation boundary of a bufferized function from its
+/// bufferization bridges.
+static FailureOr<LayoutBoundary>
+getLayoutBoundary(func::FuncOp function,
+                  ArrayRef<bufferization::ToTensorOp> inputs,
+                  ArrayRef<bufferization::MaterializeInDestinationOp> outputs) {
+  LayoutBoundary boundary;
+  boundary.op = function;
+  boundary.body = &function.getBody().front();
+  auto isDynamic = [](Value value) {
+    return !cast<ShapedType>(value.getType()).hasStaticShape();
+  };
+  for (bufferization::ToTensorOp input : inputs) {
+    MLIR_ASSIGN_OR_RETURN(TensorSourceAttr source,
+                          getBoundarySource(function, input.getBuffer(),
+                                            input.getResult(), input));
+    boundary.inputs[input.getResult()] = source;
+    boundary.boundaryOps.insert(input);
+    boundary.hasDynamicShapes |= isDynamic(input.getResult());
+  }
+  for (bufferization::MaterializeInDestinationOp output : outputs) {
+    MLIR_ASSIGN_OR_RETURN(TensorSourceAttr source,
+                          getBoundarySource(function, output.getDest(),
+                                            output.getSource(), output));
+    boundary.results.push_back(output.getSource());
+    boundary.outputs.push_back(source);
+    boundary.boundaryOps.insert(output);
+    boundary.hasDynamicShapes |= isDynamic(output.getSource());
+  }
+  return boundary;
+}
+
 /// Main driver for FormGridPass.
 ///
 /// Execution proceeds in six phases:
 /// 1. Validation: Verify the function has bufferized_program attribute, a single
-///    entry block, valid outputs, iteration space, and tile size.
+///    entry block, valid outputs, and tile size, and compute its layout
+///    propagation and normalized iteration space.
 /// 2. Boundary decoding: Read metadata for each boundary buffer, resolve
 ///    logical output views, and decode their descriptors. Collect dynamic
 ///    extents when any dimension is dynamic.
@@ -1512,7 +2032,7 @@ static LogicalResult formGrid(func::FuncOp function) {
     return success();
   }
 
-  // === Phase 1: Validate function structure, boundary outputs, and layout attributes ===
+  // === Phase 1: Validate function structure, boundary outputs, and layouts ===
   if (function.isExternal() || !function.getBody().hasOneBlock()) {
     return function.emitError(
         "bufferized TensorIR program must define one entry block");
@@ -1527,12 +2047,16 @@ static LogicalResult formGrid(func::FuncOp function) {
                               "bufferization.materialize_in_destination");
   }
 
-  auto rootLayout = function->getAttrOfType<LayoutSourceAttrInterface>(
-      TensorIRDialect::getIterationSpaceAttrName());
-  if (!rootLayout) {
-    return function.emitError(
-        "missing iteration_space attribute on bufferized program");
+  MLIR_ASSIGN_OR_RETURN(LayoutBoundary boundary,
+                        getLayoutBoundary(function, inputs, outputs));
+  FailureOr<LayoutPropagationAnalysis> propagation =
+      LayoutPropagationAnalysis::compute(boundary);
+  if (failed(propagation)) {
+    return failure();
   }
+  MLIR_ASSIGN_OR_RETURN(LayoutNormalization normalization,
+                        LayoutNormalization::compute(*propagation));
+  LayoutSourceAttrInterface rootLayout = normalization.iterationSpace;
   auto tileAttr = function->getAttrOfType<DenseI32ArrayAttr>(
       TensorIRDialect::getTileSizeAttrName());
   if (!tileAttr) {
@@ -1548,41 +2072,20 @@ static LogicalResult formGrid(func::FuncOp function) {
                                 << " positive dimensions";
   }
 
-  MLIR_ASSIGN_OR_RETURN(auto resultViews,
-                        getResultViews(function.getOperation()));
-  MLIR_ASSIGN_OR_RETURN(auto resultLayouts,
-                        getResultLayouts(function.getOperation()));
-  if (outputs.size() > 1) {
-    if (resultLayouts.size() != outputs.size() ||
-        resultViews.size() != outputs.size()) {
+  SmallVector<TensorSourceAttr> resultViews = normalization.resultViews;
+  SmallVector<LayoutSourceAttrInterface> resultLayouts =
+      normalization.resultLayouts;
+  for (auto [index, pair] :
+       llvm::enumerate(llvm::zip_equal(resultLayouts, resultViews))) {
+    auto [layout, view] = pair;
+    if (layout.getShape() != rootShape || view.getShape() != rootShape) {
       return function.emitError()
-             << "multi-output layout metadata must have " << outputs.size()
-             << " entries, but result_layouts has " << resultLayouts.size()
-             << " and result_views has " << resultViews.size();
-    }
-    for (auto [index, pair] :
-         llvm::enumerate(llvm::zip_equal(resultLayouts, resultViews))) {
-      auto [layout, view] = pair;
-      if (layout.getShape() != rootShape || view.getShape() != rootShape) {
-        return function.emitError()
-               << "multi-output result " << index
-               << " is not expressed in normalized carrier shape "
-               << vectorToString(rootShape);
-      }
-    }
-  } else if (!resultLayouts.empty() || !resultViews.empty()) {
-    if (resultLayouts.size() != 1 || resultViews.size() != 1) {
-      return function.emitError(
-          "single-output result metadata must be absent or have one entry");
-    }
-    if (resultLayouts.front().getShape() != rootShape ||
-        resultViews.front().getShape() != rootShape) {
-      return function.emitError()
-             << "single-output result metadata is not expressed in "
-                "normalized carrier shape "
+             << "result " << index
+             << " is not expressed in normalized carrier shape "
              << vectorToString(rootShape);
     }
-  } else {
+  }
+  if (resultLayouts.empty()) {
     resultLayouts.push_back(rootLayout);
   }
 
@@ -1597,6 +2100,7 @@ static LogicalResult formGrid(func::FuncOp function) {
   }
 
   SmallVector<BoundaryAccess> outputAccesses;
+  llvm::DenseMap<Value, BoundaryAccess> outputAccessByValue;
   SmallVector<TensorSourceAttr> outputViews;
   SmallVector<LogicalDescriptor> outputDescriptors;
   outputAccesses.reserve(outputs.size());
@@ -1610,6 +2114,7 @@ static LogicalResult formGrid(func::FuncOp function) {
     MLIR_ASSIGN_OR_RETURN(
         BoundaryAccess access,
         getBoundaryAccess(builder, function, output.getDest(), output));
+    outputAccessByValue.try_emplace(output.getSource(), access);
     outputAccesses.push_back(std::move(access));
     MLIR_ASSIGN_OR_RETURN(TensorSourceAttr view,
                           getOutputView(function, outputAccesses.back(), index,
@@ -1652,18 +2157,14 @@ static LogicalResult formGrid(func::FuncOp function) {
       return function.emitError() << "normalized dimension " << dimension
                                   << " is dynamic but has no runtime extent";
     }
-    Value adjusted = dynamicExtent;
+    Value tileCount = dynamicExtent;
     if (tile != 1) {
-      Value increment = arith::ConstantIndexOp::create(
-          entryBuilder, function.getLoc(), tile - 1);
-      adjusted = arith::AddIOp::create(entryBuilder, function.getLoc(),
-                                       adjusted, increment);
       Value divisor =
           arith::ConstantIndexOp::create(entryBuilder, function.getLoc(), tile);
-      adjusted = arith::DivUIOp::create(entryBuilder, function.getLoc(),
-                                        adjusted, divisor);
+      tileCount = arith::CeilDivUIOp::create(entryBuilder, function.getLoc(),
+                                             dynamicExtent, divisor);
     }
-    tileCounts.push_back(adjusted);
+    tileCounts.push_back(tileCount);
   }
 
   OpFoldResult totalTiles = entryBuilder.getIndexAttr(1);
@@ -1698,11 +2199,15 @@ static LogicalResult formGrid(func::FuncOp function) {
         // Delinearize 1D block ID to multi-dimensional tile coordinates.
         SmallVector<Value> coordinates =
             delinearize(builder, loc, bodyArguments.front(), tileCounts);
-        TileMaterializer materializer(inputAccesses);
+        TileMaterializer materializer(*propagation, inputAccesses,
+                                      outputAccessByValue);
 
         // Recursively materialize the tiled compute graph backward from each
         // output.
         for (auto [index, output] : llvm::enumerate(outputs)) {
+          if (isStreamingScanSliceResult(output.getSource())) {
+            continue;
+          }
           FailureOr<Value> tiledResult =
               materializer.materialize(output.getSource(), resultLayouts[index],
                                        coordinates, tileShape, builder);
@@ -1720,7 +2225,8 @@ static LogicalResult formGrid(func::FuncOp function) {
           StoreOp::create(builder, output.getLoc(), *tiledResult,
                           outputAccesses[index].base, metadata->offset,
                           metadata->sizes, metadata->strides,
-                          getAsOpFoldResult(coordinates), metadata->alignment);
+                          getAsOpFoldResult(coordinates), metadata->alignment,
+                          outputAccesses[index].allowTma);
         }
         scf::InParallelOp::create(builder, loc);
       });

@@ -2039,21 +2039,25 @@ static T evaluateExactGeluBackward(T value, T upstreamGradient) {
 }
 
 template <typename T>
-static T applyModulo(T a, T b) {
-  // Python/PyTorch/JAX style modulo: a % b = a - floor(a/b) * b.
-  // This differs from C++ std::fmod, which truncates toward zero.
-  const T quotient = static_cast<T>(
-      std::floor(static_cast<double>(a) / static_cast<double>(b)));
-  return a - quotient * b;
+static T applyRemainder(T a, T b) {
+  // Truncated remainder.
+  if constexpr (std::is_integral_v<T>) {
+    return a % b;
+  } else {
+    return std::fmod(a, b);
+  }
 }
 
 template <typename T>
-static T applyRemainder(T a, T b) {
-  // Truncated remainder: a - trunc(a / b) * b. Result has the sign of the
-  // dividend. Sister of applyModulo (floored).
-  const T quotient = static_cast<T>(
-      std::trunc(static_cast<double>(a) / static_cast<double>(b)));
-  return a - quotient * b;
+static T applyModulo(T a, T b) {
+  // Floored modulo: the remainder plus b when the signs differ.
+  T r = applyRemainder(a, b);
+  if constexpr (std::is_signed_v<T>) {
+    if (r != T{} && ((r < T{}) != (b < T{}))) {
+      r += b;
+    }
+  }
+  return r;
 }
 
 static bool isSupportedBinaryPointwiseMode(DataType dtype,

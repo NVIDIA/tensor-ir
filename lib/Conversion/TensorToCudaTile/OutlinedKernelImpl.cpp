@@ -15,11 +15,10 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Ptr/IR/PtrOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/IR/BuiltinDialect.h"
-#include "mlir/IR/SymbolTable.h"
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -275,17 +274,19 @@ public:
   matchAndRewrite(func::FuncOp func, OpAdaptor,
                   ConversionPatternRewriter &rewriter) const override {
     if (!func->hasAttr(gpu::GPUDialect::getKernelFuncAttrName())) {
-      return rewriter.notifyMatchFailure(func, "expected gpu.kernel marker");
+      return rewriter.notifyMatchFailure(func, "not an entrypoint");
     }
     if (!func.getResultTypes().empty()) {
-      return func.emitError("outlined TensorIR kernels must return void");
+      return rewriter.notifyMatchFailure(func, "entrypoint must return void");
     }
 
     TypeConverter::SignatureConversion signature(func.getNumArguments());
     if (failed(typeConverter->convertSignatureArgs(
             func.getFunctionType().getInputs(), signature))) {
-      return func.emitError("failed to convert outlined kernel signature");
+      return rewriter.notifyMatchFailure(
+          func, "failed to convert outlined kernel signature");
     }
+
     auto functionType = FunctionType::get(rewriter.getContext(),
                                           signature.getConvertedTypes(), {});
     auto entry = cuda_tile::EntryOp::create(
@@ -295,6 +296,10 @@ public:
                                 entry.getBody().end());
     rewriter.applySignatureConversion(&entry.getBody().front(), signature,
                                       typeConverter);
+    if (auto ordinalAttr = func->getAttrOfType<IntegerAttr>(
+            TensorIRDialect::getKernelOrdinalAttrName())) {
+      entry->setAttr(TensorIRDialect::getKernelOrdinalAttrName(), ordinalAttr);
+    }
     rewriter.eraseOp(func);
     return success();
   }
@@ -485,7 +490,8 @@ public:
         cuda_tile::TokenType::get(rewriter.getContext()),
         cuda_tile::MemoryOrderingSemantics::WEAK, /*memory_scope=*/nullptr,
         partition.value, indices, /*token=*/nullptr,
-        /*optimization_hints=*/nullptr);
+        createLoadStoreOptimizationHints(rewriter.getContext(),
+                                         op.getAllowTma(), /*latency=*/-1));
     Value result = load.getResult(0);
     if (loadType != tileType) {
       result = cuda_tile::BroadcastOp::create(rewriter, op.getLoc(), tileType,
@@ -532,7 +538,8 @@ public:
         rewriter, op.getLoc(), cuda_tile::TokenType::get(rewriter.getContext()),
         cuda_tile::MemoryOrderingSemantics::WEAK, /*memory_scope=*/nullptr,
         tile, partition.value, indices, /*token=*/nullptr,
-        /*optimization_hints=*/nullptr);
+        createLoadStoreOptimizationHints(rewriter.getContext(),
+                                         op.getAllowTma(), /*latency=*/-1));
     rewriter.eraseOp(op);
     return success();
   }
@@ -902,36 +909,28 @@ public:
   }
 };
 
-/// Consume only dispatch wrappers whose staging launch resolves to one of the
-/// outlined kernels collected for this conversion.
-static void eraseDispatchWrappers(ModuleOp module,
-                                  ArrayRef<func::FuncOp> kernels) {
-  llvm::SmallDenseSet<Operation *> kernelOps;
-  for (func::FuncOp kernel : kernels) {
-    kernelOps.insert(kernel);
-  }
+/// Convert gpu::GPUModuleOp to cuda_tile::ModuleOp
+class ModuleConversion : public OpConversionPattern<gpu::GPUModuleOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(gpu::GPUModuleOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ModuleOp parentModule = op->getParentOfType<ModuleOp>();
+    std::string cudaTileModuleName =
+        parentModule.getName().has_value()
+            ? "cuda_tile_" + parentModule.getName()->str()
+            : "cuda_tile_module";
 
-  SymbolTableCollection symbolTables;
-  SmallVector<func::FuncOp> wrappers;
-  for (func::FuncOp func : module.getOps<func::FuncOp>()) {
-    if (func->hasAttr(gpu::GPUDialect::getKernelFuncAttrName()) ||
-        !func.getName().contains("_dispatch")) {
-      continue;
-    }
-    bool launchesKernel = false;
-    func.walk([&](gpu::LaunchFuncOp launch) {
-      Operation *callee =
-          symbolTables.lookupNearestSymbolFrom(launch, launch.getKernelAttr());
-      launchesKernel |= kernelOps.contains(callee);
-    });
-    if (launchesKernel) {
-      wrappers.push_back(func);
-    }
+    auto moduleOp = cuda_tile::ModuleOp::create(rewriter, parentModule.getLoc(),
+                                                cudaTileModuleName);
+    Block &body = moduleOp.getBody().front();
+    rewriter.inlineBlockBefore(op.getBody(), &body, body.end());
+    rewriter.replaceOp(op, moduleOp);
+    return success();
   }
-  for (func::FuncOp wrapper : wrappers) {
-    wrapper.erase();
-  }
-}
+};
+} // namespace
 
 static LogicalResult verifyOutlinedKernel(func::FuncOp kernel) {
   if (kernel.isExternal() || !kernel.getBody().hasOneBlock()) {
@@ -956,25 +955,13 @@ static LogicalResult verifyOutlinedKernel(func::FuncOp kernel) {
   return success();
 }
 
-} // namespace
-
 LogicalResult
 convertOutlinedKernels(ModuleOp module,
                        cuda_tile::OptimizationHintsAttr optimizationHints,
-                       bool enableExperimentalCudaTileOps) {
-  SmallVector<func::FuncOp> kernels;
-  for (func::FuncOp func : module.getOps<func::FuncOp>()) {
-    if (func->hasAttr(gpu::GPUDialect::getKernelFuncAttrName())) {
-      return func.emitError(
-          "outlined TensorIR kernels must be nested in a gpu.module");
-    }
-  }
-
-  SmallVector<gpu::GPUModuleOp> gpuModules;
+                       bool enableExperimentalCudaTileOps,
+                       cuda_tile::BytecodeVersion targetBytecodeVersion) {
   llvm::SmallDenseSet<StringRef> kernelNames;
   for (gpu::GPUModuleOp gpuModule : module.getOps<gpu::GPUModuleOp>()) {
-    gpuModules.push_back(gpuModule);
-    bool foundKernel = false;
     for (Operation &op : gpuModule.getBody()->without_terminator()) {
       auto kernel = dyn_cast<func::FuncOp>(op);
       if (!kernel ||
@@ -983,85 +970,44 @@ convertOutlinedKernels(ModuleOp module,
             "outlined TensorIR gpu.module may contain only gpu.kernel "
             "func.func entry points");
       }
-      foundKernel = true;
-      if (!kernelNames.insert(kernel.getName()).second) {
-        return kernel.emitError()
-               << "duplicate outlined kernel name @" << kernel.getName();
+      if (failed(verifyOutlinedKernel(kernel))) {
+        return failure();
       }
-      kernels.push_back(kernel);
-    }
-    if (!foundKernel) {
-      return gpuModule.emitError(
-          "outlined TensorIR gpu.module must contain a gpu.kernel function");
     }
   }
-  for (func::FuncOp kernel : kernels) {
-    if (failed(verifyOutlinedKernel(kernel))) {
-      return failure();
-    }
-  }
-  eraseDispatchWrappers(module, kernels);
 
   MLIRContext *context = module.getContext();
   OutlinedKernelTypeConverter typeConverter(context);
   ConversionTarget target(*context);
-  target.addLegalDialect<cuda_tile::CudaTileDialect>();
+  target.addLegalDialect<cuda_tile::CudaTileDialect, LLVM::LLVMDialect>();
   target.addIllegalDialect<
       TensorIRDialect, arith::ArithDialect, func::FuncDialect, gpu::GPUDialect,
       memref::MemRefDialect, ptr::PtrDialect, scf::SCFDialect>();
   target.addIllegalOp<UnrealizedConversionCastOp>();
+  target.addLegalOp<mlir::ModuleOp>();
+  target.addDynamicallyLegalOp<func::FuncOp>(
+      [&](func::FuncOp op) { return op->getParentOp() == module; });
+  target.markOpRecursivelyLegal<func::FuncOp>();
+  target.addLegalOp<LLVM::LLVMFuncOp>();
+  target.markOpRecursivelyLegal<LLVM::LLVMFuncOp>();
 
-  for (func::FuncOp kernel : kernels) {
-    RewritePatternSet patterns(context);
-    patterns.add<KernelFuncConversion>(typeConverter, context,
-                                       optimizationHints);
-    patterns
-        .add<ReturnConversion, UnrealizedCastConversion, ToPtrConversion,
-             LoadConversion, StoreConversion, BlockIdConversion,
-             GridDimConversion, ForConversion, IfConversion, YieldConversion,
-             ArithConstantConversion, IndexCastConversion, SIToFPConversion,
-             UIToFPConversion, DimConversion, ExtractStridedMetadataConversion>(
-            typeConverter, context);
-    registerOutlinedComputePatterns(patterns, typeConverter,
-                                    enableExperimentalCudaTileOps);
-    if (failed(applyFullConversion(kernel, target, std::move(patterns)))) {
-      return failure();
-    }
-  }
-  for (gpu::GPUModuleOp gpuModule : gpuModules) {
-    for (cuda_tile::EntryOp entry :
-         llvm::make_early_inc_range(gpuModule.getOps<cuda_tile::EntryOp>())) {
-      entry->moveBefore(gpuModule);
-    }
-    gpuModule.erase();
-  }
-  SmallVector<cuda_tile::PtrToPtrOp> deadPointerCasts;
-  module.walk([&](cuda_tile::PtrToPtrOp cast) {
-    if (cast->use_empty()) {
-      deadPointerCasts.push_back(cast);
-    }
-  });
-  for (cuda_tile::PtrToPtrOp cast : deadPointerCasts) {
-    cast.erase();
-  }
-  WalkResult remnants = module.walk([&](Operation *op) {
-    StringRef dialect = op->getName().getDialectNamespace();
-    if (dialect != TensorIRDialect::getDialectNamespace() &&
-        dialect != func::FuncDialect::getDialectNamespace() &&
-        dialect != gpu::GPUDialect::getDialectNamespace() &&
-        dialect != ptr::PtrDialect::getDialectNamespace() &&
-        dialect != scf::SCFDialect::getDialectNamespace() &&
-        !isa<UnrealizedConversionCastOp>(op)) {
-      return WalkResult::advance();
-    }
-    op->emitError(
-        "outlined TensorIR conversion left an illegal operation behind");
-    return WalkResult::interrupt();
-  });
-  if (remnants.wasInterrupted()) {
+  RewritePatternSet patterns(context);
+  patterns.add<KernelFuncConversion>(typeConverter, context, optimizationHints);
+  patterns.add<ReturnConversion, UnrealizedCastConversion, ToPtrConversion,
+               LoadConversion, StoreConversion, BlockIdConversion,
+               GridDimConversion, ForConversion, IfConversion, YieldConversion,
+               ArithConstantConversion, IndexCastConversion, SIToFPConversion,
+               UIToFPConversion, DimConversion,
+               ExtractStridedMetadataConversion, ModuleConversion>(
+      typeConverter, context);
+
+  registerOutlinedComputePatterns(patterns, typeConverter,
+                                  enableExperimentalCudaTileOps,
+                                  targetBytecodeVersion);
+  if (failed(applyFullConversion(module, target, std::move(patterns)))) {
     return failure();
   }
-  module->removeAttr(gpu::GPUDialect::getContainerModuleAttrName());
+
   return success();
 }
 

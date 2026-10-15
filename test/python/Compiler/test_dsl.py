@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from nv_tensor_ir import dsl as tir
-from nv_tensor_ir.runtime import Program
+from nv_tensor_ir.runtime import Artifact
 from dsl_reference import evaluate_trace_reference
 from dsl_test_utils import (
     _assert_compile_error,
@@ -30,7 +30,7 @@ def add_kernel(a, b):
 
 
 def _compile_cached_add(
-    program_cache: tir.ProgramCache,
+    artifact_cache: tir.ArtifactCache,
     spec: tir.TensorSpec,
     *,
     name: str = "cache_test",
@@ -47,17 +47,17 @@ def _compile_cached_add(
         options=options,
         tile_sizes=tile_sizes,
         dynamic_shape=dynamic_shape,
-        program_cache=program_cache,
+        artifact_cache=artifact_cache,
     )
 
 
 def test_compile_kernel_cache_normalizes_graph_name() -> None:
-    program_cache = tir.ProgramCache()
+    artifact_cache = tir.ArtifactCache()
     spec = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
 
-    first = _compile_cached_add(program_cache, spec, name="cache_test")
+    first = _compile_cached_add(artifact_cache, spec, name="cache_test")
     renamed = _compile_cached_add(
-        program_cache,
+        artifact_cache,
         spec,
         name="cache_test_renamed",
     )
@@ -65,45 +65,45 @@ def test_compile_kernel_cache_normalizes_graph_name() -> None:
     renamed_key = tir.calculate_cache_key(renamed.module)
 
     assert first_key == renamed_key
-    assert first.program._native_program is renamed.program._native_program
+    assert first.artifact._native is renamed.artifact._native
     assert "nv_tensor_ir.graph @cache_test_renamed" in _module_text(renamed)
 
 
 def test_compile_kernel_cache_survives_returned_program_destroy() -> None:
-    program_cache = tir.ProgramCache()
+    artifact_cache = tir.ArtifactCache()
     spec = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
 
-    first = _compile_cached_add(program_cache, spec)
-    native_program = first.program._native_program
-    first.program.destroy()
-    cached_after_destroy = _compile_cached_add(program_cache, spec)
+    first = _compile_cached_add(artifact_cache, spec)
+    native_program = first.artifact._native
+    first.artifact.destroy()
+    cached_after_destroy = _compile_cached_add(artifact_cache, spec)
 
-    assert not cached_after_destroy.program.is_destroyed
-    assert cached_after_destroy.program._native_program is native_program
+    assert not cached_after_destroy.artifact.is_destroyed
+    assert cached_after_destroy.artifact._native is native_program
 
 
 def test_compile_kernel_cache_flush() -> None:
-    program_cache = tir.ProgramCache()
+    artifact_cache = tir.ArtifactCache()
     spec = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
 
-    first = _compile_cached_add(program_cache, spec)
+    first = _compile_cached_add(artifact_cache, spec)
 
-    program_cache.flush()
-    second = _compile_cached_add(program_cache, spec)
+    artifact_cache.flush()
+    second = _compile_cached_add(artifact_cache, spec)
 
-    assert second.program._native_program is not first.program._native_program
+    assert second.artifact._native is not first.artifact._native
 
 
 def test_compile_kernel_cache_distinguishes_compile_options() -> None:
-    program_cache = tir.ProgramCache()
+    artifact_cache = tir.ArtifactCache()
     spec = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
 
-    default_options = _compile_cached_add(program_cache, spec)
+    default_options = _compile_cached_add(artifact_cache, spec)
 
     different_options = tir.CompileOptions()
     different_options.warp_count = 8
     custom_options = _compile_cached_add(
-        program_cache,
+        artifact_cache,
         spec,
         options=different_options,
     )
@@ -114,40 +114,37 @@ def test_compile_kernel_cache_distinguishes_compile_options() -> None:
     )
 
     assert custom_key != default_key
-    assert (
-        custom_options.program._native_program
-        is not default_options.program._native_program
-    )
+    assert custom_options.artifact._native is not default_options.artifact._native
 
 
 def test_compile_kernel_cache_distinguishes_modules() -> None:
-    program_cache = tir.ProgramCache()
+    artifact_cache = tir.ArtifactCache()
     spec_8x8 = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
     spec_16x8 = tir.TensorSpec((16, 8), dtype=tir.DataType.F32)
 
-    kernel_8x8 = _compile_cached_add(program_cache, spec_8x8)
-    kernel_16x8 = _compile_cached_add(program_cache, spec_16x8)
+    kernel_8x8 = _compile_cached_add(artifact_cache, spec_8x8)
+    kernel_16x8 = _compile_cached_add(artifact_cache, spec_16x8)
     key_8x8 = tir.calculate_cache_key(kernel_8x8.module)
     key_16x8 = tir.calculate_cache_key(kernel_16x8.module)
 
     assert key_16x8 != key_8x8
-    assert kernel_16x8.program._native_program is not kernel_8x8.program._native_program
+    assert kernel_16x8.artifact._native is not kernel_8x8.artifact._native
 
 
 def test_compile_kernel_cache_normalizes_dynamic_shapes() -> None:
-    program_cache = tir.ProgramCache()
+    artifact_cache = tir.ArtifactCache()
     spec_8x8 = tir.TensorSpec((8, 8), dtype=tir.DataType.F32)
     spec_16x8 = tir.TensorSpec((16, 8), dtype=tir.DataType.F32)
 
-    static_kernel = _compile_cached_add(program_cache, spec_8x8)
+    static_kernel = _compile_cached_add(artifact_cache, spec_8x8)
     dynamic_8x8 = _compile_cached_add(
-        program_cache,
+        artifact_cache,
         spec_8x8,
         tile_sizes=(4, 4),
         dynamic_shape=True,
     )
     dynamic_16x8 = _compile_cached_add(
-        program_cache,
+        artifact_cache,
         spec_16x8,
         tile_sizes=(4, 4),
         dynamic_shape=True,
@@ -164,7 +161,7 @@ def test_compile_kernel_cache_normalizes_dynamic_shapes() -> None:
 
     assert static_key != dynamic_8x8_key
     assert dynamic_8x8_key == dynamic_16x8_key
-    assert dynamic_8x8.program._native_program is dynamic_16x8.program._native_program
+    assert dynamic_8x8.artifact._native is dynamic_16x8.artifact._native
 
 
 @tir.kernel
@@ -281,10 +278,11 @@ def test_serialize_deserialize_round_trip(tmp_path) -> None:
     # persists the serialized program to disk, and a separate runtime
     # process reloads and launches it without recompiling.
     program_path = tmp_path / "serialize_smoke.tirprogram"
-    program_path.write_bytes(compiled.program.serialize())
-    reloaded_program = Program.deserialize(program_path.read_bytes())
+    program_path.write_bytes(compiled.artifact.serialize())
+    reloaded_program = Artifact.deserialize(program_path.read_bytes())
 
-    reloaded_program.launch(a, b, output)
+    with reloaded_program.load() as kernel:
+        kernel.launch(a, b, output)
     torch.cuda.synchronize()
     torch.testing.assert_close(output, a + b, rtol=1e-3, atol=1e-3)
 
@@ -592,9 +590,9 @@ def test_compile_rejects_undecorated_function() -> None:
         tir.compile(undecorated_kernel, output=object())
 
 
-def test_compile_rejects_invalid_program_cache() -> None:
-    with pytest.raises(TypeError, match="program_cache must be a ProgramCache"):
-        tir.compile(add_kernel, output=object(), program_cache={})
+def test_compile_rejects_invalid_artifact_cache() -> None:
+    with pytest.raises(TypeError, match="artifact_cache must be a ArtifactCache"):
+        tir.compile(add_kernel, output=object(), artifact_cache={})
 
 
 def test_trace_rejects_invalid_kernel_contracts() -> None:
@@ -961,6 +959,7 @@ def test_public_api_surface() -> None:
         "softplus",
         "splat",
         "sqrt",
+        "scan_slice",
         "sub",
         "swish",
         "tan",
@@ -980,7 +979,7 @@ def test_public_api_surface() -> None:
             "ProfileResult",
             "TensorSpec",
             "CudaTileArtifactKind",
-            "ProgramCache",
+            "ArtifactCache",
             "calculate_cache_key",
             "compile",
             "compile_traced",
@@ -1099,3 +1098,322 @@ def test_complex_poc_style_kernel(profiling: bool) -> None:
         output=output,
         profile=profiling,
     )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("fp32_carry", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "op_name",
+    [
+        "sub",
+        "div",
+        "min",
+        "max",
+        "neg",
+        "abs",
+        "log",
+        "sqrt",
+        "rsqrt",
+        "reciprocal",
+        "sin",
+        "cos",
+        "tanh",
+        "ceil",
+        "floor",
+    ],
+)
+def test_scan_slice_float_pointwise(op_name, dtype, reverse, fp32_carry):
+    _require_runtime_launch()
+    tensor_dtype = {
+        torch.float32: tir.DataType.F32,
+        torch.float16: tir.DataType.F16,
+        torch.bfloat16: tir.DataType.BF16,
+    }[dtype]
+    carry_dtype = torch.float32 if fp32_carry else dtype
+    carry_tensor_dtype = tir.DataType.F32 if fp32_carry else tensor_dtype
+    binary = op_name in ("sub", "div", "min", "max")
+    tensor_op = getattr(tir, op_name)
+    torch_op = {"min": torch.minimum, "max": torch.maximum}.get(
+        op_name, getattr(torch, op_name)
+    )
+
+    @tir.kernel
+    def kernel(values, initial):
+        def body(carry, value):
+            carry = tir.convert(carry, dtype=tensor_dtype)
+            result = tensor_op(carry, value) if binary else carry + tensor_op(value)
+            return tir.convert(result, dtype=carry_tensor_dtype), result
+
+        return tir.scan_slice(
+            initial,
+            (values,),
+            body,
+            scan_dimensions=(0,),
+            output_dimensions=(0,),
+            reverse=reverse,
+        )
+
+    torch.manual_seed(31)
+    values = (torch.rand(5, 3, 8, device="cuda") + 0.5).to(dtype)
+    initial = torch.randn(3, 8, device="cuda", dtype=carry_dtype)
+    if op_name in ("neg", "abs", "sin", "cos", "tanh", "ceil", "floor"):
+        values[:, :, ::2] = -values[:, :, ::2]
+    if op_name in ("min", "max"):
+        values[1, 0, :4] = torch.tensor(
+            [float("nan"), float("inf"), -float("inf"), -0.0],
+            dtype=dtype,
+            device="cuda",
+        )
+    carry = initial
+    history = torch.empty_like(values)
+    steps = reversed(range(5)) if reverse else range(5)
+    for step in steps:
+        carry = carry.to(dtype)
+        result = (
+            torch_op(carry, values[step]) if binary else carry + torch_op(values[step])
+        )
+        history[step] = result
+        carry = result.to(carry_dtype)
+    outputs = (torch.empty_like(initial), torch.empty_like(values))
+    options = tir.CompileOptions()
+    options.tile_sizes = [2, 8]
+    compiled = tir.compile(
+        kernel,
+        values,
+        initial,
+        output=outputs,
+        name=f"scan_slice_{op_name}",
+        options=options,
+    )
+    compiled.run(values, initial, output=outputs)
+    tolerance = 2e-5 if dtype == torch.float32 else 2 * torch.finfo(dtype).eps
+    for actual, expected in zip(outputs, (carry, history), strict=True):
+        torch.testing.assert_close(
+            actual, expected, rtol=tolerance, atol=tolerance, equal_nan=True
+        )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+        torch.float64,
+        torch.int32,
+        torch.int64,
+        torch.uint32,
+    ],
+)
+def test_scan_slice_carry_reduction(dtype, reverse):
+    _require_runtime_launch()
+
+    @tir.kernel
+    def kernel(values, initial):
+        def body(carry, value):
+            next_carry = carry + value
+            total = tir.reduce(next_carry, dimensions=(1,))
+            return next_carry, total
+
+        return tir.scan_slice(
+            initial,
+            (values,),
+            body,
+            scan_dimensions=(0,),
+            output_dimensions=(0,),
+            reverse=reverse,
+        )
+
+    # Dyadic values keep the reference independent of reduction order while
+    # exercising a genuinely low-precision loop carry and reduction.
+    values = torch.randint(-8, 9, (5, 2, 8), device="cuda").to(dtype)
+    initial = torch.randint(-8, 9, (2, 8), device="cuda").to(dtype)
+    if dtype.is_floating_point:
+        values = values / 8
+        initial = initial / 8
+    carry = initial.clone()
+    totals = torch.empty(5, 2, 1, device="cuda", dtype=dtype)
+    for step in reversed(range(5)) if reverse else range(5):
+        if dtype.is_floating_point:
+            carry = carry + values[step]
+            totals[step] = carry.sum(dim=1, keepdim=True)
+        else:
+            carry = (carry.to(torch.int64) + values[step].to(torch.int64)).to(dtype)
+            totals[step] = carry.to(torch.int64).sum(dim=1, keepdim=True).to(dtype)
+    outputs = (torch.empty_like(initial), torch.empty_like(totals))
+    compiled = tir.compile(kernel, values, initial, output=outputs, tile_sizes=(1, 8))
+    _run_assert_trace(compiled, values, initial, output=outputs, rtol=0, atol=0)
+    for actual, expected in zip(outputs, (carry, totals), strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.uint8,
+        torch.uint16,
+        torch.uint32,
+        torch.uint64,
+    ],
+)
+@pytest.mark.parametrize("op_name", ["add", "sub", "mul", "div", "min", "max", "abs"])
+def test_scan_slice_integer_pointwise(dtype, op_name, reverse):
+    _require_runtime_launch()
+    tensor_op = getattr(tir, op_name)
+
+    @tir.kernel
+    def kernel(values, initial):
+        def body(carry, value):
+            result = tensor_op(carry) if op_name == "abs" else tensor_op(carry, value)
+            return result, result
+
+        return tir.scan_slice(
+            initial,
+            (values,),
+            body,
+            scan_dimensions=(0,),
+            output_dimensions=(0,),
+            reverse=reverse,
+        )
+
+    # Include the unsigned high bit to distinguish signed/unsigned min, max,
+    # division and abs. Keep uint64 within int64 range for the reference.
+    unsigned = dtype in (torch.uint8, torch.uint16, torch.uint32, torch.uint64)
+    initial = torch.tensor([[-7, 5, -3, 9], [2, -6, 8, -4]], device="cuda")
+    if unsigned:
+        initial = initial.abs()
+        if dtype != torch.uint64:
+            initial[:, ::2] += 1 << (torch.iinfo(dtype).bits - 1)
+    initial = initial.to(dtype)
+    values = torch.randint(1, 4, (4, 2, 4), device="cuda").to(dtype)
+    carry = initial
+    history = torch.empty_like(values)
+    for step in reversed(range(4)) if reverse else range(4):
+        lhs, rhs = carry.to(torch.int64), values[step].to(torch.int64)
+        if op_name == "abs":
+            result = lhs.abs()
+        elif op_name == "div":
+            result = torch.div(lhs, rhs, rounding_mode="trunc")
+        else:
+            operation = {"min": torch.minimum, "max": torch.maximum}.get(
+                op_name, getattr(torch, op_name)
+            )
+            result = operation(lhs, rhs)
+        carry = result.to(dtype)
+        history[step] = carry
+    outputs = (torch.empty_like(initial), torch.empty_like(values))
+    compiled = tir.compile(kernel, values, initial, output=outputs, tile_sizes=(1, 4))
+    compiled.run(values, initial, output=outputs)
+    for actual, expected in zip(outputs, (carry, history), strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "input_dtype,carry_dtype,tensor_dtype",
+    [
+        (torch.int8, torch.int32, tir.DataType.SI32),
+        (torch.uint8, torch.int32, tir.DataType.SI32),
+        (torch.int64, torch.int32, tir.DataType.SI32),
+        (torch.int32, torch.uint32, tir.DataType.UI32),
+        (torch.int32, torch.float32, tir.DataType.F32),
+        (torch.float32, torch.int32, tir.DataType.SI32),
+        (torch.bool, torch.int32, tir.DataType.SI32),
+        (torch.int32, torch.bool, tir.DataType.BOOL),
+        (torch.float32, torch.bool, tir.DataType.BOOL),
+    ],
+)
+def test_scan_slice_carry_conversion(input_dtype, carry_dtype, tensor_dtype, reverse):
+    _require_runtime_launch()
+
+    @tir.kernel
+    def kernel(values, initial):
+        def body(carry, value):
+            converted = tir.convert(value, dtype=tensor_dtype)
+            return converted, carry, value
+
+        return tir.scan_slice(
+            initial,
+            (values,),
+            body,
+            scan_dimensions=(0,),
+            output_dimensions=(0, 0),
+            reverse=reverse,
+        )
+
+    values = torch.tensor([-3, 0, 2, 7, -8, 1, 0, 4], device="cuda").reshape(4, 1, 2)
+    values = values.to(input_dtype)
+    if input_dtype == torch.float32:
+        values = values + 0.25
+    initial = torch.ones(1, 2, device="cuda", dtype=carry_dtype)
+    carry = initial
+    history = torch.empty(4, 1, 2, device="cuda", dtype=carry_dtype)
+    for step in reversed(range(4)) if reverse else range(4):
+        history[step] = carry
+        carry = values[step].to(carry_dtype)
+    outputs = (
+        torch.empty_like(initial),
+        torch.empty_like(history),
+        torch.empty_like(values),
+    )
+    compiled = tir.compile(kernel, values, initial, output=outputs, tile_sizes=(1, 2))
+    compiled.run(values, initial, output=outputs)
+    for actual, expected in zip(outputs, (carry, history, values), strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("with_history", [False, True])
+def test_scan_slice_two_inputs_different_axes(reverse, with_history):
+    _require_runtime_launch()
+
+    @tir.kernel
+    def kernel(values, scales, initial):
+        def body(carry, value, scale):
+            scale = tir.reshape(scale, shape=(2, 1))
+            scale = tir.broadcast(scale, shape=(2, 8))
+            next_carry = carry * scale + value
+            if with_history:
+                total = tir.reduce(next_carry, dimensions=(1,))
+                return next_carry, carry, total
+            return next_carry
+
+        result = tir.scan_slice(
+            initial,
+            (values, scales),
+            body,
+            scan_dimensions=(0, 1),
+            output_dimensions=(1, 0) if with_history else (),
+            reverse=reverse,
+        )
+        if with_history:
+            final, previous, totals = result
+            # Reorder the scan_slice results and consume the final carry downstream.
+            return previous, -final, totals
+        return -result[0]
+
+    # Different native slice ranks and noncontiguous input strides exercise
+    # independent scan axes, step offsets, and body reshape/broadcast handling.
+    values = (torch.randint(-8, 9, (5, 2, 16), device="cuda").float() / 8)[:, :, ::2]
+    scales = (torch.randint(2, 6, (2, 10), device="cuda").float() / 4)[:, ::2]
+    initial = torch.randint(-8, 9, (2, 8), device="cuda").float() / 8
+    outputs = (
+        (
+            initial.new_empty((2, 5, 8)),
+            torch.empty_like(initial),
+            initial.new_empty((5, 2, 1)),
+        )
+        if with_history
+        else torch.empty_like(initial)
+    )
+    compiled = tir.compile(
+        kernel, values, scales, initial, output=outputs, tile_sizes=(1, 8)
+    )
+    _run_assert_trace(compiled, values, scales, initial, output=outputs, rtol=0, atol=0)

@@ -9,6 +9,11 @@ include "tensor_ir/Dialect/TensorEnums.td"
 include "tensor_ir/Dialect/TensorAttrInterfaces.td"
 include "mlir/IR/TensorEncoding.td"
 
+def ExpRoundingModeAttr
+    : EnumAttr<TensorIR_Dialect, ExpRoundingMode, "exp_rounding_mode"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+
 def TilePaddingAttr
     : EnumAttr<TensorIR_Dialect, TilePadding, "tile_padding"> {
   let summary = "Padding value for partially out-of-bounds tile loads";
@@ -72,6 +77,54 @@ def TensorSourceAttr : TensorIRAttr<"TensorSource", "tensor_source",
     /// Get the CuTe layout from the layout string.
     tcutegen::Layout getCuteLayout() const;
   }];
+}
+
+def ScanSliceInputAttr : TensorIRAttr<"ScanSliceInput", "scan_slice_input"> {
+  let summary = "Describes one streaming input of a scan_slice";
+  let description = [{
+    Describes one scan_slice side input after its scanned axis has been removed.
+    `source` retains the native slice shape and physical strides. The scan
+    dimension, extent, and physical stride remain separate because that axis is
+    traversed sequentially and is not part of the parallel iteration space.
+  }];
+  let parameters = (ins "TensorSourceAttr":$source,
+                        "int64_t":$scanDimension,
+                        "int64_t":$scanExtent,
+                        "int64_t":$scanStride);
+  let assemblyFormat = "`<` `source` `=` qualified($source) `,` "
+                       "`dim` `=` $scanDimension `,` "
+                       "`extent` `=` $scanExtent `,` "
+                       "`stride` `=` $scanStride `>`";
+  let genVerifyDecl = 1;
+}
+
+def ScanSliceSourceAttr : TensorIRAttr<"ScanSliceSource", "scan_slice_source",
+    [DeclareAttrInterfaceMethods<LayoutSourceAttrInterface>]> {
+  let summary = "Represents the carry-centric layout of a scan_slice";
+  let description = [{
+    Represents a scan_slice as an iteration-space boundary. `carry` is the only
+    source that participates in the surrounding graph's layout propagation.
+    Each entry in `inputs` retains a streaming side input in its native slice
+    coordinates. `output_dimensions` identifies the sequential axis inserted
+    into each non-carry scan_slice result.
+
+    Side-input slices retain their original dimension profiles during
+    normalization. Their non-unit dimensions map in order to a prefix of the
+    non-unit carry dimensions; unit dimensions do not consume a carry axis.
+
+    Normalization preserves the carry's logical dimension profile, including
+    unit dimensions, because region operations currently lower in those
+    coordinates. Shape-changing reshape/broadcast, non-identity transpose,
+    and nontrivial slice transformations are unsupported.
+  }];
+  let parameters = (ins
+      "LayoutSourceAttrInterface":$carry,
+      "DenseI64ArrayAttr":$outputDimensions,
+      "ArrayAttr":$inputs);
+  let assemblyFormat = "`<` `carry` `=` qualified($carry) `,` "
+                       "`output_dims` `=` $outputDimensions `,` "
+                       "`inputs` `=` $inputs `>`";
+  let genVerifyDecl = 1;
 }
 
 def CompositeSourceAttr : TensorIRAttr<"CompositeSource", "composite_source",

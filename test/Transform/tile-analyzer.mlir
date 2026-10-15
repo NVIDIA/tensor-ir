@@ -1,5 +1,5 @@
-// RUN: tensor_ir-opt -layout-propagation-annotation -layout-propagation-normalization "-tile-analyzer=max-candidates=8" -mlir-print-local-scope -split-input-file %s | FileCheck %s --check-prefix=CANDIDATES
-// RUN: tensor_ir-opt -layout-propagation-annotation -layout-propagation-normalization -tile-analyzer -mlir-print-local-scope -split-input-file %s | FileCheck %s --check-prefix=DEFAULT
+// RUN: tensor_ir-opt "-tile-analyzer=max-candidates=8" -mlir-print-local-scope -split-input-file %s | FileCheck %s --check-prefix=CANDIDATES
+// RUN: tensor_ir-opt -tile-analyzer -mlir-print-local-scope -split-input-file %s | FileCheck %s --check-prefix=DEFAULT
 
 //===----------------------------------------------------------------------===//
 // Single-source pointwise: contiguous 1D

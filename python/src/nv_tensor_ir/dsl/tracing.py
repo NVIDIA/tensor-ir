@@ -23,6 +23,8 @@ class NodeKind(Enum):
     CMP = auto()
     MOVEMENT = auto()
     CONCATENATE = auto()
+    SCAN_SLICE = auto()
+    RESULT = auto()
     IOTA = auto()
     REDUCE = auto()
     SELECT = auto()
@@ -151,6 +153,41 @@ class TraceGraph:
             )
         )
         return TracedTensor(self, node_id)
+
+    def add_multi_result_node(
+        self,
+        kind: NodeKind,
+        op: TraceOp,
+        args: tuple[int, ...],
+        tensor_infos: tuple[TensorInfo, ...],
+        kwargs: dict[str, object] | None = None,
+    ) -> tuple[TracedTensor, ...]:
+        """Append one traced operation with multiple SSA results.
+
+        Placeholder nodes keep the existing one-node/one-id tracing model
+        intact.  Module construction fills them from the leading operation.
+        """
+        if not tensor_infos:
+            raise ValueError("multi-result operation requires at least one result")
+        first_id = len(self.nodes)
+        result_ids = tuple(range(first_id, first_id + len(tensor_infos)))
+        node_kwargs = dict(kwargs or {})
+        node_kwargs["result_node_ids"] = result_ids
+        node_kwargs["result_tensor_infos"] = tensor_infos
+        self.add_node(kind, op, args, tensor_infos[0], kwargs=node_kwargs)
+        for tensor_info in tensor_infos[1:]:
+            node_id = len(self.nodes)
+            self.nodes.append(
+                TraceNode(
+                    NodeKind.RESULT,
+                    "result",
+                    tensor_info=replace(
+                        tensor_info, name=f"{trace_op_name(op)}_{node_id}"
+                    ),
+                    args=(first_id,),
+                )
+            )
+        return tuple(TracedTensor(self, node_id) for node_id in result_ids)
 
     def set_results(self, results: list[object]) -> None:
         if len(results) != len(self.output_ref_ids):

@@ -6,6 +6,8 @@
 #ifndef TENSOR_IR_TRANSFORM_PASSES_H
 #define TENSOR_IR_TRANSFORM_PASSES_H
 
+#include "tensor_ir/Options/OptionsEnums.h"
+
 #include "mlir/Pass/Pass.h"
 
 namespace mlir {

@@ -1,4 +1,4 @@
-// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,layout-propagation-annotation,layout-propagation-normalization,tile-selection,graph-splitting),tir-bufferize,func.func(tir-form-grid))' --split-input-file | FileCheck %s --implicit-check-not='nv_tensor_ir.concatenate' --implicit-check-not='nv_tensor_ir.iter_space'
+// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,tile-selection),tir-bufferize,func.func(tir-form-grid))' --split-input-file | FileCheck %s --implicit-check-not='nv_tensor_ir.concatenate' --implicit-check-not='nv_tensor_ir.iter_space'
 
 // CHECK-LABEL: func.func @three_way_dispatch
 //       CHECK: scf.forall
@@ -38,22 +38,19 @@ nv_tensor_ir.graph @three_way(
 //   CHECK-DAG:   %[[ARG2_PTR:.*]] = ptr.to_ptr %[[ARG2]]
 //   CHECK-DAG:   %[[ARG3_PTR:.*]] = ptr.to_ptr %[[ARG3]]
 
-//       CHECK:   scf.forall (%[[LINEAR:.*]]) in (2) {
-//       CHECK:     %[[TWO:.*]] = arith.constant 2 : index
-//       CHECK:     %[[ROW:.*]] = arith.remui %[[LINEAR]], %[[TWO]] : index
-//       CHECK:     %[[COL:.*]] = arith.divui %[[LINEAR]], %[[TWO]] : index
+//       CHECK:   scf.forall (%[[ROW:.*]]) in (2) {
 nv_tensor_ir.graph @pruned(
     %arg0: tensor<2xf32>, %arg1: tensor<4xf32>, %arg2: tensor<6xf32>)
     -> tensor<8xf32> attributes {tile_size = array<i32: 1, 4>} {
   //       CHECK:     %[[ONE:.*]] = arith.constant 1 : index
   //       CHECK:     %[[IS_ARG1:.*]] = arith.cmpi ult, %[[ROW]], %[[ONE]] : index
   //       CHECK:     %[[TILE:.*]] = scf.if %[[IS_ARG1]] -> (tensor<1x4xf32>) {
-  //       CHECK:       %[[ARG1_TILE:.*]] = nv_tensor_ir.load %[[ARG1_PTR]][0, %[[COL]]]
+  //       CHECK:       %[[ARG1_TILE:.*]] = nv_tensor_ir.load %[[ARG1_PTR]][0, 0]
   //  CHECK-SAME:         view offset: [0], sizes: [1, 4], strides: [0, 1], alignment: 4
   //  CHECK-SAME:         to tensor<1x4xf32>
   //       CHECK:       scf.yield %[[ARG1_TILE]] : tensor<1x4xf32>
   //       CHECK:     } else {
-  //       CHECK:       %[[ARG2_TILE:.*]] = nv_tensor_ir.load %[[ARG2_PTR]][0, %[[COL]]]
+  //       CHECK:       %[[ARG2_TILE:.*]] = nv_tensor_ir.load %[[ARG2_PTR]][0, 0]
   //  CHECK-SAME:         view offset: [0], sizes: [1, 4], strides: [0, 1], alignment: 4
   //  CHECK-SAME:         to tensor<1x4xf32>
   //       CHECK:       scf.yield %[[ARG2_TILE]] : tensor<1x4xf32>
@@ -65,7 +62,7 @@ nv_tensor_ir.graph @pruned(
   %result = slice %concat starts = [2] limits = [10] strides = [1]
       : tensor<12xf32> -> tensor<8xf32>
   // The selected tile is stored at its grid coordinate.
-  //       CHECK:     nv_tensor_ir.store %[[TILE]], %[[ARG3_PTR]][%[[ROW]], %[[COL]]]
+  //       CHECK:     nv_tensor_ir.store %[[TILE]], %[[ARG3_PTR]][%[[ROW]], 0]
   //  CHECK-SAME:       view offset: [0], sizes: [2, 4], strides: [4, 1], alignment: 4
   //       CHECK:   } {mapping = [#gpu.block<x>]}
   results %result : tensor<8xf32>

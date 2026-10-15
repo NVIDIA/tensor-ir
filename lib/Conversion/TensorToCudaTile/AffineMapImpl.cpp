@@ -6,6 +6,7 @@
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTileInternal.h"
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Dialect/TensorIRAttrs.h"
+#include "tensor_ir/Options/BytecodeVersionOptions.h"
 #include "tensor_ir/Utils/Utils.h"
 
 #include "mlir/Dialect/Utils/IndexingUtils.h"
@@ -1106,12 +1107,12 @@ TensorToCudaTileConversionState::computeCudaTileInOutTensorDescriptors(
         getTensorDescriptorStaticMetadata(descriptor);
 
     size_t ptrIdx = mapping->inputNo;
-    size_t numArgsConsumed = processTensorDescriptor(
+
+    [[maybe_unused]] size_t numArgsConsumed = processTensorDescriptor(
         tensorTy, tensorIRArg, cudaTileArgs, ptrIdx, metadata,
         CudaTileTensorDescriptor::TensorKind::Input, iterSpaceMap, iterSpaceIds,
         descriptor.allowTma, descriptor.alignment, descriptor.cost,
         inOutTensorDescriptors);
-
     assert(mappingEnd == ptrIdx + numArgsConsumed &&
            "Mapping size mismatch: expected tensor to expand to "
            "ptr + dynamic_sizes + dynamic_strides");
@@ -3458,10 +3459,12 @@ class ConversionStateImpl : public tensor_to_cuda_tile::ConversionState {
 public:
   ConversionStateImpl(MLIRContext *context, const TypeConverter &typeConverter,
                       TensorToCudaTileConversionState conversionState,
-                      bool enableExperimentalCudaTileOps)
+                      bool enableExperimentalCudaTileOps,
+                      cuda_tile::BytecodeVersion targetBytecodeVersion)
       : context(context), typeConverter(typeConverter),
         conversionState(std::move(conversionState)),
-        enableExperimentalCudaTileOps(enableExperimentalCudaTileOps) {
+        enableExperimentalCudaTileOps(enableExperimentalCudaTileOps),
+        targetBytecodeVersion(targetBytecodeVersion) {
     patterns = registerPatterns();
   }
 
@@ -3523,6 +3526,7 @@ private:
   const TypeConverter &typeConverter;
   TensorToCudaTileConversionState conversionState;
   bool enableExperimentalCudaTileOps;
+  cuda_tile::BytecodeVersion targetBytecodeVersion;
   FrozenRewritePatternSet patterns;
 
   SmallVector<int64_t> tileShape;
@@ -3533,7 +3537,8 @@ private:
 
     // Pointwise operations.
     registerPointwisePatterns(patterns, *this, typeConverter,
-                              enableExperimentalCudaTileOps);
+                              enableExperimentalCudaTileOps,
+                              targetBytecodeVersion);
 
     // Function/kernel-level operations.
     patterns.add<GraphOpConversion>(conversionState, typeConverter, context);
@@ -3564,6 +3569,10 @@ createAffineMapConversionState(MLIRContext *context,
                                const CodegenOptions &codegenOptions,
                                const CudaTileOptions &cudaTileOptions) {
 
+  auto targetBytecodeVersion = backend::cuda_tile::resolveBytecodeVersion(
+      cudaTileOptions.bytecodeVersion);
+  assert(targetBytecodeVersion.ok() && "expected validated bytecode version");
+
   TensorToCudaTileConversionState state;
   state.tileSize.assign(codegenOptions.tileSize.begin(),
                         codegenOptions.tileSize.end());
@@ -3575,7 +3584,8 @@ createAffineMapConversionState(MLIRContext *context,
 
   bool enableExperimentalCudaTileOps = false;
   return std::make_unique<ConversionStateImpl>(
-      context, typeConverter, std::move(state), enableExperimentalCudaTileOps);
+      context, typeConverter, std::move(state), enableExperimentalCudaTileOps,
+      *targetBytecodeVersion);
 }
 
 } // namespace tensor_to_cuda_tile

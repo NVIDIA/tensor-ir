@@ -706,3 +706,52 @@ nv_tensor_ir.graph @iotaExtentTooLargeUnsigned() -> (tensor<70000xui16>) {
   %iota = iota dimension = 0 : tensor<70000xui16>
   results %iota : tensor<70000xui16>
 }
+
+// -----
+
+// expected-error @below {{'builtin.module' op "nv_tensor_ir.kernel_ordinal" attribute is only supported on function-like operations}}
+module attributes {nv_tensor_ir.kernel_ordinal = 0 : i32} {
+}
+
+// -----
+
+module attributes {gpu.container_module} {
+  func.func @dispatch() {
+    %one = arith.constant 1 : index
+    // expected-error @below {{expects kernel_ordinal to be a nonnegative i32}}
+    gpu.launch_func @kernels::@kernel blocks in (%one, %one, %one)
+        threads in (%one, %one, %one)
+        {nv_tensor_ir.kernel_ordinal = "zero"}
+    return
+  }
+  gpu.module @kernels {
+    func.func @kernel() attributes {gpu.kernel} { return }
+  }
+}
+
+// -----
+
+gpu.module @kernels {
+  // expected-error @below {{expects kernel_ordinal to be a nonnegative i32}}
+  func.func @kernel() attributes {gpu.kernel, nv_tensor_ir.kernel_ordinal = 0 : i64} {
+    return
+  }
+}
+
+// -----
+
+gpu.module @kernels {
+  // expected-error @below {{expects kernel_ordinal to be a nonnegative i32}}
+  func.func @kernel() attributes {gpu.kernel, nv_tensor_ir.kernel_ordinal = 0 : si32} {
+    return
+  }
+}
+
+// -----
+
+gpu.module @kernels {
+  // expected-error @below {{expects kernel_ordinal to be a nonnegative i32}}
+  func.func @kernel() attributes {gpu.kernel, nv_tensor_ir.kernel_ordinal = -1 : i32} {
+    return
+  }
+}

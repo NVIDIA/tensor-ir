@@ -4,6 +4,7 @@
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Support/TCutegen.h"
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/AffineMap.h"
@@ -20,6 +21,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 #include <utility>
 
 #define DEBUG_TYPE "tensor-ops"
@@ -27,6 +29,27 @@
 using namespace mlir;
 using namespace mlir::nv_tensor_ir;
 namespace tcg = mlir::nv_tensor_ir::tcutegen;
+
+FailureOr<SmallVector<int64_t>>
+mlir::nv_tensor_ir::getScanSliceInputAxes(ArrayRef<int64_t> carryShape,
+                                          ArrayRef<int64_t> sliceShape) {
+  SmallVector<int64_t> axes;
+  size_t carryDim = 0;
+  for (int64_t extent : sliceShape) {
+    if (extent == 1) {
+      axes.push_back(-1);
+      continue;
+    }
+    while (carryDim < carryShape.size() && carryShape[carryDim] == 1) {
+      ++carryDim;
+    }
+    if (carryDim == carryShape.size() || carryShape[carryDim] != extent) {
+      return failure();
+    }
+    axes.push_back(carryDim++);
+  }
+  return axes;
+}
 
 bool mlir::nv_tensor_ir::isGraphInput(Value value) {
   auto blockArg = dyn_cast<BlockArgument>(value);
@@ -280,7 +303,7 @@ void LoadOp::build(OpBuilder &builder, OperationState &state, Type tile,
                    Value base, OpFoldResult offset,
                    ArrayRef<OpFoldResult> sizes, ArrayRef<OpFoldResult> strides,
                    ArrayRef<OpFoldResult> indices, IntegerAttr alignment,
-                   TilePaddingAttr padding) {
+                   TilePaddingAttr padding, bool allowTma) {
   auto [staticOffsets, dynamicOffsets] = decomposeMixedValues({offset});
   auto [staticSizes, dynamicSizes] = decomposeMixedValues(sizes);
   auto [staticStrides, dynamicStrides] = decomposeMixedValues(strides);
@@ -290,7 +313,8 @@ void LoadOp::build(OpBuilder &builder, OperationState &state, Type tile,
         builder.getDenseI64ArrayAttr(staticOffsets),
         builder.getDenseI64ArrayAttr(staticSizes),
         builder.getDenseI64ArrayAttr(staticStrides),
-        builder.getDenseI64ArrayAttr(staticIndices), alignment, padding);
+        builder.getDenseI64ArrayAttr(staticIndices), alignment, padding,
+        builder.getBoolAttr(allowTma));
 }
 
 SmallVector<OpFoldResult> StoreOp::getMixedIndices() {
@@ -301,7 +325,8 @@ void StoreOp::build(OpBuilder &builder, OperationState &state, Value tile,
                     Value base, OpFoldResult offset,
                     ArrayRef<OpFoldResult> sizes,
                     ArrayRef<OpFoldResult> strides,
-                    ArrayRef<OpFoldResult> indices, IntegerAttr alignment) {
+                    ArrayRef<OpFoldResult> indices, IntegerAttr alignment,
+                    bool allowTma) {
   auto [staticOffsets, dynamicOffsets] = decomposeMixedValues({offset});
   auto [staticSizes, dynamicSizes] = decomposeMixedValues(sizes);
   auto [staticStrides, dynamicStrides] = decomposeMixedValues(strides);
@@ -311,7 +336,8 @@ void StoreOp::build(OpBuilder &builder, OperationState &state, Value tile,
         builder.getDenseI64ArrayAttr(staticOffsets),
         builder.getDenseI64ArrayAttr(staticSizes),
         builder.getDenseI64ArrayAttr(staticStrides),
-        builder.getDenseI64ArrayAttr(staticIndices), alignment);
+        builder.getDenseI64ArrayAttr(staticIndices), alignment,
+        builder.getBoolAttr(allowTma));
 }
 
 LogicalResult LoadOp::verify() {
@@ -379,6 +405,335 @@ LogicalResult GraphOp::verifyRegions() {
     }
   }
   return success();
+}
+
+LogicalResult
+ScanSliceOp::inferReturnTypes(MLIRContext *context,
+                              std::optional<Location> location, Adaptor adaptor,
+                              SmallVectorImpl<Type> &inferredReturnTypes) {
+  auto fail = [&](const Twine &message) {
+    return emitOptionalError(location, message);
+  };
+  auto inputs = adaptor.getInputs();
+  auto dimensions = adaptor.getScanDimensions();
+  auto outputDimensions = adaptor.getOutputDimensions();
+  if (inputs.size() < 2 || dimensions.size() + 1 != inputs.size()) {
+    return fail("expects one carry and one scan dimension per scanned input");
+  }
+  auto carryType = dyn_cast<RankedTensorType>(inputs.front().getType());
+  if (!carryType || !carryType.hasStaticShape()) {
+    return fail("requires a static ranked carry tensor");
+  }
+  Region &region = adaptor.getBody();
+  if (!region.hasOneBlock() || region.front().empty()) {
+    return fail("expects a single body block with a yield terminator");
+  }
+  Block &body = region.front();
+  if (body.getNumArguments() != inputs.size() ||
+      body.getArgument(0).getType() != carryType) {
+    return fail("body arguments must match the carry and sliced inputs");
+  }
+  int64_t extent = -1;
+  for (auto [index, input] : llvm::enumerate(inputs.drop_front())) {
+    auto type = dyn_cast<RankedTensorType>(input.getType());
+    int64_t dimension = dimensions[index];
+    if (!type || !type.hasStaticShape() || dimension < 0 ||
+        dimension >= type.getRank()) {
+      return fail(
+          "scan dimension is out of range or input shape is not static");
+    }
+    int64_t inputExtent = type.getDimSize(dimension);
+    if (inputExtent <= 0 || (extent != -1 && inputExtent != extent)) {
+      return fail("requires equal positive scan extents for all inputs");
+    }
+    extent = inputExtent;
+    SmallVector<int64_t> shape(type.getShape());
+    shape.erase(shape.begin() + dimension);
+    auto sliceType = RankedTensorType::get(shape, type.getElementType());
+    if (failed(getScanSliceInputAxes(carryType.getShape(), shape))) {
+      return fail(
+          "scan_slice input non-unit dimensions must match a prefix of the "
+          "non-unit carry dimensions");
+    }
+    if (body.getArgument(index + 1).getType() != sliceType) {
+      return fail("body scanned argument must have the sliced input type");
+    }
+  }
+  auto yield = dyn_cast<YieldOp>(body.getTerminator());
+  if (!yield || yield.getNumOperands() != outputDimensions.size() + 1) {
+    return fail(
+        "body must yield the next carry and one value per scan_slice output");
+  }
+  if (yield.getOperand(0).getType() != carryType) {
+    return fail("body must yield a carry matching the input carry");
+  }
+  inferredReturnTypes.push_back(carryType);
+  for (auto [value, dimension] :
+       llvm::zip_equal(yield.getOperands().drop_front(), outputDimensions)) {
+    auto type = dyn_cast<RankedTensorType>(value.getType());
+    if (!type || type.getRank() != carryType.getRank()) {
+      return fail("scan_slice output values must have the carry rank");
+    }
+    if (dimension < 0 || dimension > type.getRank()) {
+      return fail("scan_slice output dimension is out of range");
+    }
+    for (auto [size, carrySize] :
+         llvm::zip_equal(type.getShape(), carryType.getShape())) {
+      if (size != 1 && size != carrySize) {
+        return fail("scan_slice output dimensions must match carry dimensions "
+                    "or be one");
+      }
+    }
+    SmallVector<int64_t> shape(type.getShape());
+    shape.insert(shape.begin() + dimension, extent);
+    inferredReturnTypes.push_back(
+        RankedTensorType::get(shape, type.getElementType()));
+  }
+  return success();
+}
+
+LogicalResult ScanSliceOp::verify() {
+  Operation *parent = getOperation()->getParentOp();
+  auto graph = dyn_cast<GraphOp>(parent);
+  // Bufferization moves scan_slice into a marked function before FormGrid lowers it.
+  bool bufferized =
+      parent->hasAttr(TensorIRDialect::getBufferizedProgramAttrName());
+  if (!graph && !bufferized) {
+    return emitOpError("must be directly inside a graph or a bufferized "
+                       "program; nested scans are not supported");
+  }
+  for (Value input : getInputs().drop_front()) {
+    auto argument = dyn_cast<BlockArgument>(input);
+    auto load = input.getDefiningOp<bufferization::ToTensorOp>();
+    bool boundaryLoad =
+        bufferized && load && load->getBlock() == getOperation()->getBlock();
+    if ((!argument || !graph || argument.getOwner() != graph.getBody()) &&
+        !boundaryLoad) {
+      return emitOpError("scanned inputs must be graph arguments or bufferized "
+                         "boundary loads");
+    }
+  }
+  for (Value result : getResults().drop_front()) {
+    if (!result.hasOneUse() ||
+        !(isa<ResultsOp>(*result.user_begin()) ||
+          (bufferized &&
+           isa<bufferization::MaterializeInDestinationOp>(
+               *result.user_begin()) &&
+           cast<bufferization::MaterializeInDestinationOp>(*result.user_begin())
+                   .getSource() == result))) {
+      return emitOpError("requires every side result to feed graph results or "
+                         "a bufferized boundary store directly");
+    }
+  }
+  return success();
+}
+
+BlockArgument ScanSliceOp::getBlockArgumentForOperand(OpOperand &operand) {
+  assert(operand.getOwner() == getOperation() &&
+         "expected a scan_slice operand");
+  return getBody().front().getArgument(operand.getOperandNumber());
+}
+
+BlockArgument ScanSliceOp::getBlockArgumentForResult(OpResult result) {
+  assert(result.getOwner() == getOperation() && "expected a scan_slice result");
+  return result.getResultNumber() == 0 ? getBody().front().getArgument(0)
+                                       : BlockArgument{};
+}
+
+OpResult ScanSliceOp::getResultForOperand(OpOperand &operand) {
+  assert(operand.getOwner() == getOperation() &&
+         "expected a scan_slice operand");
+  return operand.getOperandNumber() == 0 ? cast<OpResult>(getResult(0))
+                                         : OpResult{};
+}
+
+YieldOp ScanSliceOp::getBodyTerminator() {
+  return cast<YieldOp>(getBody().front().getTerminator());
+}
+
+int64_t ScanSliceOp::getScanExtent() {
+  if (getInputs().size() < 2 || getScanDimensions().empty()) {
+    return ShapedType::kDynamic;
+  }
+  auto type = dyn_cast<RankedTensorType>(getInputs()[1].getType());
+  int64_t axis = getScanDimensions()[0];
+  return type && axis >= 0 && axis < type.getRank() ? type.getDimSize(axis)
+                                                    : ShapedType::kDynamic;
+}
+
+OperandRange ScanSliceOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+  return getInputs().take_front(1);
+}
+
+ValueRange ScanSliceOp::getSuccessorInputs(RegionSuccessor successor) {
+  if (successor.getSuccessor() == nullptr) {
+    return getResults().take_front(1);
+  }
+  // The remaining arguments are produced slices, not forwarded input tensors.
+  return getBody().front().getArguments().take_front(
+      std::min<unsigned>(1, getBody().front().getNumArguments()));
+}
+
+// LLVM versions differ in how a successor returning to the parent is created.
+// Keep both expressions dependent so only the supported API is instantiated.
+template <typename Successor = RegionSuccessor>
+static Successor getParentSuccessor(Operation *parent) {
+  if constexpr (std::is_constructible_v<Successor, Operation *>) {
+    return Successor(parent);
+  } else {
+    return Successor::parent();
+  }
+}
+
+void ScanSliceOp::getSuccessorRegions(
+    RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
+  if (point.isParent()) {
+    regions.emplace_back(&getBody());
+    return;
+  }
+  // A singleton scan_slice cannot take the backedge. Larger scans may either repeat
+  // or exit depending on the implicit iteration index.
+  if (getScanExtent() > 1) {
+    regions.emplace_back(&getBody());
+  }
+  regions.emplace_back(getParentSuccessor(getOperation()));
+}
+
+void ScanSliceOp::getRegionInvocationBounds(
+    ArrayRef<Attribute> operands, SmallVectorImpl<InvocationBounds> &bounds) {
+  int64_t extent = getScanExtent();
+  if (extent < 0 ||
+      static_cast<uint64_t>(extent) > std::numeric_limits<unsigned>::max()) {
+    bounds.push_back(InvocationBounds::getUnknown());
+    return;
+  }
+  bounds.emplace_back(extent, extent);
+}
+
+MutableOperandRange
+YieldOp::getMutableSuccessorOperands(RegionSuccessor successor) {
+  if (isa<ScanSliceOp>((*this)->getParentOp())) {
+    return MutableOperandRange(getOperation(), 0,
+                               std::min<unsigned>(1, getNumOperands()));
+  }
+  return MutableOperandRange(getOperation());
+}
+
+void YieldOp::getSuccessorRegions(ArrayRef<Attribute> operands,
+                                  SmallVectorImpl<RegionSuccessor> &regions) {
+  if (auto parent = dyn_cast<RegionBranchOpInterface>((*this)->getParentOp())) {
+    parent.getSuccessorRegions(RegionBranchPoint(*this), regions);
+    return;
+  }
+  regions.emplace_back(getParentSuccessor((*this)->getParentOp()));
+}
+
+void ScanSliceOp::build(
+    OpBuilder &builder, OperationState &state, ValueRange inputs,
+    ArrayRef<int64_t> scanDimensions, ArrayRef<int64_t> outputDimensions,
+    function_ref<void(OpBuilder &, Location, Block::BlockArgListType)>
+        bodyBuilder,
+    bool reverse) {
+  assert(inputs.size() >= 2 && scanDimensions.size() + 1 == inputs.size() &&
+         "expected carry and one dimension per scanned input");
+  state.addOperands(inputs);
+  auto &properties = state.getOrAddProperties<Properties>();
+  properties.scan_dimensions = builder.getDenseI64ArrayAttr(scanDimensions);
+  properties.output_dimensions = builder.getDenseI64ArrayAttr(outputDimensions);
+  properties.reverse = builder.getBoolAttr(reverse);
+  Region *region = state.addRegion();
+  auto *body = new Block;
+  region->push_back(body);
+  body->addArgument(inputs.front().getType(), state.location);
+  for (auto [input, dimension] :
+       llvm::zip_equal(inputs.drop_front(), scanDimensions)) {
+    auto type = cast<RankedTensorType>(input.getType());
+    assert(dimension >= 0 && dimension < type.getRank() && "invalid scan axis");
+    SmallVector<int64_t> shape(type.getShape());
+    shape.erase(shape.begin() + dimension);
+    body->addArgument(RankedTensorType::get(shape, type.getElementType()),
+                      state.location);
+  }
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(body);
+  bodyBuilder(builder, state.location, body->getArguments());
+  SmallVector<Type> types;
+  if (failed(
+          inferReturnTypes(builder.getContext(), state.location, inputs,
+                           state.attributes.getDictionary(builder.getContext()),
+                           state.getRawProperties(), state.regions, types))) {
+    llvm::report_fatal_error("invalid scan_slice body constructed by callback");
+  }
+  state.addTypes(types);
+}
+
+LayoutSourceAttrInterface ScanSliceOp::inferResultLayout(
+    ArrayRef<LayoutSourceAttrInterface> inputLayouts) {
+  if (inputLayouts.size() != getInputs().size()) {
+    return nullptr;
+  }
+
+  LayoutSourceAttrInterface carry = inputLayouts.front();
+  if (!carry) {
+    return nullptr;
+  }
+  auto carryType = cast<TensorType>(getInputs().front().getType());
+  ArrayRef<int64_t> carryShape = carryType.getShape();
+  if (carry.getShape() != carryShape) {
+    carry = carry.reshape(carryShape);
+    if (!carry) {
+      return nullptr;
+    }
+  }
+
+  SmallVector<Attribute> scanSliceInputs;
+  scanSliceInputs.reserve(getInputs().size() - 1);
+  for (auto [input, layout, scanDimension] :
+       llvm::zip_equal(getInputs().drop_front(), inputLayouts.drop_front(),
+                       getScanDimensions())) {
+    auto tensorSource = dyn_cast<TensorSourceAttr>(layout);
+    if (!tensorSource) {
+      return nullptr;
+    }
+    auto inputType = cast<TensorType>(input.getType());
+    tcg::Layout inputLayout = tensorSource.getCuteLayout();
+    if (tcg::rank(inputLayout) != static_cast<size_t>(inputType.getRank()) ||
+        !tcg::is_static(inputLayout)) {
+      return nullptr;
+    }
+
+    SmallVector<int64_t> sliceShape(inputType.getShape());
+    sliceShape.erase(sliceShape.begin() + scanDimension);
+    SmallVector<int64_t> sliceStrides;
+    sliceStrides.reserve(inputType.getRank() - 1);
+    for (size_t dimension = 0; dimension < tcg::rank(inputLayout);
+         ++dimension) {
+      auto stride = tcg::get(inputLayout.stride(), dimension);
+      if (static_cast<int64_t>(dimension) != scanDimension) {
+        sliceStrides.push_back(stride.as_int());
+      }
+    }
+    int64_t scanStride = tcg::get(inputLayout.stride(), scanDimension).as_int();
+
+    tcg::Stride sliceStride;
+    for (int64_t stride : sliceStrides) {
+      sliceStride.append(stride);
+    }
+    tcg::Layout sliceLayout(tcg::Shape(sliceShape), sliceStride);
+    auto sliceSource = TensorSourceAttr::get(
+        getContext(), tensorSource.getTensorId(), tensorSource.getOffset(),
+        sliceLayout.toString(), /*dynamicValueMapping=*/{});
+
+    scanSliceInputs.push_back(ScanSliceInputAttr::get(
+        getContext(), sliceSource, scanDimension,
+        inputType.getDimSize(scanDimension), scanStride));
+  }
+
+  auto outputDimensions =
+      DenseI64ArrayAttr::get(getContext(), getOutputDimensions());
+  return ScanSliceSourceAttr::get(
+      getContext(), carry, outputDimensions,
+      ArrayAttr::get(getContext(), scanSliceInputs));
 }
 
 void GraphOp::print(OpAsmPrinter &p) {
@@ -1046,6 +1401,18 @@ LayoutSourceAttrInterface
 SliceOp::inferResultLayout(ArrayRef<LayoutSourceAttrInterface> inputLayouts) {
   assert(inputLayouts.size() == 1 && "expects one input layout");
   return inputLayouts[0].slice(getStarts(), getLimits(), getStrides());
+}
+
+LogicalResult ExpOp::verify() {
+  Type elementType = getInput().getType().getElementType();
+  if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32() &&
+      !elementType.isF64()) {
+    return emitOpError("rounding_mode requires f16, bf16, f32, or f64");
+  }
+  if (getRoundingMode() == ExpRoundingMode::Approx && elementType.isF64()) {
+    return emitOpError("approx rounding_mode requires f16, bf16, or f32");
+  }
+  return success();
 }
 
 LogicalResult PowOp::verify() {

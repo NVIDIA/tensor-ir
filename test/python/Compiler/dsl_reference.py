@@ -122,7 +122,8 @@ def evaluate_trace_reference(
         values[node_id] = value
 
     for node_id, node in enumerate(graph.nodes):
-        if node.kind in (NodeKind.INPUT, NodeKind.OUTPUT_REF):
+        # Multi-result producers populate their RESULT placeholder values.
+        if node.kind in (NodeKind.INPUT, NodeKind.OUTPUT_REF, NodeKind.RESULT):
             continue
         args = [values[arg_id] for arg_id in node.args]
         if node.kind == NodeKind.CONSTANT:
@@ -221,6 +222,37 @@ def evaluate_trace_reference(
                 args[0].dtype,
             )
             values[node_id] = reduction.to(args[0].dtype)
+        elif node.kind == NodeKind.SCAN_SLICE:
+            region = node.kwargs["region"]
+            scan_dimensions = tuple(node.kwargs["scan_dimensions"])
+            output_dimensions = tuple(node.kwargs["output_dimensions"])
+            reverse = bool(node.kwargs["reverse"])
+            carry, *scanned = args
+            length = scanned[0].shape[scan_dimensions[0]]
+            histories = [[] for _ in output_dimensions]
+            steps = reversed(range(length)) if reverse else range(length)
+            for step in steps:
+                slices = [
+                    value.select(dimension, step)
+                    for value, dimension in zip(scanned, scan_dimensions, strict=True)
+                ]
+                yielded = evaluate_trace_reference(
+                    region, carry, *slices, device=reference_device
+                )
+                yielded = yielded if isinstance(yielded, tuple) else (yielded,)
+                carry = yielded[0]
+                for history, value in zip(histories, yielded[1:], strict=True):
+                    history.append(value)
+            # History indices follow the original scan axis, even when the
+            # recurrence visits those indices in reverse order.
+            stacked = tuple(
+                torch.stack(history[::-1] if reverse else history, dim=dimension)
+                for history, dimension in zip(histories, output_dimensions, strict=True)
+            )
+            for result_id, value in zip(
+                node.kwargs["result_node_ids"], (carry, *stacked), strict=True
+            ):
+                values[result_id] = value
         elif node.kind == NodeKind.CMP:
             comparator = node.kwargs["comparator"]
             if not isinstance(comparator, str) or comparator not in _CMP_REFERENCES:

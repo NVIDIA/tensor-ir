@@ -5,6 +5,7 @@
 
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 
 namespace mlir::nv_tensor_ir {
 
@@ -43,6 +44,24 @@ std::string CompilerInvocation::toShaderNameSuffix() const {
   return os.str();
 }
 
+namespace {
+bool supportsNativeHostCodegen(const CompilerInvocation &options) {
+  bool ossCudaTile =
+      options.codegen.compilerBackend == CompilerBackend::Auto ||
+      options.codegen.compilerBackend == CompilerBackend::CudaTile;
+  return ossCudaTile && options.cudaTile.codegenStrategy ==
+                            CudaTileCodegenStrategy::LayoutPropagation;
+}
+} // namespace
+
+HostTarget CompilerInvocation::getEffectiveHostTarget() const {
+  if (codegen.hostTarget != HostTarget::Auto) {
+    return codegen.hostTarget;
+  }
+  return supportsNativeHostCodegen(*this) ? HostTarget::Native
+                                          : HostTarget::Interpreter;
+}
+
 Status CompilerInvocation::validate() const {
   FailureOr<SmTarget> target = getKernelSmTarget();
   if (failed(target)) {
@@ -52,6 +71,13 @@ Status CompilerInvocation::validate() const {
 
   if (auto error = validateComponents()) {
     return Status::InvalidArgument(*error);
+  }
+
+  if (codegen.hostTarget == HostTarget::Native &&
+      !supportsNativeHostCodegen(*this)) {
+    return Status::InvalidArgument(
+        "host-target=native requires layout propagation with the OSS "
+        "CUDA Tile backend");
   }
 
   FailureOr<ComputeCapability> codegenTarget = getCodegenComputeCapability();
@@ -69,10 +95,6 @@ Status CompilerInvocation::validate() const {
         std::to_string(cudaTile.smCount));
   }
 
-  if (cudaTile.artifactKind != ArtifactKind::TileIR &&
-      cudaTile.artifactKind != ArtifactKind::Cubin) {
-    return Status::InvalidArgument("Unrecognized CUDA Tile artifact kind");
-  }
   if (cudaTile.artifactKind == ArtifactKind::Cubin &&
       target->getPortability() != ArchPortability::arch_conditional) {
     return Status::InvalidArgument("Cubin requires an arch-conditional target");

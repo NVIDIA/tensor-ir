@@ -3,7 +3,7 @@
 // ============================================================================
 // TEST 1: Simple 2D matmul (no batch)
 // ============================================================================
-// CHECK-LABEL: @test_matmul_2d_simple
+// CHECK-LABEL: entry @test_matmul_2d_simple
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [32, 128], strides = [128, 1]
@@ -32,7 +32,7 @@ nv_tensor_ir.graph @test_matmul_2d_simple(
 // ============================================================================
 // TEST 2: Simple 3D matmul (one batch per block)
 // ============================================================================
-// CHECK-LABEL: @test_matmul_3d_simple_1
+// CHECK-LABEL: entry @test_matmul_3d_simple_1
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [8, 32, 128], strides = [4096, 128, 1]
@@ -64,7 +64,7 @@ nv_tensor_ir.graph @test_matmul_3d_simple_1(
 // ============================================================================
 // TEST 3: Simple 3D matmul (multiple batches per block)
 // ============================================================================
-// CHECK-LABEL: @test_matmul_3d_simple_2
+// CHECK-LABEL: entry @test_matmul_3d_simple_2
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<2x32x16xf32>
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [8, 32, 128], strides = [4096, 128, 1]
@@ -93,7 +93,7 @@ nv_tensor_ir.graph @test_matmul_3d_simple_2(
 // ============================================================================
 // TEST 4: Small matmul (no loop) with transpose
 // ============================================================================
-// CHECK-LABEL: @test_matmul_small_transpose
+// CHECK-LABEL: entry @test_matmul_small_transpose
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST3:.*]] = constant <i32: 3> : tile<i32>
@@ -132,7 +132,7 @@ nv_tensor_ir.graph @test_matmul_small_transpose(
 // ============================================================================
 // TEST 5: Large matmul (one loop)
 // ============================================================================
-// CHECK-LABEL: @test_matmul_large_one_loop
+// CHECK-LABEL: entry @test_matmul_large_one_loop
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST1:.*]] = constant <i32: 1> : tile<i32>
@@ -174,7 +174,7 @@ nv_tensor_ir.graph @test_matmul_large_one_loop(
 // ============================================================================
 // TEST 6: Large matmul (two loops)
 // ============================================================================
-// CHECK-LABEL: @test_matmul_large_two_loops
+// CHECK-LABEL: entry @test_matmul_large_two_loops
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST1:.*]] = constant <i32: 1> : tile<i32>
@@ -221,7 +221,7 @@ nv_tensor_ir.graph @test_matmul_large_two_loops(
 // ============================================================================
 // TEST 7: Matmul with broadcast
 // ============================================================================
-// CHECK-LABEL: @test_matmul_broadcast
+// CHECK-LABEL: entry @test_matmul_broadcast
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [32, 128], strides = [128, 1]
@@ -254,7 +254,7 @@ nv_tensor_ir.graph @test_matmul_broadcast(
 // ============================================================================
 // TEST 8: Matmul with broadcasts that split dimensions
 // ============================================================================
-// CHECK-LABEL: @test_matmul_dimension_split
+// CHECK-LABEL: entry @test_matmul_dimension_split
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<2x64x16xf32>
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [8, 8, 8, 128], strides = [8192, 1024, 128, 1]
@@ -297,7 +297,7 @@ nv_tensor_ir.graph @test_matmul_dimension_split(
 // tensor and the (K,N) tile from the [64,128] RHS tensor, and they feed mmaf in
 // that operand order.
 // ============================================================================
-// CHECK-LABEL: @matmul_blockarg_lhs
+// CHECK-LABEL: entry @matmul_blockarg_lhs
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK:       %[[ACC:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
 // CHECK:       %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [128, 64], strides = [64, 1]
@@ -325,13 +325,13 @@ nv_tensor_ir.graph @matmul_blockarg_lhs(
 // ============================================================================
 // TEST 10: Matmul with two contracting dimensions (one loop).
 // ============================================================================
-// CHECK-LABEL: @test_matmul_two_dimensions_one_loop
+// CHECK-LABEL: entry @test_matmul_two_dimensions_one_loop
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST1:.*]] = constant <i32: 1> : tile<i32>
 // CHECK-DAG: %[[CST6:.*]] = constant <i32: 6> : tile<i32>
 // CHECK-DAG: %[[INIT:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
-// CHECK: %[[BLOCK_X:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
+// CHECK-NOT: get_tile_block_id
 // CHECK: %[[RESULT:.*]] = for %[[IDX_K:.*]] in (%[[ZERO]] to %[[CST6]], step %[[CST1]])
 // CHECK-SAME: iter_values(%[[ACCUM:.*]] = %[[INIT]])
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [32, 16, 48], strides = [1, 32, 1024]
@@ -346,7 +346,7 @@ nv_tensor_ir.graph @matmul_blockarg_lhs(
 // CHECK: continue %[[MMA]] : tile<32x16xf32>
 // CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 16], strides = [16, 1]
 // CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
-// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[BLOCK_X]]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[ZERO]]]
 
 nv_tensor_ir.graph @test_matmul_two_dimensions_one_loop(
     %arg0: tensor<32x16x48xf32> {nv_tensor_ir.stride = "(1,32,1024)"},

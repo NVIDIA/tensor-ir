@@ -64,19 +64,11 @@ getMemRefType(Type type, const TensorDescriptor &descriptor, Location loc) {
                          layout, memorySpace);
 }
 
-static void copySchedulingMetadata(GraphOp graph, ResultsOp results,
-                                   func::FuncOp function) {
+static void copySchedulingMetadata(GraphOp graph, func::FuncOp function) {
   function->setAttr(TensorIRDialect::getBufferizedProgramAttrName(),
                     UnitAttr::get(graph.getContext()));
   for (StringRef name : {TensorIRDialect::getTileSizeAttrName()}) {
     if (Attribute attr = graph->getAttr(name)) {
-      function->setAttr(name, attr);
-    }
-  }
-  for (StringRef name : {TensorIRDialect::getIterationSpaceAttrName(),
-                         TensorIRDialect::getResultLayoutsAttrName(),
-                         TensorIRDialect::getResultViewsAttrName()}) {
-    if (Attribute attr = results->getAttr(name)) {
       function->setAttr(name, attr);
     }
   }
@@ -122,18 +114,26 @@ static LogicalResult bufferizeGraph(GraphOp graph) {
   func::FuncOp function =
       func::FuncOp::create(graph.getLoc(), functionName, functionType);
   graph->getBlock()->getOperations().insert(graph->getIterator(), function);
-  copySchedulingMetadata(graph, results, function);
+  copySchedulingMetadata(graph, function);
   Block *entry = function.addEntryBlock();
   OpBuilder builder = OpBuilder::atBlockBegin(entry);
 
   size_t outputBase = graph.getNumArguments();
-  auto setAlignment = [&](unsigned index, const TensorDescriptor &descriptor) {
+  // Records the descriptor's access properties on the boundary memref argument,
+  // where FormGrid reads them back when it creates the tiled loads and stores.
+  // allow_tma is only recorded when false, which keeps the default IR unchanged.
+  auto setAccessAttrs = [&](unsigned index,
+                            const TensorDescriptor &descriptor) {
     int64_t alignment = std::max<int64_t>(1, descriptor.alignment);
     function.setArgAttr(index, TensorIRDialect::getAlignmentAttrName(),
                         builder.getI64IntegerAttr(alignment));
+    if (!descriptor.allowTma) {
+      function.setArgAttr(index, TensorIRDialect::getAllowTMAAttrName(),
+                          builder.getBoolAttr(false));
+    }
   };
   for (auto [index, descriptor] : llvm::enumerate(outputDescriptors)) {
-    setAlignment(outputBase + index, descriptor);
+    setAccessAttrs(outputBase + index, descriptor);
   }
 
   IRMapping mapping;
@@ -145,11 +145,11 @@ static LogicalResult bufferizeGraph(GraphOp graph) {
       mapping.map(oldArgument, newArgument);
       continue;
     }
-    setAlignment(index, inputDescriptors[index]);
-    Value tensor = bufferization::ToTensorOp::create(
+    setAccessAttrs(index, inputDescriptors[index]);
+    auto tensor = bufferization::ToTensorOp::create(
         builder, graph.getLoc(), oldArgument.getType(), newArgument,
         /*restrict=*/true, /*writable=*/false);
-    mapping.map(oldArgument, tensor);
+    mapping.map(oldArgument, tensor.getResult());
   }
 
   for (Operation &op : results->getBlock()->without_terminator()) {

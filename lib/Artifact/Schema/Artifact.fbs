@@ -49,11 +49,8 @@ union ArgDesc { TensorArgDesc, ScalarArgDesc }
 
 struct GridDimensions { x: int32; y: int32; z: int32; }
 
-table LaunchMetadata {
-  func_name: string (required);
-  // Each arg contributes one or more flat kernel args when packed (a
-  // pointer plus any dynamic sizes/strides for tensors, one value for
-  // scalars); see TensorArgDesc::totalArgs().
+table KernelMetadata {
+  name: string (required);
   args: [ArgDesc];
   tile_sizes: [int32];
   num_inputs: int32;
@@ -64,6 +61,16 @@ table LaunchMetadata {
   sm_count: int32;
   occupancy: int32;
   static_grid: GridDimensions;  // absent -> runtime-computed grid
+  // True when the device code waits on the preceding grid (griddepcontrol), so
+  // launching it with programmatic stream serialization is safe.
+  uses_pdl: bool;
+}
+
+table Entrypoint {
+  // Symbol exported by host_module when native host code is present.
+  name: string (required);
+  num_inputs: int32;
+  args: [ArgDesc];
 }
 
 enum ArchPortability : uint8 { Portable = 0, FamilyPortable = 1, ArchConditional = 2 }
@@ -82,18 +89,44 @@ table TileIRBytecode {
   version: BcVersion;
 }
 
-union Binary { Cubin, TileIRBytecode }
+union DeviceModule { Cubin, TileIRBytecode }
+
+// Represents an encoding of host functions
+// (e.g. elf).
+table HostModule {
+  abi_version: uint32;
+  bytes: [ubyte] (required);
+  triple: string (required);
+}
 
 table TensorIRArtifact {
   // Readers reject any version they don't exactly match; there is no
   // cross-version compatibility. Field additions alone don't need a version
   // bump, but any change to what an existing field means does.
   version: uint32;
-  kernel_name: string (required);
+  module_name: string (required);
   arch: SmTarget;
-  binary: Binary (required);
-  metadata: LaunchMetadata (required);
+
+  // The device image/module. All referenced device entrypoints (`kernels`)
+  // must be contained in this image.
+  device_module: DeviceModule (required);
+
+  // The list of device entrypoints. Each contains a function
+  // name and other information about the kernel.
+  // NOTE: The index within this list is the kernel ordinal.
+  kernels: [KernelMetadata] (required);
+
+  // Optional relocatable native host module.
+  host_module: HostModule;
+
+  // The list of invocable functions in this module. Each
+  // corresponds to one 'nv_tensor_ir.graph' from the input
+  // program.
+  //
+  // Currently each entrypoint launches one kernel, but this
+  // will evolve in the future.
+  entrypoints: [Entrypoint] (required);
 }
 
 root_type TensorIRArtifact;
-file_identifier "TIRK";
+file_identifier "TIR2";

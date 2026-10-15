@@ -24,36 +24,23 @@
 //       CHECK: %[[OUTER_VALUE:.*]] = nv_tensor_ir.add %[[OUTER_LOAD]], %[[OUTER_SPLAT]]
 //       CHECK: %[[RESULT:.*]] = nv_tensor_ir.add %[[BRANCH]], %[[OUTER_VALUE]]
 //       CHECK: nv_tensor_ir.store %[[RESULT]]
-#shared = #nv_tensor_ir.composite_source<
-    #nv_tensor_ir.tensor_source<0, 0, "(16):(0)">,
-    #nv_tensor_ir.tensor_source<-1, 0, "(16):(0)">>
-#half = #nv_tensor_ir.composite_source<
-    #nv_tensor_ir.tensor_source<0, 0, "(8):(0)">,
-    #nv_tensor_ir.tensor_source<-1, 0, "(8):(0)">>
-#concat = #nv_tensor_ir.concat_source<dim = 0, #half, #half>
-#result = #nv_tensor_ir.composite_source<#concat, #shared>
 func.func @shared_producer(%input: memref<1xf32, #ptr.generic_space>,
     %output: memref<16xf32, #ptr.generic_space>, %scalar: f32) attributes {
   nv_tensor_ir.bufferized_program,
-  iteration_space = #result,
-  tile_size = array<i32: 1>
+  tile_size = array<i32: 1, 8>
 } {
   %input_tile = bufferization.to_tensor %input restrict
       : memref<1xf32, #ptr.generic_space> to tensor<1xf32>
   %twice = arith.addf %scalar, %scalar : f32
-  %splat = nv_tensor_ir.splat %twice {
-      layout = #nv_tensor_ir.tensor_source<-1, 0, "(16):(0)">}
-      : tensor<1xf32>
-  %shared = nv_tensor_ir.add %input_tile, %splat {layout = #shared}
-      : tensor<1xf32>
-  %half = nv_tensor_ir.broadcast %shared {layout = #half}
+  %splat = nv_tensor_ir.splat %twice : tensor<1xf32>
+  %shared = nv_tensor_ir.add %input_tile, %splat : tensor<1xf32>
+  %half = nv_tensor_ir.broadcast %shared
       : tensor<1xf32> -> tensor<8xf32>
   %concat = nv_tensor_ir.concatenate %half, %half dimension = 0
-      {layout = #concat}
       : (tensor<8xf32>, tensor<8xf32>) -> tensor<16xf32>
-  %whole = nv_tensor_ir.broadcast %shared {layout = #shared}
+  %whole = nv_tensor_ir.broadcast %shared
       : tensor<1xf32> -> tensor<16xf32>
-  %result = nv_tensor_ir.add %concat, %whole {layout = #result}
+  %result = nv_tensor_ir.add %concat, %whole
       : tensor<16xf32>
   bufferization.materialize_in_destination %result in restrict writable %output
       : (tensor<16xf32>, memref<16xf32, #ptr.generic_space>) -> ()

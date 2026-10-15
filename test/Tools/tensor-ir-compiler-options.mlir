@@ -21,6 +21,14 @@
 // RUN:   | FileCheck %s --check-prefix=BAD-REPEAT
 // RUN: not tensor_ir-compiler %s --repeat=0 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=BAD-REPEAT-VALUE
+// RUN: tensor_ir-compiler %s --auto-gdc-insertion=conservative \
+// RUN:   --bytecode-version=current --verbose 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=AUTO-GDC
+// RUN: not tensor_ir-compiler %s --auto-gdc-insertion=bogus 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=BAD-AUTO-GDC
+// RUN: not tensor_ir-compiler %s --auto-gdc-insertion=conservative \
+// RUN:   --bytecode-version=13.3 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=BAD-AUTO-GDC-VERSION
 // RUN: env TIR_OVERRIDE_OPTIONS=#verbose \
 // RUN:   tensor_ir-compiler --verbose %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=OVERRIDE --implicit-check-not="Target SM:"
@@ -37,6 +45,10 @@
 // BAD-MIXED-TILE: use either 'x' or ',' as the separator
 // BAD-REPEAT: --iterations and --repeat cannot be used together
 // BAD-REPEAT-VALUE: --iterations must be greater than 0
+// AUTO-GDC: Invocation: {{.*}}auto-gdc-insertion=conservative
+// AUTO-GDC: Compiled successfully
+// BAD-AUTO-GDC: for the --auto-gdc-insertion option: Cannot find option named 'bogus'
+// BAD-AUTO-GDC-VERSION: auto-gdc-insertion=conservative requires CUDA Tile bytecode 13.4 or newer
 // OVERRIDE: Compiled successfully
 
 module {

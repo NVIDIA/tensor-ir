@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 import collections.abc as _collections_abc
+import warnings as _warnings
 
 # These imports intentionally populate this module's public dialect API. The
 # dialect enums come from the generated enum module; do not hand-write copies
@@ -24,8 +25,10 @@ from .._mlir_libs import _tensor_ir as _tensor_ir_cext  # noqa: E402
 from .._mlir_libs._tensor_ir import *  # noqa: F403, E402
 from nv_tensor_ir.runtime import (  # noqa: F401, E402
     CompileOptions,
-    Program,
+    Artifact,
+    RuntimeKernel,
     CudaTileArtifactKind,
+    analyze_module,
     can_compile,
     compile,
 )

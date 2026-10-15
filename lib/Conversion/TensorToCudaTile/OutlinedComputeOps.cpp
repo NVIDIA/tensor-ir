@@ -13,11 +13,11 @@
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTileInternal.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include "MinVersionInfo.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
 #include <cmath>
 #include <type_traits>
@@ -169,7 +169,8 @@ public:
                              ArrayRef<Value> operands,
                              cuda_tile::TileType resultType,
                              ConversionPatternRewriter &rewriter,
-                             bool enableExperimentalCudaTileOps) {
+                             bool enableExperimentalCudaTileOps,
+                             cuda_tile::BytecodeVersion targetBytecodeVersion) {
     Operation *op = pointwise.getOperation();
     if (operands.empty()) {
       return rewriter.notifyMatchFailure(op, "expected converted operands");
@@ -208,9 +209,10 @@ public:
         .Case<TanhFwdOp>([&](auto) {
           return replaceUnary<cuda_tile::TanHOp>(op, input, rewriter);
         })
-        .Case<ExpOp>([&](auto) {
+        .Case<ExpOp>([&](ExpOp exponential) {
           rewriter.replaceOp(op,
-                             buildExp(rewriter, loc, input, resultElementType));
+                             buildExp(rewriter, loc, input, resultElementType,
+                                      exponential.getRoundingMode()));
           return success();
         })
         .Case<SqrtOp>([&](auto) {
@@ -287,16 +289,30 @@ public:
         .Case<PowOp>([&](PowOp pow) {
           Value rhs = operands[1];
           Type exponentType = pow.getRhs().getType().getElementType();
-          if (exponentType.isInteger()) {
+          // fpowi interprets its exponent as signed.
+          if (auto integerType = dyn_cast<IntegerType>(exponentType)) {
+            if (integerType.isSigned() && integerType.getWidth() <= 32 &&
+                isSupported<cuda_tile::FPowIOp>(targetBytecodeVersion)) {
+              rewriter.replaceOpWithNewOp<cuda_tile::FPowIOp>(op, operands[0],
+                                                              rhs);
+              return success();
+            }
             rhs = cuda_tile::IToFOp::create(
                 rewriter, loc, operands[0].getType(), rhs,
                 getSignedness(exponentType),
                 cuda_tile::RoundingMode::NEAREST_EVEN);
           }
-          rewriter.replaceOpWithNewOp<cuda_tile::PowOp>(op, operands[0], rhs);
+          rewriter.replaceOpWithNewOp<cuda_tile::FPowFOp>(op, operands[0], rhs);
           return success();
         })
-        .Case<Atan2Op>([&](auto) {
+        .Case<Atan2Op>([&](auto) -> LogicalResult {
+          if (!isSupported<cuda_tile::Atan2Op>(targetBytecodeVersion)) {
+            return op->emitError("atan2 requires CUDA Tile bytecode version ")
+                   << getMinCudaTileBytecodeVersion<cuda_tile::Atan2Op>()
+                          .toString()
+                   << " or newer, but target-bytecode-version is "
+                   << targetBytecodeVersion.toString();
+          }
           rewriter.replaceOpWithNewOp<cuda_tile::Atan2Op>(op, operands[0],
                                                           operands[1]);
           return success();
@@ -354,9 +370,9 @@ public:
                 constant.getValue().resizeSplat(resultType));
             rewriter.replaceOpWithNewOp<cuda_tile::ConstantOp>(op, resultType,
                                                                literal);
-            if (mlir::isOpTriviallyDead(constant)) {
-              rewriter.eraseOp(constant);
-            }
+            // Other splats may still retrieve this scalar through the
+            // conversion's value mapping even if it has no SSA uses. Leave
+            // dead constant cleanup to canonicalization after conversion.
             return success();
           }
 
@@ -477,29 +493,52 @@ private:
   static LogicalResult lowerMod(Operation *op, ArrayRef<Value> operands,
                                 Type elementType,
                                 ConversionPatternRewriter &rewriter) {
-    Value quotient;
-    Value product;
+    Location loc = op->getLoc();
+    Value lhs = operands[0];
+    Value rhs = operands[1];
+    auto tileType = cast<ShapedType>(lhs.getType());
+    // Floored modulo: the truncated remainder plus rhs when the signs differ.
     if (elementType.isFloat()) {
-      quotient = cuda_tile::DivFOp::create(
-          rewriter, op->getLoc(), operands[0], operands[1],
-          cuda_tile::RoundingMode::NEAREST_EVEN);
-      quotient = cuda_tile::FloorOp::create(rewriter, op->getLoc(), quotient);
-      product = cuda_tile::MulFOp::create(
-          rewriter, op->getLoc(), quotient, operands[1],
-          cuda_tile::RoundingMode::NEAREST_EVEN);
-      rewriter.replaceOpWithNewOp<cuda_tile::SubFOp>(
-          op, operands[0], product, cuda_tile::RoundingMode::NEAREST_EVEN);
-      return success();
+      Value zero = createConstant(rewriter, loc, tileType, 0.0);
+      Value rem = cuda_tile::RemFOp::create(rewriter, loc, lhs, rhs);
+      Value remNonZero = cuda_tile::CmpFOp::create(
+          rewriter, loc, cuda_tile::ComparisonPredicate::NOT_EQUAL,
+          cuda_tile::ComparisonOrdering::ORDERED, rem, zero);
+      Value remNegative = cuda_tile::CmpFOp::create(
+          rewriter, loc, cuda_tile::ComparisonPredicate::LESS_THAN,
+          cuda_tile::ComparisonOrdering::ORDERED, rem, zero);
+      Value rhsNegative = cuda_tile::CmpFOp::create(
+          rewriter, loc, cuda_tile::ComparisonPredicate::LESS_THAN,
+          cuda_tile::ComparisonOrdering::ORDERED, rhs, zero);
+      Value signsDiffer =
+          cuda_tile::XOrIOp::create(rewriter, loc, remNegative, rhsNegative);
+      Value needsFix =
+          cuda_tile::AndIOp::create(rewriter, loc, remNonZero, signsDiffer);
+      Value fixed = cuda_tile::AddFOp::create(
+          rewriter, loc, rem, rhs, cuda_tile::RoundingMode::NEAREST_EVEN);
+      rewriter.replaceOpWithNewOp<cuda_tile::SelectOp>(op, needsFix, fixed,
+                                                       rem);
+    } else if (elementType.isSignedInteger()) {
+      Value zero = createConstant(rewriter, loc, tileType, int64_t{0});
+      Value rem = cuda_tile::RemIOp::create(rewriter, loc, lhs, rhs,
+                                            cuda_tile::Signedness::Signed);
+      Value remNonZero = cuda_tile::CmpIOp::create(
+          rewriter, loc, cuda_tile::ComparisonPredicate::NOT_EQUAL, rem, zero,
+          cuda_tile::Signedness::Signed);
+      Value signBits = cuda_tile::XOrIOp::create(rewriter, loc, lhs, rhs);
+      Value signsDiffer = cuda_tile::CmpIOp::create(
+          rewriter, loc, cuda_tile::ComparisonPredicate::LESS_THAN, signBits,
+          zero, cuda_tile::Signedness::Signed);
+      Value needsFix =
+          cuda_tile::AndIOp::create(rewriter, loc, remNonZero, signsDiffer);
+      Value fixed = cuda_tile::AddIOp::create(rewriter, loc, rem, rhs);
+      rewriter.replaceOpWithNewOp<cuda_tile::SelectOp>(op, needsFix, fixed,
+                                                       rem);
+    } else {
+      // Unsigned (and i1): floored and truncated remainders coincide.
+      rewriter.replaceOpWithNewOp<cuda_tile::RemIOp>(
+          op, lhs, rhs, cuda_tile::Signedness::Unsigned);
     }
-    auto rounding = elementType.isSignedInteger()
-                        ? cuda_tile::RoundingMode::NEGATIVE_INF
-                        : cuda_tile::RoundingMode::ZERO;
-    quotient = cuda_tile::DivIOp::create(rewriter, op->getLoc(), operands[0],
-                                         operands[1],
-                                         getSignedness(elementType), rounding);
-    product = cuda_tile::MulIOp::create(rewriter, op->getLoc(), quotient,
-                                        operands[1]);
-    rewriter.replaceOpWithNewOp<cuda_tile::SubIOp>(op, operands[0], product);
     return success();
   }
 
@@ -654,9 +693,11 @@ class PointwiseConversion
     : public OpInterfaceConversionPattern<PointwiseOpInterface> {
 public:
   PointwiseConversion(const TypeConverter &typeConverter, MLIRContext *context,
-                      bool enableExperimentalCudaTileOps)
+                      bool enableExperimentalCudaTileOps,
+                      cuda_tile::BytecodeVersion targetBytecodeVersion)
       : OpInterfaceConversionPattern(typeConverter, context),
-        enableExperimentalCudaTileOps(enableExperimentalCudaTileOps) {}
+        enableExperimentalCudaTileOps(enableExperimentalCudaTileOps),
+        targetBytecodeVersion(targetBytecodeVersion) {}
 
   LogicalResult
   matchAndRewrite(PointwiseOpInterface pointwise, ArrayRef<Value> operands,
@@ -672,11 +713,13 @@ public:
           "staged pointwise operations require a static tile result");
     }
     return lowerPointwiseOp(pointwise, operands, *resultType, rewriter,
-                            enableExperimentalCudaTileOps);
+                            enableExperimentalCudaTileOps,
+                            targetBytecodeVersion);
   }
 
 private:
   bool enableExperimentalCudaTileOps;
+  cuda_tile::BytecodeVersion targetBytecodeVersion;
 };
 
 class IotaConversion : public OpConversionPattern<IotaOp> {
@@ -1253,6 +1296,22 @@ public:
   }
 };
 
+template <typename SourceOp, cuda_tile::Signedness Signedness,
+          cuda_tile::RoundingMode Rounding>
+class RoundedIntegerDivisionConversion : public OpConversionPattern<SourceOp> {
+public:
+  using Base = OpConversionPattern<SourceOp>;
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(SourceOp op, typename Base::OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<cuda_tile::DivIOp>(
+        op, adaptor.getLhs(), adaptor.getRhs(), Signedness, Rounding);
+    return success();
+  }
+};
+
 static std::optional<Comparator>
 convertComparator(arith::CmpFPredicate predicate) {
   switch (predicate) {
@@ -1393,6 +1452,18 @@ using MulIConversion =
 using DivUIConversion =
     SignedArithmeticConversion<arith::DivUIOp, cuda_tile::DivIOp,
                                cuda_tile::Signedness::Unsigned, false>;
+using CeilDivSIConversion =
+    RoundedIntegerDivisionConversion<arith::CeilDivSIOp,
+                                     cuda_tile::Signedness::Signed,
+                                     cuda_tile::RoundingMode::POSITIVE_INF>;
+using CeilDivUIConversion =
+    RoundedIntegerDivisionConversion<arith::CeilDivUIOp,
+                                     cuda_tile::Signedness::Unsigned,
+                                     cuda_tile::RoundingMode::POSITIVE_INF>;
+using FloorDivSIConversion =
+    RoundedIntegerDivisionConversion<arith::FloorDivSIOp,
+                                     cuda_tile::Signedness::Signed,
+                                     cuda_tile::RoundingMode::NEGATIVE_INF>;
 using RemUIConversion =
     SignedArithmeticConversion<arith::RemUIOp, cuda_tile::RemIOp,
                                cuda_tile::Signedness::Unsigned, false>;
@@ -1401,13 +1472,15 @@ using SelectConversion =
 
 } // namespace
 
-LogicalResult lowerPointwiseOp(PointwiseOpInterface op,
-                               ArrayRef<Value> operands,
-                               cuda_tile::TileType resultType,
-                               ConversionPatternRewriter &rewriter,
-                               bool enableExperimentalCudaTileOps) {
+LogicalResult
+lowerPointwiseOp(PointwiseOpInterface op, ArrayRef<Value> operands,
+                 cuda_tile::TileType resultType,
+                 ConversionPatternRewriter &rewriter,
+                 bool enableExperimentalCudaTileOps,
+                 cuda_tile::BytecodeVersion targetBytecodeVersion) {
   return PointwiseEmitter::lower(op, operands, resultType, rewriter,
-                                 enableExperimentalCudaTileOps);
+                                 enableExperimentalCudaTileOps,
+                                 targetBytecodeVersion);
 }
 
 LogicalResult validateOutlinedMatmulLowerable(MatmulOp op) {
@@ -1453,9 +1526,10 @@ LogicalResult validateOutlinedMatmulLowerable(MatmulOp op) {
   return success();
 }
 
-void registerOutlinedComputePatterns(RewritePatternSet &patterns,
-                                     const TypeConverter &typeConverter,
-                                     bool enableExperimentalCudaTileOps) {
+void registerOutlinedComputePatterns(
+    RewritePatternSet &patterns, const TypeConverter &typeConverter,
+    bool enableExperimentalCudaTileOps,
+    cuda_tile::BytecodeVersion targetBytecodeVersion) {
   MLIRContext *context = patterns.getContext();
   patterns.add<TensorIRConstantConversion, IotaConversion, BroadcastConversion,
                ReshapeConversion, TransposeConversion, SliceConversion,
@@ -1463,8 +1537,10 @@ void registerOutlinedComputePatterns(RewritePatternSet &patterns,
                UserDefinedReductionConversion, ReductionYieldConversion>(
       typeConverter, context);
   patterns.add<PointwiseConversion>(typeConverter, context,
-                                    enableExperimentalCudaTileOps);
+                                    enableExperimentalCudaTileOps,
+                                    targetBytecodeVersion);
   patterns.add<AddIConversion, SubIConversion, MulIConversion, DivUIConversion,
+               CeilDivSIConversion, CeilDivUIConversion, FloorDivSIConversion,
                RemUIConversion, SelectConversion, IntegerComparisonConversion,
                ReductionBodyCmpFConversion, ReductionBodyAddF,
                ReductionBodyDivF, ReductionBodyMulF, ReductionBodySubF,

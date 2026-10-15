@@ -187,14 +187,15 @@ nv_tensor_ir.graph @reshape_4d_to_2d_rowmajor(
 // ============================================================================
 // CHECK-LABEL: entry @reshape_2d_to_1d_rowmajor
 //  CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
-//       CHECK:   %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
+//       CHECK:   %[[C0:.+]] = constant <i32: 0> : tile<i32>
+//   CHECK-NOT:   get_tile_block_id
 //       CHECK:   %[[TVIEW_IN:.+]] = make_tensor_view %[[IN_PTR]], shape = [32], strides = [1] : tensor_view<32xf32, strides=[1]>
 //       CHECK:   %[[PIN:.+]] = make_partition_view %[[TVIEW_IN]] : partition_view<tile=(32), tensor_view<32xf32, strides=[1]>>
-//       CHECK:   %[[TILE:.+]], {{.*}} = load_view_tko weak %[[PIN]][%[[BID_X]]] : partition_view<tile=(32), tensor_view<32xf32, strides=[1]>>, tile<i32> -> tile<32xf32>, token
+//       CHECK:   %[[TILE:.+]], {{.*}} = load_view_tko weak %[[PIN]][%[[C0]]] : partition_view<tile=(32), tensor_view<32xf32, strides=[1]>>, tile<i32> -> tile<32xf32>, token
 //       CHECK:   %[[ADD:.+]] = addf %[[TILE]], %[[TILE]] : tile<32xf32>
 //       CHECK:   %[[VOUT:.+]] = make_tensor_view %[[OUT_PTR]], shape = [32], strides = [1] : tensor_view<32xf32, strides=[1]>
 //       CHECK:   %[[POUT:.+]] = make_partition_view %[[VOUT]] : partition_view<tile=(32), tensor_view<32xf32, strides=[1]>>
-//       CHECK:   store_view_tko weak %[[ADD]], %[[POUT]][%[[BID_X]]] : tile<32xf32>, partition_view<tile=(32), tensor_view<32xf32, strides=[1]>>, tile<i32> -> token
+//       CHECK:   store_view_tko weak %[[ADD]], %[[POUT]][%[[C0]]] : tile<32xf32>, partition_view<tile=(32), tensor_view<32xf32, strides=[1]>>, tile<i32> -> token
 module {
   nv_tensor_ir.graph @reshape_2d_to_1d_rowmajor(
       %arg0: tensor<4x8xf32> {nv_tensor_ir.stride = "(8,1)"}
@@ -217,8 +218,8 @@ module {
 // ============================================================================
 // CHECK-LABEL: entry @constant_feeding_reshape
 //  CHECK-SAME: (%[[OUT_PTR:.+]]: tile<ptr<f32>>)
-//       CHECK:   %[[C0:.+]] = constant <i32: 0> : tile<i32>
-//       CHECK:   %[[CST:.+]] = constant <f32: 1.000000e+00> : tile<1xf32>
+//   CHECK-DAG:   %[[C0:.+]] = constant <i32: 0> : tile<i32>
+//   CHECK-DAG:   %[[CST:.+]] = constant <f32: 1.000000e+00> : tile<1xf32>
 //       CHECK:   %[[VOUT:.+]] = make_tensor_view %[[OUT_PTR]], shape = [1], strides = [2] : tensor_view<1xf32, strides=[2]>
 //       CHECK:   %[[POUT:.+]] = make_partition_view %[[VOUT]] : partition_view<tile=(1), tensor_view<1xf32, strides=[2]>>
 //       CHECK:   store_view_tko weak %[[CST]], %[[POUT]][%[[C0]]] : tile<1xf32>, partition_view<tile=(1), tensor_view<1xf32, strides=[2]>>, tile<i32> -> token

@@ -164,7 +164,7 @@ typedef enum MlirTensorIRArgumentKind {
   MlirTensorIRArgumentKindTensor = 4,
 } MlirTensorIRArgumentKind;
 
-/// Describes a strided tensor passed to a compiled TensorIR program.
+/// Describes a strided tensor passed to a TensorIR runtime kernel.
 ///
 /// The view does not own `data`, `shape`, or `strides`. A non-NULL metadata
 /// array contains `rank` elements. All provided storage must remain valid for
@@ -223,7 +223,7 @@ typedef struct MlirTensorIRPackedArgs {
 } MlirTensorIRPackedArgs;
 
 //===----------------------------------------------------------------------===//
-// Compiled program API.
+// Compilation artifact and runtime kernel API.
 //===----------------------------------------------------------------------===//
 
 /// Builds the unhashed cache key for compiling `module` with `options`.
@@ -235,31 +235,97 @@ MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRCalculateCacheKey(
     MlirStringCallback keyCallback, void *keyUserData,
     MlirStringCallback errorCallback, void *errorUserData);
 
-/// An opaque handle to an owning compiled TensorIR program.
-///
-/// Handles returned by `mlirTensorIRProgramCompile` must eventually be passed
-/// to `mlirTensorIRProgramDelete`.
-///
-/// Functions returning `MlirLogicalResult` reject a NULL program handle and
-/// optionally report the error through their error callback. Destruction and
-/// state-query APIs handle NULL as documented below. Whenever an optional
-/// error callback is invoked, its `MlirStringRef` is valid only for the
-/// duration of the callback and the associated user data is forwarded
-/// unchanged.
-typedef struct MlirTensorIRProgram {
-  /// Opaque implementation pointer.
-  void *ptr;
-} MlirTensorIRProgram;
+/// Receives one tile shape. `shape` contains `rank` extents and is valid only
+/// for the duration of the callback.
+typedef void (*MlirTensorIRTileCandidateCallback)(const int32_t *shape,
+                                                  size_t rank, void *userData);
 
-/// Compiles `module` using `invocation` and returns a new owning program
-/// handle.
+/// Analyzes exactly one graph in place using the CUDA Tile compiler and sends
+/// tile candidates to `candidateCallback` in best-first order. Requires a
+/// positive maxTileCandidates or a tile hint. An explicit invocation tile size
+/// produces no callbacks. The module may also be modified on failure.
 ///
-/// `module` and `invocation` need only remain valid for the duration of this
-/// call. On failure, returns a handle whose `ptr` is NULL and, when
-/// `errorCallback` is non-NULL, forwards an error message and `errorUserData`
-/// to it. The message is valid only during the callback.
-MLIR_CAPI_EXPORTED MlirTensorIRProgram mlirTensorIRProgramCompile(
+/// `module`, `invocation`, and `candidateCallback` must not be NULL. On failure,
+/// no candidates are delivered and an error is optionally sent to
+/// `errorCallback`; its string is valid only during the callback.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRCudaTileAnalyzeModule(
     MlirModule module, MlirTensorIRCompilerInvocation invocation,
+    MlirTensorIRTileCandidateCallback candidateCallback,
+    void *candidateUserData, MlirStringCallback errorCallback,
+    void *errorUserData);
+
+/// An owning immutable compilation artifact, independent of runtime state.
+/// Delete each non-null handle exactly once with mlirTensorIRArtifactDestroy.
+typedef struct MlirTensorIRArtifact {
+  void *ptr;
+} MlirTensorIRArtifact;
+
+/// An owning loaded runtime kernel. Delete each non-null handle exactly once
+/// with mlirTensorIRRuntimeKernelDestroy. Loading retains an independent copy
+/// of the artifact, so the original artifact can be destroyed immediately.
+typedef struct MlirTensorIRRuntimeKernel {
+  void *ptr;
+} MlirTensorIRRuntimeKernel;
+
+/// Compile without creating or loading a runtime kernel. The module and
+/// invocation need only live for this call. Returns null on failure.
+/// Error callback strings borrow storage valid only during the callback.
+MLIR_CAPI_EXPORTED MlirTensorIRArtifact mlirTensorIRArtifactCompile(
+    MlirModule module, MlirTensorIRCompilerInvocation invocation,
+    MlirStringCallback errorCallback, void *errorUserData);
+
+/// Destroy the artifact handle and its storage. A null handle is ignored.
+MLIR_CAPI_EXPORTED void
+mlirTensorIRArtifactDestroy(MlirTensorIRArtifact artifact);
+
+/// Send the original device binary to callback (required). The binary string
+/// borrows storage valid only during the callback. Rejects a null artifact.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRArtifactGetBytecode(
+    MlirTensorIRArtifact artifact, MlirStringCallback callback, void *userData,
+    MlirStringCallback errorCallback, void *errorUserData);
+
+/// Serialize device code, host code, and metadata without loading any code.
+/// Callback (required) borrows the bytes for its duration. Rejects null artifacts.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRArtifactSerialize(
+    MlirTensorIRArtifact artifact, MlirStringCallback callback, void *userData,
+    MlirStringCallback errorCallback, void *errorUserData);
+
+/// Deserialize an owning artifact without loading code. Input bytes need only
+/// live for this call. Returns null on failure.
+MLIR_CAPI_EXPORTED MlirTensorIRArtifact mlirTensorIRArtifactDeserialize(
+    MlirStringRef bytes, MlirStringCallback errorCallback, void *errorUserData);
+
+/// Copy the artifact into a new runtime kernel and initialize host and device
+/// state. Returns a ready-to-launch kernel, or null on failure (including null
+/// input). The artifact remains valid and can be loaded more than once.
+MLIR_CAPI_EXPORTED MlirTensorIRRuntimeKernel
+mlirTensorIRArtifactLoad(MlirTensorIRArtifact artifact,
+                         MlirStringCallback errorCallback, void *errorUserData);
+
+/// Unload and destroy the runtime kernel. A null handle is ignored.
+MLIR_CAPI_EXPORTED void
+mlirTensorIRRuntimeKernelDestroy(MlirTensorIRRuntimeKernel kernel);
+
+/// Runtime operations reject null kernel handles. Arguments and workspace
+/// borrow caller-owned storage for the duration of the call. Output pointers
+/// must be non-null. Optional error callbacks borrow their diagnostic strings.
+/// A constraint mismatch succeeds with supported=false; other errors fail.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRRuntimeKernelCheckSupport(
+    MlirTensorIRRuntimeKernel kernel, MlirTensorIRPackedArgs args,
+    bool *supported, MlirStringCallback errorCallback, void *errorUserData);
+
+MLIR_CAPI_EXPORTED MlirLogicalResult
+mlirTensorIRRuntimeKernelQueryWorkspaceSize(MlirTensorIRRuntimeKernel kernel,
+                                            MlirTensorIRPackedArgs args,
+                                            size_t *workspaceSize,
+                                            MlirStringCallback errorCallback,
+                                            void *errorUserData);
+
+/// Launch on stream (null selects the default stream). Workspace may be null
+/// when its size is zero. No implicit loading is performed.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRRuntimeKernelLaunch(
+    MlirTensorIRRuntimeKernel kernel, MlirTensorIRPackedArgs args,
+    void *workspaceData, size_t workspaceSize, void *stream,
     MlirStringCallback errorCallback, void *errorUserData);
 
 /// Checks whether `module` can be compiled using `invocation` without
@@ -268,95 +334,9 @@ MLIR_CAPI_EXPORTED MlirTensorIRProgram mlirTensorIRProgramCompile(
 /// On success, writes the result to `canCompile`. On failure, leaves
 /// `canCompile` unspecified and optionally reports an error through
 /// `errorCallback`. `canCompile` must not be NULL.
-MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramCanCompile(
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRCanCompile(
     MlirModule module, MlirTensorIRCompilerInvocation invocation,
     bool *canCompile, MlirStringCallback errorCallback, void *errorUserData);
-
-/// Deletes `program` and releases both the handle and its owned resources.
-///
-/// The handle is invalid after this call and must not be used again. Each
-/// non-NULL owning handle must be deleted exactly once. A handle whose `ptr` is
-/// NULL may also be passed and is ignored.
-MLIR_CAPI_EXPORTED void mlirTensorIRProgramDelete(MlirTensorIRProgram program);
-
-/// Releases the resources owned by `program` without deleting the handle.
-///
-/// This operation is idempotent. A destroyed program cannot be initialized or
-/// executed, but its handle must still be passed to
-/// `mlirTensorIRProgramDelete`. A NULL handle is ignored.
-MLIR_CAPI_EXPORTED void mlirTensorIRProgramDestroy(MlirTensorIRProgram program);
-
-/// Returns true if the resources owned by `program` have been destroyed or if
-/// the handle is NULL.
-MLIR_CAPI_EXPORTED bool
-mlirTensorIRProgramIsDestroyed(MlirTensorIRProgram program);
-
-/// Returns true if the runtime state for `program` has been initialized.
-/// Returns false if the handle is NULL.
-MLIR_CAPI_EXPORTED bool
-mlirTensorIRProgramIsInitialized(MlirTensorIRProgram program);
-
-/// Initializes the runtime state for `program`.
-///
-/// Initialization is idempotent and is also performed lazily by
-/// `mlirTensorIRProgramLaunch`. On failure, an error is optionally reported
-/// through `errorCallback`.
-MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramInitialize(
-    MlirTensorIRProgram program, MlirStringCallback errorCallback,
-    void *errorUserData);
-
-/// Checks whether `program` supports `args`.
-///
-/// On success, writes the result to `supported`. A runtime constraint mismatch
-/// is reported as a successful call with `supported` set to false. Other
-/// errors produce a failure and are optionally reported through
-/// `errorCallback`. `supported` must not be NULL.
-MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramCheckSupport(
-    MlirTensorIRProgram program, MlirTensorIRPackedArgs args, bool *supported,
-    MlirStringCallback errorCallback, void *errorUserData);
-
-/// Queries the number of workspace bytes required to launch `program` with
-/// `args`.
-///
-/// On success, writes the required size to `workspaceSize`. On failure, leaves
-/// `workspaceSize` unspecified and optionally reports an error through
-/// `errorCallback`. `workspaceSize` must not be NULL.
-MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramQueryWorkspaceSize(
-    MlirTensorIRProgram program, MlirTensorIRPackedArgs args,
-    size_t *workspaceSize, MlirStringCallback errorCallback,
-    void *errorUserData);
-
-/// Launches `program` with `args` on the CUDA stream represented by `stream`.
-///
-/// `workspaceData` points to `workspaceSize` bytes of caller-owned device
-/// storage. It may be NULL when no workspace is required. A NULL `stream`
-/// selects the default CUDA stream. On failure, an error is optionally reported
-/// through `errorCallback`.
-MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramLaunch(
-    MlirTensorIRProgram program, MlirTensorIRPackedArgs args,
-    void *workspaceData, size_t workspaceSize, void *stream,
-    MlirStringCallback errorCallback, void *errorUserData);
-
-/// Sends the compiled TileIR bytecode or cubin artifact to `bytecodeCallback`.
-///
-/// The bytecode is binary data and is not NUL-terminated. Its `MlirStringRef`
-/// is valid only for the duration of the callback. `bytecodeCallback` must not
-/// be NULL. On failure, an error is optionally reported through
-/// `errorCallback`.
-MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramGetBytecode(
-    MlirTensorIRProgram program, MlirStringCallback bytecodeCallback,
-    void *bytecodeUserData, MlirStringCallback errorCallback,
-    void *errorUserData);
-
-/// Sends the serialized artifact bytes for `program` to `bytesCallback`:
-/// the compiled binary plus its full launch metadata, as an opaque blob.
-MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRProgramSerialize(
-    MlirTensorIRProgram program, MlirStringCallback bytesCallback,
-    void *bytesUserData, MlirStringCallback errorCallback, void *errorUserData);
-
-/// Rebuilds a program from bytes produced by `mlirTensorIRProgramSerialize`.
-MLIR_CAPI_EXPORTED MlirTensorIRProgram mlirTensorIRProgramDeserialize(
-    MlirStringRef bytes, MlirStringCallback errorCallback, void *errorUserData);
 
 // NOLINTEND(modernize-use-using)
 

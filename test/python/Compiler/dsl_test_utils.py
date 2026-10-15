@@ -71,7 +71,7 @@ def _compile_run_assert(
 def _run_assert_trace(
     compiled: tir.CompiledKernel,
     *inputs: torch.Tensor,
-    output: torch.Tensor,
+    output: torch.Tensor | tuple[torch.Tensor, ...],
     rtol: float = 1e-3,
     atol: float = 1e-3,
     profile: bool = False,
@@ -82,9 +82,10 @@ def _run_assert_trace(
     else:
         compiled.run(*inputs, output=output)
     torch.cuda.synchronize()
+    outputs = output if isinstance(output, tuple) else (output,)
     torch.testing.assert_close(
         output,
-        evaluate_trace_reference(compiled.graph, *inputs, device=output.device),
+        evaluate_trace_reference(compiled.graph, *inputs, device=outputs[0].device),
         rtol=rtol,
         atol=atol,
     )

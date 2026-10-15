@@ -1,6 +1,6 @@
 // RUN: tensor_ir-opt -layout-propagation-pipeline -split-input-file %s | FileCheck %s
 
-// CHECK-LABEL: @test_concat_1way
+// CHECK-LABEL: entry @test_concat_1way
 // CHECK-NOT: cmpi
 // CHECK: %[[TILE:.*]], %{{.*}} = load_view_tko
 // CHECK: store_view_tko weak %[[TILE]]
@@ -18,26 +18,24 @@ nv_tensor_ir.graph @test_concat_1way(
 // CHECK-LABEL: entry @test_concat_across_columns(
 // CHECK-SAME: %[[IN0:[^,]*]]: tile<ptr<f32>>, %[[IN1:[^,]*]]: tile<ptr<f32>>, %[[OUT:[^)]*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[TWO:.*]] = constant <i32: 2>
-// CHECK-DAG: %[[FIVE:.*]] = constant <i32: 5>
-// CHECK: %[[BIDX:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[BLOCK:.*]] = remi %[[BIDX]], %[[FIVE]] unsigned
-// CHECK: %[[COL:.*]] = divi %[[BIDX]], %[[FIVE]] unsigned
+// CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
+// CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
 // CHECK: %[[CMP:.*]] = cmpi less_than %[[BLOCK]], %[[TWO]], unsigned
 // CHECK: %[[RESULT:.*]] = if %[[CMP]] -> (tile<1x512xf32>) {
 // CHECK:   %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [2, 512], strides = [512, 1]
 // CHECK:   %[[PVIEW0:.*]] = make_partition_view %[[VIEW0]]
-// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[BLOCK]], %[[COL]]]
+// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[BLOCK]], %[[ZERO]]]
 // CHECK:   yield %[[TILE0]]
 // CHECK: } else {
 // CHECK:   %[[IDX:.*]] = subi %[[BLOCK]], %[[TWO]]
 // CHECK:   %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [3, 512], strides = [512, 1]
 // CHECK:   %[[PVIEW1:.*]] = make_partition_view %[[VIEW1]]
-// CHECK:   %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[IDX]], %[[COL]]]
+// CHECK:   %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[IDX]], %[[ZERO]]]
 // CHECK:   yield %[[TILE1]]
 // CHECK: }
 // CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [5, 512], strides = [512, 1]
 // CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
-// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[BLOCK]], %[[COL]]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[BLOCK]], %[[ZERO]]]
 nv_tensor_ir.graph @test_concat_across_columns(
     %arg0: tensor<32x32xf32>,
     %arg1: tensor<48x32xf32>
@@ -54,29 +52,27 @@ nv_tensor_ir.graph @test_concat_across_columns(
 // CHECK-LABEL: entry @test_concat_across_rows(
 // CHECK-SAME: %[[IN0:[^,]*]]: tile<ptr<f32>>, %[[IN1:[^,]*]]: tile<ptr<f32>>, %[[OUT:[^)]*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[C16:.*]] = constant <i32: 16>
-// CHECK-DAG: %[[C5:.*]] = constant <i32: 5>
+// CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[BIDX:.+]], %{{.*}}, %{{.*}} = get_tile_block_id
 // CHECK-DAG: %[[C2:.*]] = constant <i32: 2>
 // CHECK: %[[X_REM_16:.+]] = remi %[[BIDX]], %[[C16]] unsigned
-// CHECK: %[[X_DIV_16:.+]] = divi %[[BIDX]], %[[C16]] unsigned
-// CHECK: %[[ROW:.+]] = remi %[[X_DIV_16]], %[[C5]] unsigned
-// CHECK: %[[COL:.+]] = divi %[[X_DIV_16]], %[[C5]] unsigned
+// CHECK: %[[ROW:.+]] = divi %[[BIDX]], %[[C16]] unsigned
 // CHECK: %[[CMP:.*]] = cmpi less_than %[[ROW]], %[[C2]], unsigned
 // CHECK: %[[RESULT:.*]] = if %[[CMP]] -> (tile<2x1x16xf32>) {
 // CHECK:   %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [32, 2, 16], strides = [32, 16, 1]
 // CHECK:   %[[PVIEW0:.*]] = make_partition_view %[[VIEW0]]
-// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[X_REM_16]], %[[ROW]], %[[COL]]]
+// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[X_REM_16]], %[[ROW]], %[[ZERO]]]
 // CHECK:   yield %[[TILE0]]
 // CHECK: } else {
 // CHECK:   %[[IDX:.*]] = subi %[[ROW]], %[[C2]]
 // CHECK:   %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [32, 3, 16], strides = [48, 16, 1]
 // CHECK:   %[[PVIEW1:.*]] = make_partition_view %[[VIEW1]]
-// CHECK:   %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[X_REM_16]], %[[IDX]], %[[COL]]]
+// CHECK:   %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[X_REM_16]], %[[IDX]], %[[ZERO]]]
 // CHECK:   yield %[[TILE1]]
 // CHECK: }
 // CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 5, 16], strides = [80, 16, 1]
 // CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
-// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[X_REM_16]], %[[ROW]], %[[COL]]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[X_REM_16]], %[[ROW]], %[[ZERO]]]
 nv_tensor_ir.graph @test_concat_across_rows(
     %arg0: tensor<32x32xf32>,
     %arg1: tensor<32x48xf32>
@@ -95,15 +91,12 @@ nv_tensor_ir.graph @test_concat_across_rows(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[TWO:.*]] = constant <i32: 2>
 // CHECK-DAG: %[[THREE:.*]] = constant <i32: 3>
-// CHECK-DAG: %[[NINE:.*]] = constant <i32: 9>
-// CHECK: %[[BIDX:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[BLOCK:.*]] = remi %[[BIDX]], %[[NINE]] unsigned
-// CHECK: %[[COL:.*]] = divi %[[BIDX]], %[[NINE]] unsigned
+// CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
 // CHECK: %[[CMP1:.*]] = cmpi less_than %[[BLOCK]], %[[TWO]], unsigned
 // CHECK: %[[RESULT:.*]] = if %[[CMP1]] -> (tile<32x1x16xf32>) {
 // CHECK:   %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [32, 2, 16], strides = [1, 512, 32]
 // CHECK:   %[[PVIEW0:.*]] = make_partition_view %[[VIEW0]]
-// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[ZERO]], %[[BLOCK]], %[[COL]]]
+// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[ZERO]], %[[BLOCK]], %[[ZERO]]]
 // CHECK:   yield %[[TILE0]]
 // CHECK: } else {
 // CHECK:   %[[IDX1:.*]] = subi %[[BLOCK]], %[[TWO]]
@@ -111,20 +104,20 @@ nv_tensor_ir.graph @test_concat_across_rows(
 // CHECK:   %[[INNER:.*]] = if %[[CMP2]] -> (tile<32x1x16xf32>) {
 // CHECK:     %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [32, 3, 16], strides = [1, 512, 32]
 // CHECK:     %[[PVIEW1:.*]] = make_partition_view %[[VIEW1]]
-// CHECK:     %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[ZERO]], %[[IDX1]], %[[COL]]]
+// CHECK:     %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[ZERO]], %[[IDX1]], %[[ZERO]]]
 // CHECK:     yield %[[TILE1]]
 // CHECK:   } else {
 // CHECK:     %[[IDX2:.*]] = subi %[[IDX1]], %[[THREE]]
 // CHECK:     %[[VIEW2:.*]] = make_tensor_view %[[IN2]], shape = [32, 4, 16], strides = [1, 512, 32]
 // CHECK:     %[[PVIEW2:.*]] = make_partition_view %[[VIEW2]]
-// CHECK:     %[[TILE2:.*]], %{{.*}} = load_view_tko weak %[[PVIEW2]][%[[ZERO]], %[[IDX2]], %[[COL]]]
+// CHECK:     %[[TILE2:.*]], %{{.*}} = load_view_tko weak %[[PVIEW2]][%[[ZERO]], %[[IDX2]], %[[ZERO]]]
 // CHECK:     yield %[[TILE2]]
 // CHECK:   }
 // CHECK:   yield %[[INNER]]
 // CHECK: }
 // CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 9, 16], strides = [1, 512, 32]
 // CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
-// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[BLOCK]], %[[COL]]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[BLOCK]], %[[ZERO]]]
 nv_tensor_ir.graph @test_concat_3way(
     %arg0: tensor<32x32xf32> {nv_tensor_ir.stride = "(1,32)"},
     %arg1: tensor<32x48xf32> {nv_tensor_ir.stride = "(1,32)"},
@@ -146,23 +139,20 @@ nv_tensor_ir.graph @test_concat_3way(
 // CHECK-DAG: %[[TWO:.*]] = constant <i32: 2>
 // CHECK-DAG: %[[FOUR:.*]] = constant <i32: 4>
 // CHECK-DAG: %[[FIVE:.*]] = constant <i32: 5>
-// CHECK-DAG: %[[FOURTEEN:.*]] = constant <i32: 14>
-// CHECK: %[[BIDX:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[BLOCK:.*]] = remi %[[BIDX]], %[[FOURTEEN]] unsigned
-// CHECK: %[[COL:.*]] = divi %[[BIDX]], %[[FOURTEEN]] unsigned
+// CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
 // CHECK: %[[CMP1:.*]] = cmpi less_than %[[BLOCK]], %[[FIVE]], unsigned
 // CHECK: %[[RESULT:.*]] = if %[[CMP1]] -> (tile<32x1x16xf32>) {
 // CHECK:   %[[CMP2:.*]] = cmpi less_than %[[BLOCK]], %[[TWO]], unsigned
 // CHECK:   %[[LHS:.*]] = if %[[CMP2]] -> (tile<32x1x16xf32>) {
 // CHECK:     %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [32, 2, 16], strides = [1, 512, 32]
 // CHECK:     %[[PVIEW0:.*]] = make_partition_view %[[VIEW0]]
-// CHECK:     %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[ZERO]], %[[BLOCK]], %[[COL]]]
+// CHECK:     %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[ZERO]], %[[BLOCK]], %[[ZERO]]]
 // CHECK:     yield %[[TILE0]]
 // CHECK:   } else {
 // CHECK:     %[[IDX1:.*]] = subi %[[BLOCK]], %[[TWO]]
 // CHECK:     %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [32, 3, 16], strides = [1, 512, 32]
 // CHECK:     %[[PVIEW1:.*]] = make_partition_view %[[VIEW1]]
-// CHECK:     %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[ZERO]], %[[IDX1]], %[[COL]]]
+// CHECK:     %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[ZERO]], %[[IDX1]], %[[ZERO]]]
 // CHECK:     yield %[[TILE1]]
 // CHECK:   }
 // CHECK:   yield %[[LHS]]
@@ -172,20 +162,20 @@ nv_tensor_ir.graph @test_concat_3way(
 // CHECK:   %[[RHS:.*]] = if %[[CMP3]] -> (tile<32x1x16xf32>) {
 // CHECK:     %[[VIEW2:.*]] = make_tensor_view %[[IN2]], shape = [32, 4, 16], strides = [1, 512, 32]
 // CHECK:     %[[PVIEW2:.*]] = make_partition_view %[[VIEW2]]
-// CHECK:     %[[TILE2:.*]], %{{.*}} = load_view_tko weak %[[PVIEW2]][%[[ZERO]], %[[IDX2]], %[[COL]]]
+// CHECK:     %[[TILE2:.*]], %{{.*}} = load_view_tko weak %[[PVIEW2]][%[[ZERO]], %[[IDX2]], %[[ZERO]]]
 // CHECK:     yield %[[TILE2]]
 // CHECK:   } else {
 // CHECK:     %[[IDX3:.*]] = subi %[[IDX2]], %[[FOUR]]
 // CHECK:     %[[VIEW3:.*]] = make_tensor_view %[[IN3]], shape = [32, 5, 16], strides = [1, 512, 32]
 // CHECK:     %[[PVIEW3:.*]] = make_partition_view %[[VIEW3]]
-// CHECK:     %[[TILE3:.*]], %{{.*}} = load_view_tko weak %[[PVIEW3]][%[[ZERO]], %[[IDX3]], %[[COL]]]
+// CHECK:     %[[TILE3:.*]], %{{.*}} = load_view_tko weak %[[PVIEW3]][%[[ZERO]], %[[IDX3]], %[[ZERO]]]
 // CHECK:     yield %[[TILE3]]
 // CHECK:   }
 // CHECK:   yield %[[RHS]]
 // CHECK: }
 // CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 14, 16], strides = [1, 512, 32]
 // CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
-// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[BLOCK]], %[[COL]]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[ZERO]], %[[BLOCK]], %[[ZERO]]]
 nv_tensor_ir.graph @test_concat_nested(
     %arg0: tensor<32x32xf32> {nv_tensor_ir.stride = "(1,32)"},
     %arg1: tensor<32x48xf32> {nv_tensor_ir.stride = "(1,32)"},
@@ -257,7 +247,7 @@ nv_tensor_ir.graph @test_concat_transpose_col_major(
 // position. Data flow: source 0 (blocks < 20) loads the block argument directly;
 // the two later sources recompute from slices of the same block argument.
 // ============================================================================
-// CHECK-LABEL: @fused_concatenate
+// CHECK-LABEL: entry @fused_concatenate
 // CHECK-DAG:   %[[CPOS:.*]] = constant <f32: 5.900000e-01> : tile<1xf32>
 // CHECK-DAG:   %[[CNEG:.*]] = constant <f32: -5.900000e-01> : tile<1xf32>
 // CHECK-DAG:   %[[C20:.*]] = constant <i32: 20> : tile<i32>
@@ -311,7 +301,7 @@ nv_tensor_ir.graph @fused_concatenate(
 // space, and the pruned %in0 feeds no space (only two if-branches, %in0 is never
 // viewed).
 // ============================================================================
-// CHECK-LABEL: @pruned_concatenate
+// CHECK-LABEL: entry @pruned_concatenate
 // CHECK-SAME:  (%[[IN0:.+]]: tile<ptr<f32>>, %[[IN1:.+]]: tile<ptr<f32>>, %[[IN2:.+]]: tile<ptr<f32>>, %[[OUT:.+]]: tile<ptr<f32>>)
 // CHECK-DAG:   %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG:   %[[C2:.*]] = constant <i32: 2> : tile<i32>
@@ -360,7 +350,7 @@ nv_tensor_ir.graph @pruned_concatenate(
 // and the surviving self-referenced operand recomputes %v (load %arg0 + 0.5),
 // while the pruned copy contributes no branch.
 // ============================================================================
-// CHECK-LABEL: @self_ref_pruned_concatenate
+// CHECK-LABEL: entry @self_ref_pruned_concatenate
 // CHECK-SAME:  (%[[IN0:.+]]: tile<ptr<f32>>, %[[IN1:.+]]: tile<ptr<f32>>, %[[OUT:.+]]: tile<ptr<f32>>)
 // CHECK-DAG:   %[[HALF:.*]] = constant <f32: 5.000000e-01> : tile<8x1x1xf32>
 // CHECK-DAG:   %[[ZERO:.*]] = constant <i32: 0> : tile<i32>

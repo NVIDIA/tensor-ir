@@ -1,8 +1,7 @@
 // RUN: tensor_ir-opt %s --split-input-file \
-// RUN:   --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,layout-propagation-annotation,layout-propagation-normalization,tile-selection,graph-splitting),tir-bufferize,func.func(tir-form-grid,tir-tile-reductions{persistence=static sm-count=2 occupancy=1}))' \
+// RUN:   --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,tile-selection),tir-bufferize,func.func(tir-form-grid,tir-tile-reductions{persistence=static sm-count=2 occupancy=1}))' \
 // RUN:   | FileCheck %s
-// RUN: tensor_ir-opt %s --split-input-file \
-// RUN:   --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,layout-propagation-annotation,layout-propagation-normalization,tile-selection,graph-splitting),tir-bufferize,func.func(tir-form-grid,tir-tile-reductions{persistence=static sm-count=2 occupancy=1}),outline-tensor-ir-kernel,convert-tensor-to-cuda-tile{codegen-strategy=layout_propagation})' \
+// RUN: tensor_ir-opt %s --split-input-file --layout-propagation-pipeline="sm-count=2 occupancy=1 persistence=static" \
 // RUN:   | FileCheck %s --check-prefix=LOWERED
 
 // Static persistence caps the physical grid and visits logical tile IDs with
@@ -24,11 +23,11 @@
 //  CHECK-NEXT:   } {mapping = [#gpu.block<x>]}
 
 // LOWERED-LABEL: entry @persistent(
-//  LOWERED-SAME: %[[INPUT:[^:]+]]: tile<ptr<f32>>
-//  LOWERED-SAME: %[[OUTPUT:[^:]+]]: tile<ptr<f32>>
-//       LOWERED: %[[BLOCK:[^,]+]], %{{[^,]+}}, %{{[^,]+}} = get_tile_block_id
-//       LOWERED: %[[TOTAL:.*]] = constant <i32: 4>
-//       LOWERED: %[[GRID:.*]] = constant <i32: 2>
+//  LOWERED-SAME:  %[[INPUT:[^:]+]]: tile<ptr<f32>>
+//  LOWERED-SAME:  %[[OUTPUT:[^:]+]]: tile<ptr<f32>>
+//   LOWERED-DAG: %[[BLOCK:[^,]+]], %{{[^,]+}}, %{{[^,]+}} = get_tile_block_id
+//   LOWERED-DAG: %[[TOTAL:.*]] = constant <i32: 4>
+//   LOWERED-DAG: %[[GRID:.*]] = constant <i32: 2>
 //       LOWERED: for %[[TILE:.*]] in (%[[BLOCK]] to %[[TOTAL]], step %[[GRID]])
 //       LOWERED:   %[[ITVIEW:.*]] = make_tensor_view %[[INPUT]], shape = [64], strides = [1]
 //       LOWERED:   %[[IPVIEW:.*]] = make_partition_view %[[ITVIEW]] : partition_view<tile=(16)
@@ -93,10 +92,8 @@ nv_tensor_ir.graph @fits_grid(%input: tensor<32xf32>)
 //       CHECK:   %[[IPTR:.*]] = ptr.to_ptr %[[INPUT]]
 //       CHECK:   %{{[^,]+}}, %{{[^,]+}}, %[[OSIZES:[^:]+]]:2, %[[OSTRIDES:[^:]+]]:2 = memref.extract_strided_metadata %[[OUTPUT]]
 //       CHECK:   %[[OPTR:.*]] = ptr.to_ptr %[[OUTPUT]]
-//       CHECK:   %[[C3:.*]] = arith.constant 3 : index
-//       CHECK:   %[[ROWS_PLUS_3:.*]] = arith.addi %[[OSIZES]]#0, %[[C3]] : index
 //       CHECK:   %[[C4:.*]] = arith.constant 4 : index
-//       CHECK:   %[[ROW_TILES:.*]] = arith.divui %[[ROWS_PLUS_3]], %[[C4]] : index
+//       CHECK:   %[[ROW_TILES:.*]] = arith.ceildivui %[[OSIZES]]#0, %[[C4]] : index
 //       CHECK:   %[[C1:.*]] = arith.constant 1 : index
 //       CHECK:   %[[PARTIAL:.*]] = arith.muli %[[C1]], %[[ROW_TILES]] : index
 //       CHECK:   %[[COLUMN_TILES:.*]] = arith.constant 1 : index
@@ -107,12 +104,10 @@ nv_tensor_ir.graph @fits_grid(%input: tensor<32xf32>)
 //       CHECK:   %[[GRID:.*]] = arith.maxui %[[MIN]], %[[ONE]] : index
 //       CHECK:   scf.forall (%[[BLOCK:.*]]) in (%[[GRID]]) {
 //       CHECK:     scf.for %[[TILE:.*]] = %[[BLOCK]] to %[[TOTAL]] step %[[GRID]] {
-//       CHECK:       %[[ROW:.*]] = arith.remui %[[TILE]], %[[ROW_TILES]] : index
-//       CHECK:       %[[COLUMN:.*]] = arith.divui %[[TILE]], %[[ROW_TILES]] : index
-//       CHECK:       %[[LOADED:.*]] = nv_tensor_ir.load %[[IPTR]][%[[ROW]], %[[COLUMN]]] view offset: [0], sizes: [%[[ISIZES]]#0, 32], strides: [%[[ISTRIDES]]#0, 1], alignment: 4
+//       CHECK:       %[[LOADED:.*]] = nv_tensor_ir.load %[[IPTR]][%[[TILE]], 0] view offset: [0], sizes: [%[[ISIZES]]#0, 32], strides: [%[[ISTRIDES]]#0, 1], alignment: 4
 //  CHECK-SAME:         to tensor<4x32xf32>
 //       CHECK:       %[[COS:.*]] = nv_tensor_ir.cos %[[LOADED]] : tensor<4x32xf32>
-//       CHECK:       nv_tensor_ir.store %[[COS]], %[[OPTR]][%[[ROW]], %[[COLUMN]]] view offset: [0], sizes: [%[[OSIZES]]#0, 32], strides: [%[[OSTRIDES]]#0, 1], alignment: 4
+//       CHECK:       nv_tensor_ir.store %[[COS]], %[[OPTR]][%[[TILE]], 0] view offset: [0], sizes: [%[[OSIZES]]#0, 32], strides: [%[[OSTRIDES]]#0, 1], alignment: 4
 //  CHECK-NEXT:     }
 //  CHECK-NEXT:   } {mapping = [#gpu.block<x>]}
 
@@ -123,15 +118,12 @@ nv_tensor_ir.graph @fits_grid(%input: tensor<32xf32>)
 //    LOWERED-SAME: %[[OUTPUT:[^:]+]]: tile<ptr<f32>>
 //    LOWERED-SAME: %[[OROWS:[^:]+]]: tile<i32>
 //    LOWERED-SAME: %[[OSTRIDE:[^:]+]]: tile<i32>
-//         LOWERED: %[[BLOCK:[^,]+]], %{{[^,]+}}, %{{[^,]+}} = get_tile_block_id
-//         LOWERED: %[[GRID:[^,]+]], %{{[^,]+}}, %{{[^,]+}} = get_num_tile_blocks
-//         LOWERED: %[[C3:.*]] = constant <i32: 3>
-//         LOWERED: %[[ROWS_PLUS_3:.*]] = addi %[[OROWS]], %[[C3]]
-//         LOWERED: %[[C4:.*]] = constant <i32: 4>
-//         LOWERED: %[[TOTAL:.*]] = divi %[[ROWS_PLUS_3]], %[[C4]] unsigned
-//         LOWERED: for %[[TILE:.*]] in (%[[BLOCK]] to %[[TOTAL]], step %[[GRID]])
-//         LOWERED:   %[[ROW:.*]] = remi %[[TILE]], %[[TOTAL]] unsigned
-//         LOWERED:   %[[COLUMN:.*]] = divi %[[TILE]], %[[TOTAL]] unsigned
+//     LOWERED-DAG: %[[BLOCK:[^,]+]], %{{[^,]+}}, %{{[^,]+}} = get_tile_block_id
+//     LOWERED-DAG: %[[GRID:[^,]+]], %{{[^,]+}}, %{{[^,]+}} = get_num_tile_blocks
+//     LOWERED-DAG: %[[C4:.*]] = constant <i32: 4>
+//     LOWERED-DAG: %[[COLUMN:.*]] = constant <i32: 0>
+//         LOWERED: %[[TOTAL:.*]] = divi %[[OROWS]], %[[C4]] unsigned rounding<positive_inf>
+//         LOWERED: for %[[ROW:.*]] in (%[[BLOCK]] to %[[TOTAL]], step %[[GRID]])
 //         LOWERED:   %[[ITVIEW:.*]] = make_tensor_view %[[INPUT]], shape = [%[[IROWS]], 32], strides = [%[[ISTRIDE]], 1]
 //         LOWERED:   %[[IPVIEW:.*]] = make_partition_view %[[ITVIEW]] : partition_view<tile=(4x32)
 //         LOWERED:   %[[LOADED:.*]], %{{.*}} = load_view_tko weak %[[IPVIEW]][%[[ROW]], %[[COLUMN]]]

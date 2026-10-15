@@ -14,8 +14,10 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "cuda_tile/Bytecode/Common/Version.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Attributes.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Types.h"
+#include <optional>
 
 namespace mlir::nv_tensor_ir {
 namespace tensor_to_cuda_tile {
@@ -30,14 +32,16 @@ namespace tensor_to_cuda_tile {
 LogicalResult
 convertOutlinedKernels(ModuleOp module,
                        cuda_tile::OptimizationHintsAttr optimizationHints,
-                       bool enableExperimentalCudaTileOps);
+                       bool enableExperimentalCudaTileOps,
+                       cuda_tile::BytecodeVersion targetBytecodeVersion);
 
 /// Populate conversions for tile-shaped TensorIR compute. These patterns use
 /// only converted SSA operands and result types; they do not consult layout
 /// analysis.
-void registerOutlinedComputePatterns(RewritePatternSet &patterns,
-                                     const TypeConverter &typeConverter,
-                                     bool enableExperimentalCudaTileOps);
+void registerOutlinedComputePatterns(
+    RewritePatternSet &patterns, const TypeConverter &typeConverter,
+    bool enableExperimentalCudaTileOps,
+    cuda_tile::BytecodeVersion targetBytecodeVersion);
 
 /// Verify the state-free type and shape contract of a matmul in an outlined
 /// tiled kernel. Emits a diagnostic on `op` when the contract is invalid.
@@ -64,23 +68,25 @@ LogicalResult validateConstantOpLowerable(ConstantOp op);
 
 /// Emit the CUDA Tile implementation of a validated pointwise operation.
 /// `operands` must contain the strategy-adapted values in source operand order.
-LogicalResult lowerPointwiseOp(PointwiseOpInterface op,
-                               ArrayRef<Value> operands,
-                               cuda_tile::TileType resultType,
-                               ConversionPatternRewriter &rewriter,
-                               bool enableExperimentalCudaTileOps);
+LogicalResult
+lowerPointwiseOp(PointwiseOpInterface op, ArrayRef<Value> operands,
+                 cuda_tile::TileType resultType,
+                 ConversionPatternRewriter &rewriter,
+                 bool enableExperimentalCudaTileOps,
+                 cuda_tile::BytecodeVersion targetBytecodeVersion);
 
 /// Shared state-free builders used by both conversion paths.
 Value buildExp(OpBuilder &rewriter, Location loc, Value tile,
-               Type resultElementType);
+               Type resultElementType,
+               std::optional<ExpRoundingMode> roundingMode = std::nullopt);
 Value buildSigmoid(OpBuilder &rewriter, Value tile);
 Value buildErfApprox(OpBuilder &rewriter, Location loc, Value tile);
 
 /// Conversion pattern registration.
-void registerPointwisePatterns(RewritePatternSet &patterns,
-                               ConversionState &state,
-                               const TypeConverter &typeConverter,
-                               bool enableExperimentalCudaTileOps);
+void registerPointwisePatterns(
+    RewritePatternSet &patterns, ConversionState &state,
+    const TypeConverter &typeConverter, bool enableExperimentalCudaTileOps,
+    cuda_tile::BytecodeVersion targetBytecodeVersion);
 
 /// ----- Implemented in `EmitHelpers.cpp` -------------------------------------
 

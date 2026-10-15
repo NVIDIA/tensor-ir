@@ -18,8 +18,8 @@ module @pointwise_module {
 
 // CHECK-LABEL: cuda_tile.module @cuda_tile_pointwise_module {
 // CHECK: entry @pointwise()
-// CHECK: %[[LHS:.*]] = constant <f32: 2.000000e+00> : tile<2x4xf32>
-// CHECK: %[[RHS:.*]] = constant <f32: 4.000000e+00> : tile<2x4xf32>
+// CHECK-DAG: %[[LHS:.*]] = constant <f32: 2.000000e+00> : tile<2x4xf32>
+// CHECK-DAG: %[[RHS:.*]] = constant <f32: 4.000000e+00> : tile<2x4xf32>
 // CHECK: %[[SUM:.*]] = addf %[[LHS]], %[[RHS]]
 // CHECK: %[[EXP:.*]] = exp %[[SUM]]
 // CHECK: %[[ROOT:.*]] = sqrt %[[EXP]]
@@ -135,9 +135,9 @@ module @matmul_module {
 
 // CHECK-LABEL: cuda_tile.module @cuda_tile_matmul_module {
 // CHECK: entry @matmul()
-// CHECK: %[[LHS:.*]] = constant <f16: 1.000000e+00> : tile<16x32xf16>
-// CHECK: %[[RHS:.*]] = constant <f16: 2.000000e+00> : tile<32x8xf16>
-// CHECK: %[[ZERO:.*]] = constant <f32: 0.000000e+00> : tile<16x8xf32>
+// CHECK-DAG: %[[LHS:.*]] = constant <f16: 1.000000e+00> : tile<16x32xf16>
+// CHECK-DAG: %[[RHS:.*]] = constant <f16: 2.000000e+00> : tile<32x8xf16>
+// CHECK-DAG: %[[ZERO:.*]] = constant <f32: 0.000000e+00> : tile<16x8xf32>
 // CHECK: mmaf %[[LHS]], %[[RHS]], %[[ZERO]]
 // CHECK: %[[ACC:.*]] = constant <f32: 3.000000e+00> : tile<16x8xf32>
 // CHECK: mmaf %[[LHS]], %[[RHS]], %[[ACC]]
@@ -158,9 +158,9 @@ module @integer_matmul_module {
 
 // CHECK-LABEL: cuda_tile.module @cuda_tile_integer_matmul_module {
 // CHECK: entry @integer_matmul()
-// CHECK: %[[ILHS:.*]] = constant <i8: 1> : tile<16x32xi8>
-// CHECK: %[[IRHS:.*]] = constant <i8: 2> : tile<32x8xi8>
-// CHECK: %[[IZERO:.*]] = constant <i32: 0> : tile<16x8xi32>
+// CHECK-DAG: %[[ILHS:.*]] = constant <i8: 1> : tile<16x32xi8>
+// CHECK-DAG: %[[IRHS:.*]] = constant <i8: 2> : tile<32x8xi8>
+// CHECK-DAG: %[[IZERO:.*]] = constant <i32: 0> : tile<16x8xi32>
 // CHECK: mmai %[[ILHS]], %[[IRHS]], %[[IZERO]] signed signed
 
 // -----
