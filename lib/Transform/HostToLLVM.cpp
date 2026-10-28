@@ -37,14 +37,16 @@ using namespace mlir;
 using namespace mlir::nv_tensor_ir;
 
 /// Count the device kernel parameters of `launch`: the buffer pointer plus
-/// every dynamic size and stride of each memref operand, and one per scalar.
+/// dynamic sizes and explicit strides of each memref, and one per scalar.
 static FailureOr<unsigned> countDeviceParameters(gpu::LaunchFuncOp launch) {
   unsigned count = 0;
   for (Type type : launch.getKernelOperands().getTypes()) {
     if (auto memref = dyn_cast<MemRefType>(type)) {
       auto [strides, offset] = memref.getStridesAndOffset();
-      count += 1 + memref.getNumDynamicDims() +
-               llvm::count_if(strides, ShapedType::isDynamic);
+      count += 1 + memref.getNumDynamicDims();
+      if (!memref.getLayout().isIdentity()) {
+        count += llvm::count_if(strides, ShapedType::isDynamic);
+      }
     } else if (type.isIndex() ||
                (type.isIntOrFloat() && type.getIntOrFloatBitWidth() <= 64)) {
       ++count;
@@ -171,6 +173,9 @@ private:
       Value narrow = LLVM::TruncOp::create(b, loc, b.getI32Type(), size);
       appendValue(narrow);
     }
+    if (type.getLayout().isIdentity()) {
+      return;
+    }
     for (auto [idx, staticStride] : llvm::enumerate(strides)) {
       if (!ShapedType::isDynamic(staticStride)) {
         continue;
@@ -186,6 +191,15 @@ private:
     Location loc = operand.getLoc();
     if (operand.getType().isIndex()) {
       operand = arith::IndexCastOp::create(b, loc, b.getI64Type(), operand);
+    } else if (Type converted = converter.convertType(operand.getType());
+               converted && converted != operand.getType()) {
+      // TensorIR scalar kernel arguments may carry signed/unsigned
+      // IntegerType (e.g. si32); LLVM dialect ops only accept the signless
+      // equivalent, and there is no dedicated arith op for this
+      // conversion, so an explicit same-width reinterpret cast is
+      // required.
+      operand = UnrealizedConversionCastOp::create(b, loc, converted, operand)
+                    ->getResult(0);
     }
     appendValue(operand);
   }

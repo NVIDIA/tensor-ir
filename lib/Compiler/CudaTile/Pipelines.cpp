@@ -26,8 +26,11 @@ Status buildGraphAnalysisPipeline(mlir::OpPassManager &pm,
     return Status::InvalidArgument("Invalid target SM '" +
                                    opts.deviceTarget.kernelTarget + "'");
   }
+
   pm.addNestedPass<nv_tensor_ir::GraphOp>(
       nv_tensor_ir::createMaterializeDefaultStridesPass());
+
+  pm.addPass(nv_tensor_ir::createRewriteUnsupportedOpsPass());
   if (opts.cudaTile.codegenStrategy ==
       CudaTileCodegenStrategy::LayoutPropagation) {
     if (opts.codegen.tileSize.empty() && opts.cudaTile.maxTileCandidates > 0) {
@@ -70,12 +73,15 @@ void buildTensorIRTiledProgramFormationPipeline(
 
   TileReductionsPassOptions stripMiningOptions;
   stripMiningOptions.reduction_tile_size = opts.cudaTile.reductionTileSize;
-  stripMiningOptions.persistence =
-      stringifyPersistenceMode(opts.cudaTile.persistenceMode).str();
-  stripMiningOptions.sm_count = opts.cudaTile.smCount;
-  stripMiningOptions.occupancy = opts.cudaTile.occupancy;
   pm.addNestedPass<func::FuncOp>(
       nv_tensor_ir::createTileReductionsPass(stripMiningOptions));
+  if (opts.cudaTile.persistenceMode == PersistenceMode::Static) {
+    StaticPersistencePassOptions persistenceOptions;
+    persistenceOptions.sm_count = opts.cudaTile.smCount;
+    persistenceOptions.occupancy = opts.cudaTile.occupancy;
+    pm.addNestedPass<func::FuncOp>(
+        nv_tensor_ir::createStaticPersistencePass(persistenceOptions));
+  }
   pm.addPass(nv_tensor_ir::createOutlineKernelPass());
 
   buildHostToLLVMPipeline(pm, opts);

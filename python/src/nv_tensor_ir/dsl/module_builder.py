@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+
+from nv_tensor_ir._mlir import ir
+from nv_tensor_ir._mlir.dialects import nv_tensor_ir
 
 from .dtypes import (
     DataType,
@@ -12,9 +15,36 @@ from .dtypes import (
     UNSIGNED_INTEGER_DTYPES,
     normalize_dtype,
 )
-from .tracing import BinaryOp, MovementOp, NodeKind, TensorInfo, TraceGraph, UnaryOp
+from .tracing import (
+    BinaryOp,
+    MovementOp,
+    NodeKind,
+    ScalarInfo,
+    TensorInfo,
+    TraceGraph,
+    TraceOpEnum,
+    UnaryOp,
+)
 
+OperationBuilder = Callable[..., object]
 TensorInfoOverrides = Mapping[int, TensorInfo]
+
+def _elementwise_op(op: BinaryOp | UnaryOp):
+    # Tracing enum names follow the generated OpView class names.
+    return getattr(nv_tensor_ir, op.name.title().replace("_", "") + "Op")
+
+
+_UNARY_WITH_BETA_OPS: dict[TraceOpEnum, OperationBuilder] = {
+    op: _elementwise_op(op)
+    for op in (UnaryOp.ELU_FWD, UnaryOp.SOFTPLUS_FWD, UnaryOp.SWISH_FWD)
+}
+_UNARY_OPS: dict[TraceOpEnum, OperationBuilder] = {
+    op: _elementwise_op(op) for op in UnaryOp if op not in _UNARY_WITH_BETA_OPS
+}
+_BINARY_OPS: dict[TraceOpEnum, OperationBuilder] = {
+    op: _elementwise_op(op) for op in BinaryOp
+}
+_BINARY_WITH_BETA_OPS: dict[TraceOpEnum, OperationBuilder] = {}
 
 
 def build_mlir_module(
@@ -23,9 +53,6 @@ def build_mlir_module(
     tensor_info_overrides: TensorInfoOverrides | None = None,
 ):
     """Build MLIR, optionally overriding tensor metadata by trace node ID."""
-    from nv_tensor_ir._mlir import ir
-    from nv_tensor_ir._mlir.dialects import nv_tensor_ir
-
     tensor_info_overrides = tensor_info_overrides or {}
     context = ir.Context()
     # CompiledKernel keeps the MLIR context alive with the generated module.
@@ -40,12 +67,12 @@ def build_mlir_module(
         input_types = []
         input_attrs = []
         for node_id in graph.input_ids:
-            info = _tensor_info(graph, node_id, tensor_info_overrides)
-            input_types.append(_tensor_type(info, ir))
-            input_attrs.append(_tensor_attr(info, ir))
+            info = _value_info(graph, node_id, tensor_info_overrides)
+            input_types.append(_arg_type(info))
+            input_attrs.append(_arg_attr(info))
 
-        result_types = [_tensor_type(info, ir) for info in output_infos]
-        result_attrs = [_tensor_attr(info, ir) for info in output_infos]
+        result_types = [_tensor_type(info) for info in output_infos]
+        result_attrs = [_tensor_attr(info) for info in output_infos]
 
         graph_type = ir.FunctionType.get(input_types, result_types)
         with ir.InsertionPoint(module.body):
@@ -72,16 +99,10 @@ def build_mlir_module(
                     if node_id not in values:
                         raise RuntimeError("missing multi-result value")
                     continue
-                result_info = _tensor_info(graph, node_id, tensor_info_overrides)
-                result_type = _node_result_type(node, result_info, ir)
+                result_info = _value_info(graph, node_id, tensor_info_overrides)
+                result_type = _node_result_type(node, result_info)
                 result = _build_node(
-                    node,
-                    result_info,
-                    result_type,
-                    values,
-                    ir,
-                    nv_tensor_ir,
-                    tensor_info_overrides,
+                    node, result_info, result_type, values, tensor_info_overrides
                 )
                 values[node_id] = result
 
@@ -92,7 +113,7 @@ def build_mlir_module(
         return module, context
 
 
-def _build_scan_slice(node, values: dict[int, object], ir, nv_tensor_ir, overrides):
+def _build_scan_slice(node, values: dict[int, object], overrides):
     """Build one isolated scan_slice region and bind all of its SSA results."""
     result_infos = [
         overrides.get(node_id, info)
@@ -102,7 +123,7 @@ def _build_scan_slice(node, values: dict[int, object], ir, nv_tensor_ir, overrid
             strict=True,
         )
     ]
-    result_types = [_tensor_type(info, ir) for info in result_infos]
+    result_types = [_tensor_type(info) for info in result_infos]
     operation = ir.Operation.create(
         "nv_tensor_ir.scan_slice",
         results=result_types,
@@ -118,7 +139,7 @@ def _build_scan_slice(node, values: dict[int, object], ir, nv_tensor_ir, overrid
     )
     region_graph = node.kwargs["region"]
     argument_types = [
-        _tensor_type(region_graph.nodes[node_id].tensor_info, ir)
+        _tensor_type(region_graph.nodes[node_id].value_info)
         for node_id in region_graph.input_ids
     ]
     block = operation.regions[0].blocks.append(*argument_types)
@@ -132,15 +153,13 @@ def _build_scan_slice(node, values: dict[int, object], ir, nv_tensor_ir, overrid
                     "Multi-result operations (RESULT nodes) inside a scan_slice body "
                     "are not supported"
                 )
-            region_info = region_node.tensor_info
-            region_type = _node_result_type(region_node, region_info, ir)
+            region_info = region_node.value_info
+            region_type = _node_result_type(region_node, region_info)
             region_values[region_node_id] = _build_node(
                 region_node,
                 region_info,
                 region_type,
                 region_values,
-                ir,
-                nv_tensor_ir,
             )
         nv_tensor_ir.YieldOp(
             [region_values[result_id] for result_id in region_graph.result_ids]
@@ -153,37 +172,36 @@ def _build_scan_slice(node, values: dict[int, object], ir, nv_tensor_ir, overrid
 
 def _build_node(
     node,
-    result_info: TensorInfo,
+    result_info: TensorInfo | ScalarInfo,
     result_type,
     values: dict[int, object],
-    ir,
-    nv_tensor_ir,
     tensor_info_overrides: TensorInfoOverrides | None = None,
 ):
     if node.kind == NodeKind.CONSTANT:
-        value = _scalar_attr(node.kwargs["value"], result_info.dtype, ir)
+        value = _scalar_attr(node.kwargs["value"], result_info.dtype)
         if node.kwargs.get("is_tensor", False):
             value = ir.DenseElementsAttr.get_splat(result_type, value)
         op = nv_tensor_ir.ConstantOp(
             value,
             results=[result_type],
         )
-        return op.operation.results[0]
-    if node.kind == NodeKind.SPLAT:
+    elif node.kind == NodeKind.SPLAT:
         (scalar,) = node.args
         op = nv_tensor_ir.SplatOp(result_type, values[scalar], [])
-        return op.operation.results[0]
-    if node.kind == NodeKind.BINARY:
+    elif node.kind == NodeKind.BINARY:
         lhs, rhs = node.args
-        op = _binary_op(node.op, nv_tensor_ir)(
-            values[lhs], values[rhs], results=[result_type]
-        )
-        return op.operation.results[0]
-    if node.kind == NodeKind.UNARY:
+        if node.op in _BINARY_WITH_BETA_OPS:
+            beta = ir.FloatAttr.get_f64(float(node.kwargs["beta"]))
+            op = _BINARY_WITH_BETA_OPS[node.op](
+                values[lhs], values[rhs], beta, results=[result_type]
+            )
+        else:
+            op = _BINARY_OPS[node.op](values[lhs], values[rhs], results=[result_type])
+    elif node.kind == NodeKind.UNARY:
         (operand,) = node.args
         if node.op in _UNARY_WITH_BETA_OPS:
             beta = ir.FloatAttr.get_f64(float(node.kwargs["beta"]))
-            op = _unary_with_beta_op(node.op, nv_tensor_ir)(
+            op = _UNARY_WITH_BETA_OPS[node.op](
                 values[operand],
                 beta,
                 results=[result_type],
@@ -197,15 +215,11 @@ def _build_node(
                 values[operand], rounding_mode=mode, results=[result_type]
             )
         else:
-            op = _unary_op(node.op, nv_tensor_ir)(
-                values[operand], results=[result_type]
-            )
-        return op.operation.results[0]
-    if node.kind == NodeKind.CONVERT:
+            op = _UNARY_OPS[node.op](values[operand], results=[result_type])
+    elif node.kind == NodeKind.CONVERT:
         (operand,) = node.args
         op = nv_tensor_ir.ConvertOp(result_type, values[operand])
-        return op.operation.results[0]
-    if node.kind == NodeKind.MOVEMENT:
+    elif node.kind == NodeKind.MOVEMENT:
         (operand,) = node.args
         if node.op == MovementOp.RESHAPE:
             op = nv_tensor_ir.ReshapeOp(result_type, values[operand], [])
@@ -225,22 +239,17 @@ def _build_node(
             )
         else:
             raise NotImplementedError(f"Cannot build TensorIR op {node.op_name}")
-        return op.operation.results[0]
-    if node.kind == NodeKind.CONCATENATE:
+    elif node.kind == NodeKind.CONCATENATE:
         op = nv_tensor_ir.ConcatenateOp(
             result_type,
             [values[arg] for arg in node.args],
             int(node.kwargs["dimension"]),
         )
-        return op.operation.results[0]
-    if node.kind == NodeKind.SCAN_SLICE:
-        return _build_scan_slice(
-            node, values, ir, nv_tensor_ir, tensor_info_overrides or {}
-        )
-    if node.kind == NodeKind.IOTA:
+    elif node.kind == NodeKind.SCAN_SLICE:
+        return _build_scan_slice(node, values, tensor_info_overrides or {})
+    elif node.kind == NodeKind.IOTA:
         op = nv_tensor_ir.IotaOp(result_type, int(node.kwargs["dimension"]), [])
-        return op.operation.results[0]
-    if node.kind == NodeKind.REDUCE:
+    elif node.kind == NodeKind.REDUCE:
         (operand,) = node.args
         op = nv_tensor_ir.ReduceOp(
             result_type,
@@ -248,69 +257,68 @@ def _build_node(
             list(node.kwargs["dimensions"]),
             node.kwargs["mode"],
         )
-        return op.operation.results[0]
-    if node.kind == NodeKind.CMP:
+    elif node.kind == NodeKind.CMP:
         lhs, rhs = node.args
         op = nv_tensor_ir.CmpOp(
-            _comparator(node.kwargs["comparator"], nv_tensor_ir),
+            _comparator(node.kwargs["comparator"]),
             values[lhs],
             values[rhs],
             results=[result_type],
         )
-        return op.operation.results[0]
-    if node.kind == NodeKind.SELECT:
+    elif node.kind == NodeKind.SELECT:
         selector, lhs, rhs = node.args
         op = nv_tensor_ir.BinarySelectOp(
             values[selector], values[lhs], values[rhs], results=[result_type]
         )
-        return op.operation.results[0]
-    if node.kind == NodeKind.MATMUL:
+    elif node.kind == NodeKind.MATMUL:
         lhs, rhs = node.args
         op = nv_tensor_ir.MatmulOp(result_type, values[lhs], values[rhs])
-        return op.operation.results[0]
-    raise NotImplementedError(f"Cannot build TensorIR op for node kind {node.kind}")
+    else:
+        raise NotImplementedError(f"Cannot build TensorIR op for node kind {node.kind}")
+    return op.operation.results[0]
 
 
-def _node_result_type(node, result_info: TensorInfo, ir):
-    if node.kind == NodeKind.CONSTANT and not node.kwargs.get("is_tensor", False):
-        return _scalar_type(result_info.dtype, ir)
-    return _tensor_type(result_info, ir)
+def _node_result_type(node, result_info: TensorInfo | ScalarInfo):
+    if isinstance(result_info, ScalarInfo) or (
+        node.kind == NodeKind.CONSTANT and not node.kwargs.get("is_tensor", False)
+    ):
+        return _scalar_type(result_info.dtype)
+    return _tensor_type(result_info)
 
 
-def _tensor_type(info: TensorInfo, ir):
+def _arg_type(info: TensorInfo | ScalarInfo):
+    """MLIR type for a graph argument: a bare scalar type for by-value
+    scalars, or a ranked tensor type otherwise."""
+    if isinstance(info, ScalarInfo):
+        return _scalar_type(info.dtype)
+    return _tensor_type(info)
+
+
+def _arg_attr(info: TensorInfo | ScalarInfo):
+    """Argument dict attr: empty for scalars (no stride to encode)."""
+    if isinstance(info, ScalarInfo):
+        return ir.DictAttr.get({})
+    return _tensor_attr(info)
+
+
+def _tensor_type(info: TensorInfo):
     dynamic_size = ir.ShapedType.get_dynamic_size()
     shape = [
-        dynamic_size if dimension is None else dimension
-        for dimension in _ir_shape(info)
+        dynamic_size if dimension is None else dimension for dimension in info.shape
     ]
     return ir.RankedTensorType.get(
         shape,
-        _scalar_type(info.dtype, ir),
+        _scalar_type(info.dtype),
     )
 
 
-def _scalar_type(dtype: object, ir):
-    normalized = normalize_dtype(dtype)
-    if normalized == DataType.F32:
-        return ir.F32Type.get()
-    if normalized == DataType.F64:
-        return ir.F64Type.get()
-    if normalized == DataType.F16:
-        return ir.F16Type.get()
-    if normalized == DataType.BF16:
-        return ir.BF16Type.get()
-    if normalized == DataType.BOOL:
-        return ir.IntegerType.get_signless(1)
-    if normalized in SIGNED_INTEGER_DTYPES:
-        return ir.IntegerType.get_signed(int(normalized.value.removeprefix("si")))
-    if normalized in UNSIGNED_INTEGER_DTYPES:
-        return ir.IntegerType.get_unsigned(int(normalized.value.removeprefix("ui")))
-    raise TypeError(f"Unsupported TensorIR scalar dtype: {normalized}")
+def _scalar_type(dtype: object):
+    return ir.Type.parse(normalize_dtype(dtype).value)
 
 
-def _scalar_attr(value: object, dtype: object, ir):
+def _scalar_attr(value: object, dtype: object):
     normalized = normalize_dtype(dtype)
-    ty = _scalar_type(normalized, ir)
+    ty = _scalar_type(normalized)
     if normalized in FLOAT_DTYPES:
         return ir.FloatAttr.get(ty, float(value))
     if normalized == DataType.BOOL:
@@ -323,16 +331,16 @@ def _scalar_attr(value: object, dtype: object, ir):
     raise TypeError(f"Unsupported TensorIR scalar dtype: {normalized}")
 
 
-def _comparator(comparator: object, nv_tensor_ir):
+def _comparator(comparator: object):
     if not isinstance(comparator, str):
         return comparator
     return getattr(nv_tensor_ir.Comparator, comparator)
 
 
-def _tensor_attr(info: TensorInfo, ir):
+def _tensor_attr(info: TensorInfo):
     attrs = {
         "nv_tensor_ir.stride": ir.StringAttr.get(
-            _stride_string(_ir_stride(info), info.stride_divisibility)
+            _stride_string(info.stride, info.stride_divisibility)
         )
     }
     if info.alignment is not None:
@@ -342,12 +350,12 @@ def _tensor_attr(info: TensorInfo, ir):
     return ir.DictAttr.get(attrs)
 
 
-def _tensor_info(
+def _value_info(
     graph: TraceGraph,
     node_id: int,
     overrides: TensorInfoOverrides,
-) -> TensorInfo:
-    return overrides.get(node_id, graph.nodes[node_id].tensor_info)
+) -> TensorInfo | ScalarInfo:
+    return overrides.get(node_id, graph.nodes[node_id].value_info)
 
 
 def _output_infos(
@@ -356,20 +364,8 @@ def _output_infos(
 ) -> list[TensorInfo]:
     infos: list[TensorInfo] = []
     for node_id in graph.output_ref_ids:
-        infos.append(_tensor_info(graph, node_id, overrides))
+        infos.append(_value_info(graph, node_id, overrides))
     return infos
-
-
-def _ir_shape(info: TensorInfo) -> tuple[int | None, ...]:
-    if not info.dynamic_shape:
-        return info.shape
-    return tuple(None for _ in info.shape)
-
-
-def _ir_stride(info: TensorInfo) -> tuple[int | None, ...]:
-    if not info.dynamic_shape:
-        return info.stride
-    return tuple(1 if stride == 1 else None for stride in info.stride)
 
 
 def _stride_string(
@@ -386,56 +382,28 @@ def _stride_string(
     return f"({','.join(elements)})"
 
 
-def _binary_op(op: BinaryOp, nv_tensor_ir):
-    return {
-        BinaryOp.ADD: nv_tensor_ir.AddOp,
-        BinaryOp.ATAN2: nv_tensor_ir.Atan2Op,
-        BinaryOp.SUB: nv_tensor_ir.SubOp,
-        BinaryOp.MUL: nv_tensor_ir.MulOp,
-        BinaryOp.DIV: nv_tensor_ir.DivOp,
-        BinaryOp.MOD: nv_tensor_ir.ModOp,
-        BinaryOp.REM: nv_tensor_ir.RemOp,
-        BinaryOp.POW: nv_tensor_ir.PowOp,
-        BinaryOp.MAX: nv_tensor_ir.MaxOp,
-        BinaryOp.MIN: nv_tensor_ir.MinOp,
-        BinaryOp.ADD_SQUARE: nv_tensor_ir.AddSquareOp,
-        BinaryOp.LOGICAL_AND: nv_tensor_ir.LogicalAndOp,
-        BinaryOp.LOGICAL_OR: nv_tensor_ir.LogicalOrOp,
-    }[op]
+def _register_unary_op(op: TraceOpEnum, builder: OperationBuilder) -> None:
+    """Register a unary operation builder."""
+    _register_op(_UNARY_OPS, op, builder)
 
 
-def _unary_op(op: UnaryOp, nv_tensor_ir):
-    return {
-        UnaryOp.ABS: nv_tensor_ir.AbsOp,
-        UnaryOp.CEIL: nv_tensor_ir.CeilOp,
-        UnaryOp.COS: nv_tensor_ir.CosOp,
-        UnaryOp.EXP: nv_tensor_ir.ExpOp,
-        UnaryOp.FLOOR: nv_tensor_ir.FloorOp,
-        UnaryOp.LOG: nv_tensor_ir.LogOp,
-        UnaryOp.LOGICAL_NOT: nv_tensor_ir.LogicalNotOp,
-        UnaryOp.NEG: nv_tensor_ir.NegOp,
-        UnaryOp.RECIPROCAL: nv_tensor_ir.ReciprocalOp,
-        UnaryOp.SQRT: nv_tensor_ir.SqrtOp,
-        UnaryOp.RSQRT: nv_tensor_ir.RsqrtOp,
-        UnaryOp.SIN: nv_tensor_ir.SinOp,
-        UnaryOp.TAN: nv_tensor_ir.TanOp,
-        UnaryOp.RELU_FWD: nv_tensor_ir.ReluFwdOp,
-        UnaryOp.SIGMOID_FWD: nv_tensor_ir.SigmoidFwdOp,
-        UnaryOp.TANH_FWD: nv_tensor_ir.TanhFwdOp,
-        UnaryOp.GELU_APPROX_TANH_FWD: nv_tensor_ir.GeluApproxTanhFwdOp,
-    }[op]
+def _register_binary_op(op: TraceOpEnum, builder: OperationBuilder) -> None:
+    """Register a binary operation builder."""
+    _register_op(_BINARY_OPS, op, builder)
 
 
-_UNARY_WITH_BETA_OPS = {
-    UnaryOp.ELU_FWD,
-    UnaryOp.SOFTPLUS_FWD,
-    UnaryOp.SWISH_FWD,
-}
+def _register_binary_with_beta_op(op: TraceOpEnum, builder: OperationBuilder) -> None:
+    """Register a binary operation builder with a beta attribute."""
+    _register_op(_BINARY_WITH_BETA_OPS, op, builder)
 
 
-def _unary_with_beta_op(op: UnaryOp, nv_tensor_ir):
-    return {
-        UnaryOp.ELU_FWD: nv_tensor_ir.EluFwdOp,
-        UnaryOp.SOFTPLUS_FWD: nv_tensor_ir.SoftplusFwdOp,
-        UnaryOp.SWISH_FWD: nv_tensor_ir.SwishFwdOp,
-    }[op]
+def _register_op(
+    registry: dict[TraceOpEnum, OperationBuilder],
+    op: TraceOpEnum,
+    builder: OperationBuilder,
+) -> None:
+    if not isinstance(op, TraceOpEnum):
+        raise TypeError("Registered TensorIR operations must be TraceOpEnum values")
+    if op in registry:
+        raise ValueError(f"TensorIR operation {op} is already registered")
+    registry[op] = builder

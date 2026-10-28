@@ -12,13 +12,6 @@
 
 include "mlir/IR/OpBase.td"
 
-def PointwiseOpInterface : OpInterface<"PointwiseOpInterface"> {
-  let cppNamespace = "::mlir::nv_tensor_ir";
-  let description = [{
-    This interface is used to represent pointwise operations.
-  }];
-}
-
 def DynamicDimsOpInterface : OpInterface<"DynamicDimsOpInterface"> {
   let cppNamespace = "::mlir::nv_tensor_ir";
   let description = [{

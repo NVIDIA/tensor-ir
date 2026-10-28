@@ -247,16 +247,30 @@ static void printReductionBody(OpAsmPrinter &printer, Operation *,
 // enum attribute definitions
 #include "tensor_ir/Dialect/TensorEnums.cpp.inc"
 
-namespace {
-
 template <typename OpTy>
-LogicalResult verifyViewOperands(OpTy op) {
-  if (llvm::any_of(op.getStaticStrides(), [](int64_t stride) {
-        return !ShapedType::isDynamic(stride) && stride < 0;
-      })) {
-    return op->emitOpError() << "expected nonnegative or dynamic strides";
+static LogicalResult verifyViewOperands(OpTy op) {
+  auto view = cast<MemRefType>(op.getView().getType());
+  auto tile = cast<RankedTensorType>(op.getTile().getType());
+  if (view.getRank() != tile.getRank()) {
+    return op.emitOpError("expected view and tile to have the same rank");
   }
-  size_t rank = op.getStaticSizes().size();
+  if (view.getElementType() != tile.getElementType()) {
+    return op.emitOpError(
+        "expected view and tile to have the same element type");
+  }
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (failed(view.getStridesAndOffset(strides, offset))) {
+    return op.emitOpError("expected a strided memref view");
+  }
+  if ((!ShapedType::isDynamic(offset) && offset < 0) ||
+      llvm::any_of(strides, [](int64_t stride) {
+        return !ShapedType::isDynamic(stride) && stride <= 0;
+      })) {
+    return op.emitOpError("expected nonnegative or dynamic offset and positive "
+                          "or dynamic strides");
+  }
+  size_t rank = view.getRank();
   if (op.getStaticIndices().size() != rank) {
     return op->emitOpError()
            << "expected " << rank << " tile coordinate(s), but got "
@@ -264,23 +278,6 @@ LogicalResult verifyViewOperands(OpTy op) {
   }
   if (failed(verifyListOfOperandsOrIntegers(
           op, "indices", rank, op.getStaticIndices(), op.getIndices()))) {
-    return failure();
-  }
-  auto verifyDynamicValues = [&](ValueRange values,
-                                 StringRef field) -> LogicalResult {
-    for (auto [position, value] : llvm::enumerate(values)) {
-      std::optional<int64_t> constant = getConstantIntValue(value);
-      if (constant && *constant < 0) {
-        return op->emitOpError()
-               << "expected dynamic " << field << " #" << position << " to be "
-               << "nonnegative, but got " << *constant;
-      }
-    }
-    return success();
-  };
-  if (failed(verifyDynamicValues(op.getSizes(), "size")) ||
-      failed(verifyDynamicValues(op.getStrides(), "stride")) ||
-      failed(verifyDynamicValues(op.getOffsets(), "offset"))) {
     return failure();
   }
   for (auto [position, index] : llvm::enumerate(op.getMixedIndices())) {
@@ -293,26 +290,16 @@ LogicalResult verifyViewOperands(OpTy op) {
   return success();
 }
 
-} // namespace
-
 SmallVector<OpFoldResult> LoadOp::getMixedIndices() {
   return getMixedValues(getStaticIndices(), getIndices(), getContext());
 }
 
 void LoadOp::build(OpBuilder &builder, OperationState &state, Type tile,
-                   Value base, OpFoldResult offset,
-                   ArrayRef<OpFoldResult> sizes, ArrayRef<OpFoldResult> strides,
-                   ArrayRef<OpFoldResult> indices, IntegerAttr alignment,
-                   TilePaddingAttr padding, bool allowTma) {
-  auto [staticOffsets, dynamicOffsets] = decomposeMixedValues({offset});
-  auto [staticSizes, dynamicSizes] = decomposeMixedValues(sizes);
-  auto [staticStrides, dynamicStrides] = decomposeMixedValues(strides);
+                   Value view, ArrayRef<OpFoldResult> indices,
+                   IntegerAttr alignment, TilePaddingAttr padding,
+                   bool allowTma) {
   auto [staticIndices, dynamicIndices] = decomposeMixedValues(indices);
-  build(builder, state, tile, base, dynamicOffsets, dynamicSizes,
-        dynamicStrides, dynamicIndices,
-        builder.getDenseI64ArrayAttr(staticOffsets),
-        builder.getDenseI64ArrayAttr(staticSizes),
-        builder.getDenseI64ArrayAttr(staticStrides),
+  build(builder, state, tile, view, dynamicIndices,
         builder.getDenseI64ArrayAttr(staticIndices), alignment, padding,
         builder.getBoolAttr(allowTma));
 }
@@ -322,20 +309,10 @@ SmallVector<OpFoldResult> StoreOp::getMixedIndices() {
 }
 
 void StoreOp::build(OpBuilder &builder, OperationState &state, Value tile,
-                    Value base, OpFoldResult offset,
-                    ArrayRef<OpFoldResult> sizes,
-                    ArrayRef<OpFoldResult> strides,
-                    ArrayRef<OpFoldResult> indices, IntegerAttr alignment,
-                    bool allowTma) {
-  auto [staticOffsets, dynamicOffsets] = decomposeMixedValues({offset});
-  auto [staticSizes, dynamicSizes] = decomposeMixedValues(sizes);
-  auto [staticStrides, dynamicStrides] = decomposeMixedValues(strides);
+                    Value view, ArrayRef<OpFoldResult> indices,
+                    IntegerAttr alignment, bool allowTma) {
   auto [staticIndices, dynamicIndices] = decomposeMixedValues(indices);
-  build(builder, state, tile, base, dynamicOffsets, dynamicSizes,
-        dynamicStrides, dynamicIndices,
-        builder.getDenseI64ArrayAttr(staticOffsets),
-        builder.getDenseI64ArrayAttr(staticSizes),
-        builder.getDenseI64ArrayAttr(staticStrides),
+  build(builder, state, tile, view, dynamicIndices,
         builder.getDenseI64ArrayAttr(staticIndices), alignment,
         builder.getBoolAttr(allowTma));
 }
@@ -1718,6 +1695,40 @@ MatmulOp::inferResultLayout(ArrayRef<LayoutSourceAttrInterface> inputLayouts) {
   // Build matmul source attribute.
   return MatmulSourceAttr::get(getContext(), view.toString(), sizeB, sizeM,
                                sizeN, sizeK, inputLayouts[0], inputLayouts[1]);
+}
+
+/// Returns the element types that a staged matmul can use for its result, for
+/// the given `lhsType` and `rhsType`. Tensor IR must follow the CudaTile rules for
+/// matmul ops, which permit only specific accumulator types for each input type.
+/// Returns `std::nullopt` if CudaTile has no such ops for the input types.
+std::optional<SmallVector<Type>>
+MatmulOp::deduceCudaTileStagedMatmulTypes(Type lhsType, Type rhsType) {
+  MLIRContext *ctx = lhsType.getContext();
+  auto F16Type = Float16Type::get(ctx);
+  auto F32Type = Float32Type::get(ctx);
+  auto F64Type = Float64Type::get(ctx);
+  auto SI32Type =
+      IntegerType::get(ctx, 32, IntegerType::SignednessSemantics::Signed);
+
+  SmallVector<Type> result{F16Type, F32Type};
+
+  if (lhsType.isF16() && rhsType == lhsType) {
+    return SmallVector<Type>({F16Type, F32Type});
+  }
+
+  if ((lhsType.isBF16() || lhsType.isF32()) && rhsType == lhsType) {
+    return SmallVector<Type>({F32Type});
+  }
+
+  if (lhsType.isF64() && rhsType == lhsType) {
+    return SmallVector<Type>({F64Type});
+  }
+
+  if (lhsType.isInteger(8) && rhsType.isInteger(8)) {
+    return SmallVector<Type>({SI32Type});
+  }
+
+  return std::nullopt;
 }
 
 //===----------------------------------------------------------------------===//

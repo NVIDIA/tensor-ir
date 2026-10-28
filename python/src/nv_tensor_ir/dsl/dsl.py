@@ -9,9 +9,10 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from .dtypes import DataType
 from .module_builder import TensorInfoOverrides, build_mlir_module
 from .profile import ProfileResult, ProfilingConfig, profile_launches
-from .tensor_spec import tensor_spec_from_value
+from .tensor_spec import _tensor_spec_and_pointer_from_value
 from .tracing import TensorInfo, TraceGraph, _trace_graph_context
 
 from nv_tensor_ir._mlir.dialects import nv_tensor_ir
@@ -51,6 +52,7 @@ class CompiledKernel:
         self,
         *inputs: object,
         output: object | tuple[object, ...],
+        stream: int = 0,
     ) -> None:
         raise NotImplementedError("CompiledKernel must implement run")
 
@@ -61,12 +63,13 @@ class CompiledKernel:
         warmup: int = 1,
         iterations: int = 10,
         print_results: bool = True,
+        stream: int = 0,
     ) -> ProfileResult:
         """Run this kernel under CUPTI and return the collected kernel timings."""
         config = ProfilingConfig(warmup=warmup, iterations=iterations)
 
         def launch() -> None:
-            self.run(*inputs, output=output)
+            self.run(*inputs, output=output, stream=stream)
 
         return profile_launches(launch, config, print_results=print_results)
 
@@ -155,14 +158,24 @@ def _trace(
             )
         if input_index >= len(inputs):
             raise TypeError(f"Missing tensor argument for parameter '{param.name}'")
-        traced_args.append(
-            graph.add_input(
-                _tensor_info_from_value(
-                    inputs[input_index],
-                    param.name,
-                )
-            )
-        )
+        value = inputs[input_index]
+        if isinstance(value, bool):
+            traced_args.append(graph.add_scalar_input(DataType.BOOL, param.name))
+        elif isinstance(value, (int, float)):
+            # An unwrapped scalar gets a fixed default dtype (F32 for a
+            # float, SI64 for an int). Use a 0-d DLPack object (e.g.
+            # torch.tensor(value, dtype=...)) for any other dtype.
+            default_dtype = DataType.F32 if isinstance(value, float) else DataType.SI64
+            traced_args.append(graph.add_scalar_input(default_dtype, param.name))
+        else:
+            # A 0-d DLPack object (e.g. torch.tensor(2.5, dtype=torch.float16))
+            # is a scalar argument with a precise dtype taken from the object
+            # itself; anything with higher rank is a tensor argument.
+            info = _tensor_info_from_value(value, param.name)
+            if not info.shape:
+                traced_args.append(graph.add_scalar_input(info.dtype, param.name))
+            else:
+                traced_args.append(graph.add_input(info))
         input_index += 1
     if input_index != len(inputs):
         raise TypeError(f"Expected {input_index} input tensors, got {len(inputs)}")
@@ -186,7 +199,7 @@ def trace(
 
 def calculate_cache_key(
     module: object,
-    options: CompileOptions | None = None,
+    options: object | None = None,
     *,
     tile_sizes: tuple[int, ...] = (),
     backend: str = "cuda_tile",
@@ -202,7 +215,7 @@ def calculate_cache_key(
 def compile_traced(
     graph: TraceGraph,
     *,
-    options: CompileOptions | None = None,
+    options: object | None = None,
     tile_sizes: tuple[int, ...] = (),
     name: str = "kernel_traced",
     dynamic_shape: bool = False,
@@ -217,6 +230,7 @@ def compile_traced(
     backend_impl = _get_backend_impl(backend)
     tensor_info_overrides = backend_impl.prepare_tensor_infos(
         graph,
+        options=options,
         dynamic_shape=dynamic_shape,
     )
     module, context = build_mlir_module(
@@ -239,7 +253,7 @@ def compile(
     kernel_func: KernelFunction,
     *inputs: object,
     output: object | tuple[object, ...],
-    options: CompileOptions | None = None,
+    options: object | None = None,
     tile_sizes: tuple[int, ...] = (),
     name: str | None = None,
     dynamic_shape: bool = False,
@@ -266,7 +280,7 @@ def compile(
 
 
 def _tensor_info_from_value(value: object, name: str) -> TensorInfo:
-    spec = tensor_spec_from_value(value)
+    spec, pointer = _tensor_spec_and_pointer_from_value(value)
     return TensorInfo(
         name=name,
         dtype=spec.dtype,
@@ -274,6 +288,7 @@ def _tensor_info_from_value(value: object, name: str) -> TensorInfo:
         stride=spec.stride,
         stride_divisibility=spec.stride_divisibility,
         alignment=spec.alignment,
+        _traced_tensor_ptr=pointer,
     )
 
 

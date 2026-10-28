@@ -48,11 +48,19 @@ def tensor_spec_from_value(value: object) -> TensorSpec:
     """Extract tensor metadata from ``TensorSpec`` or a DLPack tensor.
 
     DLPack inputs must expose both ``__dlpack__`` and ``__dlpack_device__``.
-    Only metadata is consumed here; runtime launch still requires a
-    CUDA-accessible DLPack tensor.
+    Only metadata is consumed here; runtime launch requires CUDA-accessible
+    tensors or python scalars.
     """
+    spec, _ = _tensor_spec_and_pointer_from_value(value)
+    return spec
+
+
+def _tensor_spec_and_pointer_from_value(
+    value: object,
+) -> tuple[TensorSpec, int | None]:
+    """Extract metadata and the observed pointer from a single DLPack export."""
     if isinstance(value, TensorSpec):
-        return value
+        return value, None
     if not (hasattr(value, "__dlpack__") and hasattr(value, "__dlpack_device__")):
         raise TypeError(
             "TensorIR DSL tensor arguments must be DLPack-compatible tensors "
@@ -61,8 +69,8 @@ def tensor_spec_from_value(value: object) -> TensorSpec:
     # Avoid importing the native extension when the pure-Python DSL is imported.
     from nv_tensor_ir._mlir._mlir_libs import _tensor_ir
 
-    shape, stride, dtype = _tensor_ir._tensor_metadata_from_dlpack(value)
-    return TensorSpec(shape, dtype=DataType(dtype), stride=stride)
+    shape, stride, dtype, pointer = _tensor_ir._tensor_metadata_from_dlpack(value)
+    return TensorSpec(shape, dtype=DataType(dtype), stride=stride), pointer
 
 
 def _shape_tuple(shape: object) -> tuple[int, ...]:

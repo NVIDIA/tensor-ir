@@ -30,8 +30,9 @@ nv_tensor_ir.graph @negative_not_non_boolean(
 
 // -----
 
-// Exact GELU depends on cuda_tile.experimental$erf, which only supports f32
-// and f64 element types.
+// Exact GELU depends on erf, and TensorToCudaTile restricts erf/gelu_fwd to
+// f32 and f64 element types (see PointwiseOps.cpp). cuda_tile.erf itself also
+// accepts f16/bf16 since it was promoted out of the experimental op set.
 nv_tensor_ir.graph @negative_gelu_fwd_f16(
     %arg0: tensor<128xf16>) -> (tensor<128xf16>)
     attributes {tile_size = array<i32: 128>} {

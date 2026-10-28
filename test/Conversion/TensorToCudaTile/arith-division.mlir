@@ -67,19 +67,16 @@ module {
 
 module {
   gpu.module @kernels {
-    func.func @divide_tensor(%input: memref<8xsi32, #ptr.generic_space>) attributes {gpu.kernel} {
+    func.func @divide_tensor(%input: memref<8xsi32>) attributes {gpu.kernel} {
       // CHECK-LABEL: entry @divide_tensor(
       %c0 = arith.constant 0 : index
       %c1 = arith.constant 1 : index
-      %ptr = ptr.to_ptr %input : memref<8xsi32, #ptr.generic_space> -> !ptr.ptr<#ptr.generic_space>
       // CHECK: %[[LHS:[^,]+]], %{{.*}} = load_view_tko
-      %lhs_signed = nv_tensor_ir.load %ptr[%c0]
-          view offset: [0], sizes: [8], strides: [1], alignment: 4 padding = <zero>
-          : !ptr.ptr<#ptr.generic_space> to tensor<4xsi32>
+      %lhs_signed = nv_tensor_ir.load %input tile_indices [%c0], alignment 4, padding <zero>
+          : memref<8xsi32> to tensor<4xsi32>
       // CHECK: %[[RHS:[^,]+]], %{{.*}} = load_view_tko
-      %rhs_signed = nv_tensor_ir.load %ptr[%c1]
-          view offset: [0], sizes: [8], strides: [1], alignment: 4 padding = <zero>
-          : !ptr.ptr<#ptr.generic_space> to tensor<4xsi32>
+      %rhs_signed = nv_tensor_ir.load %input tile_indices [%c1], alignment 4, padding <zero>
+          : memref<8xsi32> to tensor<4xsi32>
       %lhs = builtin.unrealized_conversion_cast %lhs_signed : tensor<4xsi32> to tensor<4xi32>
       %rhs = builtin.unrealized_conversion_cast %rhs_signed : tensor<4xsi32> to tensor<4xi32>
       // CHECK: divi %[[LHS]], %[[RHS]] signed rounding<positive_inf> : tile<4xi32>

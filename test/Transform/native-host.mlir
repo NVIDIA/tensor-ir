@@ -96,38 +96,38 @@ module @dynamic attributes {gpu.container_module} {
   //       CHECK: ^[[ERROR_COPY_AGAIN]]:
   //       CHECK: llvm.return %[[LAUNCH_ERROR]] : i32
   func.func @copy(
-      %a: memref<?xf32, strided<[?]>, #ptr.generic_space>, %scale: f32) {
+      %a: memref<?xf32, strided<[?]>>, %scale: f32) {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c3 = arith.constant 3 : index
-    %n = memref.dim %a, %c0 : memref<?xf32, strided<[?]>, #ptr.generic_space>
+    %n = memref.dim %a, %c0 : memref<?xf32, strided<[?]>>
     scf.for %i = %c0 to %c3 step %c1 {
 
       gpu.launch_func @kernels::@copy blocks in (%n, %c1, %c1)
           threads in (%c1, %c1, %c1)
-          args(%a : memref<?xf32, strided<[?]>, #ptr.generic_space>, %scale : f32)
+          args(%a : memref<?xf32, strided<[?]>>, %scale : f32)
 
       gpu.launch_func @kernels::@other blocks in (%n, %c1, %c1)
           threads in (%c1, %c1, %c1)
-          args(%a : memref<?xf32, strided<[?]>, #ptr.generic_space>, %scale : f32)
+          args(%a : memref<?xf32, strided<[?]>>, %scale : f32)
 
       gpu.launch_func @kernels::@copy blocks in (%n, %c1, %c1)
           threads in (%c1, %c1, %c1)
-          args(%a : memref<?xf32, strided<[?]>, #ptr.generic_space>, %scale : f32)
+          args(%a : memref<?xf32, strided<[?]>>, %scale : f32)
     }
     return
   }
   // CHECK-LABEL: gpu.module @kernels
-  //       CHECK: func.func @copy(%[[A:[^:]+]]: memref<?xf32, strided<[?]>, #ptr.generic_space>, %[[SCALE:[^:]+]]: f32) attributes {gpu.kernel, nv_tensor_ir.kernel_ordinal = 0 : i32}
+  //       CHECK: func.func @copy(%[[A:[^:]+]]: memref<?xf32, strided<[?]>>, %[[SCALE:[^:]+]]: f32) attributes {gpu.kernel, nv_tensor_ir.kernel_ordinal = 0 : i32}
   //   CHECK-DAG: %[[ZERO:[^ ]+]] = arith.constant 0 : index
   //   CHECK-DAG: %[[ONE:[^ ]+]] = arith.constant 1 : index
   //       CHECK: scf.for %[[IV:[^ ]+]] = %[[ZERO]] to %[[ONE]] step %[[ONE]] {
   //       CHECK: %[[UNUSED:[^ ]+]] = arith.constant 7 : i32
   //       CHECK: return
-  //       CHECK: func.func @other(%[[A:[^:]+]]: memref<?xf32, strided<[?]>, #ptr.generic_space>, %[[SCALE:[^:]+]]: f32) attributes {gpu.kernel, nv_tensor_ir.kernel_ordinal = 1 : i32}
+  //       CHECK: func.func @other(%[[A:[^:]+]]: memref<?xf32, strided<[?]>>, %[[SCALE:[^:]+]]: f32) attributes {gpu.kernel, nv_tensor_ir.kernel_ordinal = 1 : i32}
   //       CHECK: return
   gpu.module @kernels {
-    func.func @copy(%a: memref<?xf32, strided<[?]>, #ptr.generic_space>,
+    func.func @copy(%a: memref<?xf32, strided<[?]>>,
                     %scale: f32) attributes {gpu.kernel} {
       %c0 = arith.constant 0 : index
       %c1 = arith.constant 1 : index
@@ -136,7 +136,7 @@ module @dynamic attributes {gpu.container_module} {
       }
       return
     }
-    func.func @other(%a: memref<?xf32, strided<[?]>, #ptr.generic_space>,
+    func.func @other(%a: memref<?xf32, strided<[?]>>,
                      %scale: f32) attributes {gpu.kernel} {
       return
     }
@@ -293,24 +293,24 @@ module @relaunch attributes {gpu.container_module} {
   //  CHECK-NEXT: llvm.store %[[PRODUCT]], %[[SCALE_SLOT]] : f32, !llvm.ptr
   //  CHECK-NEXT: llvm.store %[[SCALE_SLOT]], %[[SCALE_PARAM]] : !llvm.ptr, !llvm.ptr
   //       CHECK: llvm.call %{{.+}}(%{{.+}}, %[[KERNEL_ID]], %[[CONFIG_PTR]], %[[PARAMS]])
-  func.func @relaunch(%a: memref<?xf32, #ptr.generic_space>,
-                      %b: memref<?xf32, #ptr.generic_space>,
+  func.func @relaunch(%a: memref<?xf32>,
+                      %b: memref<?xf32>,
                       %x: f32, %y: f32) {
     %product = arith.mulf %x, %y : f32
     %one = arith.constant 1 : index
     gpu.launch_func @kernels::@scale blocks in (%one, %one, %one)
         threads in (%one, %one, %one)
-        args(%a : memref<?xf32, #ptr.generic_space>, %x : f32)
+        args(%a : memref<?xf32>, %x : f32)
     gpu.launch_func @kernels::@scale blocks in (%one, %one, %one)
         threads in (%one, %one, %one)
-        args(%b : memref<?xf32, #ptr.generic_space>, %y : f32)
+        args(%b : memref<?xf32>, %y : f32)
     gpu.launch_func @kernels::@scale blocks in (%one, %one, %one)
         threads in (%one, %one, %one)
-        args(%a : memref<?xf32, #ptr.generic_space>, %product : f32)
+        args(%a : memref<?xf32>, %product : f32)
     return
   }
   gpu.module @kernels {
-    func.func @scale(%data: memref<?xf32, #ptr.generic_space>, %factor: f32)
+    func.func @scale(%data: memref<?xf32>, %factor: f32)
         attributes {gpu.kernel} { return }
   }
   // FINAL-LABEL: cuda_tile.module @cuda_tile_relaunch
@@ -367,15 +367,15 @@ module @uniform attributes {gpu.container_module} {
   //       CHECK: llvm.store %[[DATA_SLOT]], %[[FIRST_PARAM]] : !llvm.ptr, !llvm.ptr
   //       CHECK: llvm.call %{{.*}}(%{{.*}}, %{{.*}}, %{{.*}}, %[[PARAMS]])
   func.func @copy(
-      %a: memref<32x16xf32, strided<[16, 1]>, #ptr.generic_space>) {
+      %a: memref<32x16xf32, strided<[16, 1]>>) {
     %one = arith.constant 1 : index
     gpu.launch_func @kernels::@copy blocks in (%one, %one, %one)
         threads in (%one, %one, %one)
-        args(%a : memref<32x16xf32, strided<[16, 1]>, #ptr.generic_space>)
+        args(%a : memref<32x16xf32, strided<[16, 1]>>)
     return
   }
   gpu.module @kernels {
-    func.func @copy(%a: memref<32x16xf32, strided<[16, 1]>, #ptr.generic_space>)
+    func.func @copy(%a: memref<32x16xf32, strided<[16, 1]>>)
         attributes {gpu.kernel} { return }
   }
   // CHECK-LABEL: llvm.func @tensor_ir_host_entry_copy_v1(
@@ -432,19 +432,19 @@ module @mixed attributes {gpu.container_module} {
   //       CHECK: llvm.store %[[SCALE_SLOT]], %[[SCALE_PARAM]] : !llvm.ptr, !llvm.ptr
   //       CHECK: llvm.call %{{.+}}(%{{.+}}, %{{.+}}, %{{.+}}, %[[PARAMS]])
   func.func @mixed(
-      %a: memref<4x?xf32, strided<[?, 1]>, #ptr.generic_space>,
-      %b: memref<8xf32, #ptr.generic_space>, %scale: i32) {
+      %a: memref<4x?xf32, strided<[?, 1]>>,
+      %b: memref<8xf32>, %scale: i32) {
     %one = arith.constant 1 : index
     gpu.launch_func @kernels::@mixed blocks in (%one, %one, %one)
         threads in (%one, %one, %one)
-        args(%a : memref<4x?xf32, strided<[?, 1]>, #ptr.generic_space>,
-             %b : memref<8xf32, #ptr.generic_space>, %scale : i32)
+        args(%a : memref<4x?xf32, strided<[?, 1]>>,
+             %b : memref<8xf32>, %scale : i32)
     return
   }
   gpu.module @kernels {
     func.func @mixed(
-        %a: memref<4x?xf32, strided<[?, 1]>, #ptr.generic_space>,
-        %b: memref<8xf32, #ptr.generic_space>, %scale: i32)
+        %a: memref<4x?xf32, strided<[?, 1]>>,
+        %b: memref<8xf32>, %scale: i32)
         attributes {gpu.kernel} { return }
   }
   // CHECK-LABEL: llvm.func @tensor_ir_host_entry_mixed_v1(

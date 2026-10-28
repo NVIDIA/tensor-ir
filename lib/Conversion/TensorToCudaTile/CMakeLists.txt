@@ -16,7 +16,6 @@ add_tensor_ir_conversion_library(NVTensorIRToCudaTileConversion
   MLIRFuncDialect
   MLIRGPUDialect
   MLIRMemRefDialect
-  MLIRPtrDialect
   MLIRSCFDialect
   MLIRTransformUtils
 

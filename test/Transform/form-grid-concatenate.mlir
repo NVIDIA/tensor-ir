@@ -1,23 +1,31 @@
 // RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,tile-selection),tir-bufferize,func.func(tir-form-grid))' --split-input-file | FileCheck %s --implicit-check-not='nv_tensor_ir.concatenate' --implicit-check-not='nv_tensor_ir.iter_space'
 
 // CHECK-LABEL: func.func @three_way_dispatch
-//       CHECK: scf.forall
-//       CHECK: %[[FIRST:[0-9]+]] = arith.cmpi ult
+//  CHECK-SAME: %[[IN0:[^:]+]]: memref<2xf32>
+//  CHECK-SAME: %[[IN1:[^:]+]]: memref<3xf32>
+//  CHECK-SAME: %[[IN2:[^:]+]]: memref<4xf32>
+//  CHECK-SAME: %[[OUT:[^:]+]]: memref<9xf32>
+//       CHECK: scf.forall (%[[BID:.+]]) in (9) {
+//       CHECK: %[[C2:.+]] = arith.constant 2 : index
+//       CHECK: %[[FIRST:[0-9]+]] = arith.cmpi ult, %[[BID]], %[[C2]]
 //       CHECK: %[[OUTER:[0-9]+]] = scf.if %[[FIRST]] -> (tensor<1xf32>) {
-//       CHECK: %[[A:[0-9]+]] = nv_tensor_ir.load
+//       CHECK: %[[A:[0-9]+]] = nv_tensor_ir.load %[[IN0]] tile_indices [%[[BID]]]
 //       CHECK: scf.yield %[[A]]
 //       CHECK: } else {
-//       CHECK: %[[SECOND:[0-9]+]] = arith.cmpi ult
+//   CHECK-DAG: %[[V2:.+]] = arith.subi %[[BID]], %[[C2]] : index
+//   CHECK-DAG: %[[C3:.+]] = arith.constant 3 : index
+//       CHECK: %[[SECOND:[0-9]+]] = arith.cmpi ult, %[[V2]], %[[C3]]
 //       CHECK: %[[INNER:[0-9]+]] = scf.if %[[SECOND]] -> (tensor<1xf32>) {
-//       CHECK: %[[B:[0-9]+]] = nv_tensor_ir.load
+//       CHECK: %[[B:[0-9]+]] = nv_tensor_ir.load %[[IN1]] tile_indices [%[[V2]]]
 //       CHECK: scf.yield %[[B]]
 //       CHECK: } else {
-//       CHECK: %[[C:[0-9]+]] = nv_tensor_ir.load
+//       CHECK: %[[V5:.+]] = arith.subi %[[V2]], %[[C3]] : index
+//       CHECK: %[[C:[0-9]+]] = nv_tensor_ir.load %[[IN2]] tile_indices [%[[V5]]]
 //       CHECK: scf.yield %[[C]]
 //       CHECK: }
 //       CHECK: scf.yield %[[INNER]]
 //       CHECK: }
-//       CHECK: nv_tensor_ir.store %[[OUTER]]
+//       CHECK: nv_tensor_ir.store %[[OUTER]], %[[OUT]] tile_indices [%[[BID]]]
 //   CHECK-NOT: nv_tensor_ir.iter_space_id
 nv_tensor_ir.graph @three_way(
     %arg0: tensor<2xf32>, %arg1: tensor<3xf32>, %arg2: tensor<4xf32>)
@@ -30,13 +38,10 @@ nv_tensor_ir.graph @three_way(
 // -----
 
 // CHECK-LABEL: func.func @pruned_dispatch(
-//  CHECK-SAME:     %[[ARG0:[^:]+]]: memref<2xf32, #ptr.generic_space>
-//  CHECK-SAME:     %[[ARG1:[^:]+]]: memref<4xf32, #ptr.generic_space>
-//  CHECK-SAME:     %[[ARG2:[^:]+]]: memref<6xf32, #ptr.generic_space>
-//  CHECK-SAME:     %[[ARG3:[^:]+]]: memref<8xf32, #ptr.generic_space>
-//   CHECK-DAG:   %[[ARG1_PTR:.*]] = ptr.to_ptr %[[ARG1]]
-//   CHECK-DAG:   %[[ARG2_PTR:.*]] = ptr.to_ptr %[[ARG2]]
-//   CHECK-DAG:   %[[ARG3_PTR:.*]] = ptr.to_ptr %[[ARG3]]
+//  CHECK-SAME:     %[[ARG0:[^:]+]]: memref<2xf32>
+//  CHECK-SAME:     %[[ARG1:[^:]+]]: memref<4xf32>
+//  CHECK-SAME:     %[[ARG2:[^:]+]]: memref<6xf32>
+//  CHECK-SAME:     %[[ARG3:[^:]+]]: memref<8xf32>
 
 //       CHECK:   scf.forall (%[[ROW:.*]]) in (2) {
 nv_tensor_ir.graph @pruned(
@@ -45,14 +50,16 @@ nv_tensor_ir.graph @pruned(
   //       CHECK:     %[[ONE:.*]] = arith.constant 1 : index
   //       CHECK:     %[[IS_ARG1:.*]] = arith.cmpi ult, %[[ROW]], %[[ONE]] : index
   //       CHECK:     %[[TILE:.*]] = scf.if %[[IS_ARG1]] -> (tensor<1x4xf32>) {
-  //       CHECK:       %[[ARG1_TILE:.*]] = nv_tensor_ir.load %[[ARG1_PTR]][0, 0]
-  //  CHECK-SAME:         view offset: [0], sizes: [1, 4], strides: [0, 1], alignment: 4
-  //  CHECK-SAME:         to tensor<1x4xf32>
+  //       CHECK:       %[[ARG1_VIEW:.*]] = memref.reinterpret_cast %[[ARG1]]
+  //  CHECK-SAME:        to offset: [0], sizes: [1, 4], strides: [2, 1]
+  //  CHECK-SAME:        : memref<4xf32> to memref<1x4xf32, strided<[2, 1]>>
+  //       CHECK:       %[[ARG1_TILE:.*]] = nv_tensor_ir.load %[[ARG1_VIEW]] tile_indices [0, 0]
   //       CHECK:       scf.yield %[[ARG1_TILE]] : tensor<1x4xf32>
   //       CHECK:     } else {
-  //       CHECK:       %[[ARG2_TILE:.*]] = nv_tensor_ir.load %[[ARG2_PTR]][0, 0]
-  //  CHECK-SAME:         view offset: [0], sizes: [1, 4], strides: [0, 1], alignment: 4
-  //  CHECK-SAME:         to tensor<1x4xf32>
+  //       CHECK:       %[[ARG2_VIEW:.*]] = memref.reinterpret_cast %[[ARG2]]
+  //  CHECK-SAME:        to offset: [0], sizes: [1, 4], strides: [2, 1]
+  //  CHECK-SAME:        : memref<6xf32> to memref<1x4xf32, strided<[2, 1]>>
+  //       CHECK:       %[[ARG2_TILE:.*]] = nv_tensor_ir.load %[[ARG2_VIEW]] tile_indices [0, 0]
   //       CHECK:       scf.yield %[[ARG2_TILE]] : tensor<1x4xf32>
   //       CHECK:     }
   %concat = concatenate %arg0, %arg1, %arg2 dimension = 0
@@ -62,8 +69,10 @@ nv_tensor_ir.graph @pruned(
   %result = slice %concat starts = [2] limits = [10] strides = [1]
       : tensor<12xf32> -> tensor<8xf32>
   // The selected tile is stored at its grid coordinate.
-  //       CHECK:     nv_tensor_ir.store %[[TILE]], %[[ARG3_PTR]][%[[ROW]], 0]
-  //  CHECK-SAME:       view offset: [0], sizes: [2, 4], strides: [4, 1], alignment: 4
+  //       CHECK:     %[[OUT_VIEW:.*]] = memref.reinterpret_cast %[[ARG3]]
+  //  CHECK-SAME:        to offset: [0], sizes: [2, 4], strides: [4, 1]
+  //  CHECK-SAME:        : memref<8xf32> to memref<2x4xf32, strided<[4, 1]>>
+  //       CHECK:     nv_tensor_ir.store %[[TILE]], %[[OUT_VIEW]] tile_indices [%[[ROW]], 0]
   //       CHECK:   } {mapping = [#gpu.block<x>]}
   results %result : tensor<8xf32>
 }
@@ -71,14 +80,43 @@ nv_tensor_ir.graph @pruned(
 // -----
 
 // CHECK-LABEL: func.func @nested_dispatch
-//       CHECK: %[[OUTER:[0-9]+]] = scf.if
-//       CHECK: %[[LEFT:[0-9]+]] = scf.if
+//  CHECK-SAME: %[[IN0:[^:]+]]: memref<2xf32>
+//  CHECK-SAME: %[[IN1:[^:]+]]: memref<3xf32>
+//  CHECK-SAME: %[[IN2:[^:]+]]: memref<4xf32>
+//  CHECK-SAME: %[[IN3:[^:]+]]: memref<5xf32>
+//  CHECK-SAME: %[[OUT:[^:]+]]: memref<14xf32>
+//       CHECK: scf.forall (%[[BID:.+]]) in (14) {
+//       CHECK: %[[C5:.+]] = arith.constant 5 : index
+//       CHECK: %[[IS_LEFT:.+]] = arith.cmpi ult, %[[BID]], %[[C5]]
+//       CHECK: %[[OUTER:[0-9]+]] = scf.if %[[IS_LEFT]] -> (tensor<1xf32>) {
+//       CHECK: %[[C2:.+]] = arith.constant 2 : index
+//       CHECK: %[[FIRST:.+]] = arith.cmpi ult, %[[BID]], %[[C2]]
+//       CHECK: %[[LEFT:[0-9]+]] = scf.if %[[FIRST]] -> (tensor<1xf32>) {
+//       CHECK: %[[A:.+]] = nv_tensor_ir.load %[[IN0]] tile_indices [%[[BID]]]
+//       CHECK: scf.yield %[[A]]
+//       CHECK: } else {
+//       CHECK: %[[V2:.+]] = arith.subi %[[BID]], %[[C2]] : index
+//       CHECK: %[[B:.+]] = nv_tensor_ir.load %[[IN1]] tile_indices [%[[V2]]]
+//       CHECK: scf.yield %[[B]]
+//       CHECK: }
 //       CHECK: scf.yield %[[LEFT]]
 //       CHECK: } else {
-//       CHECK: %[[RIGHT:[0-9]+]] = scf.if
+//   CHECK-DAG: %[[V5:.+]] = arith.subi %[[BID]], %[[C5]] : index
+//   CHECK-DAG: %[[C4:.+]] = arith.constant 4 : index
+//       CHECK: %[[THIRD:.+]] = arith.cmpi ult, %[[V5]], %[[C4]]
+//       CHECK: %[[RIGHT:[0-9]+]] = scf.if %[[THIRD]] -> (tensor<1xf32>) {
+//       CHECK: %[[C:.+]] = nv_tensor_ir.load %[[IN2]] tile_indices [%[[V5]]]
+//       CHECK: scf.yield %[[C]]
+//       CHECK: } else {
+//       CHECK: %[[V9:.+]] = arith.subi %[[V5]], %[[C4]] : index
+//       CHECK: %[[D:.+]] = nv_tensor_ir.load %[[IN3]] tile_indices [%[[V9]]]
+//       CHECK: scf.yield %[[D]]
+//       CHECK: }
 //       CHECK: scf.yield %[[RIGHT]]
 //       CHECK: }
-//       CHECK: nv_tensor_ir.store %[[OUTER]]
+//       CHECK: nv_tensor_ir.store %[[OUTER]], %[[OUT]] tile_indices [%[[BID]]]
+//       CHECK: } {mapping = [#gpu.block<x>]}
+//   CHECK-NOT: nv_tensor_ir.iter_space_id
 nv_tensor_ir.graph @nested(
     %arg0: tensor<2xf32>, %arg1: tensor<3xf32>,
     %arg2: tensor<4xf32>, %arg3: tensor<5xf32>)

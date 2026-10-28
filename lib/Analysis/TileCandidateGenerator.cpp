@@ -1680,7 +1680,7 @@ bool TileCandidateGenerator::isValidTile(llvm::ArrayRef<int32_t> tile,
       return false;
     }
     int64_t maxTile =
-        shape[i] > 1 ? llvm::bit_floor(static_cast<uint64_t>(shape[i])) : 1;
+        shape[i] > 1 ? llvm::bit_ceil(static_cast<uint64_t>(shape[i])) : 1;
     if (static_cast<int64_t>(tile[i]) > maxTile) {
       return false;
     }

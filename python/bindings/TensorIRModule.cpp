@@ -24,11 +24,13 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #include "dlpack/dlpack.h"
 #include "tensor_ir-c/TensorIR.h"
 #include <Python.h>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -227,6 +229,53 @@ bool supportsDLPack(nb::handle value) {
          nb::hasattr(value, "__dlpack_device__");
 }
 
+template <typename T>
+int64_t bitcastAndZExtTo64(T value) {
+  int64_t bits = 0;
+  static_assert(sizeof(T) <= sizeof(bits));
+  std::memcpy(&bits, &value, sizeof(T));
+  return bits;
+}
+
+// nb::cast<int64_t> throws an unfriendly, nanobind-internal exception for a
+// Python int outside int64_t's range (e.g. >= 2**63) -- report a clean
+// TypeError instead.
+int64_t castToInt64OrThrow(nb::handle value) {
+  try {
+    return nb::cast<int64_t>(value);
+  } catch (const std::exception &) {
+    throw nb::type_error(
+        "TensorIR scalar value does not fit in the declared dtype");
+  }
+}
+
+// A bare Python int/float scalar argument gets a fixed default element type
+// from its Python type: float -> F32, int -> SI64.
+MlirTensorIRArgument packBareNumberArg(nb::handle value) {
+  MlirTensorIRArgument argument{};
+  argument.kind = MlirTensorIRArgumentKindScalar;
+  if (nb::isinstance<nb::float_>(value)) {
+    argument.value.scalar.type = MlirTensorIRElementTypeF32;
+    argument.value.scalar.bits =
+        bitcastAndZExtTo64<float>(static_cast<float>(nb::cast<double>(value)));
+  } else {
+    argument.value.scalar.type = MlirTensorIRElementTypeSI64;
+    argument.value.scalar.bits =
+        bitcastAndZExtTo64<int64_t>(castToInt64OrThrow(value));
+  }
+  return argument;
+}
+
+// A bare Python bool is an unambiguous i1 scalar (unlike int/float, which
+// have no fixed width) -- accepted directly.
+MlirTensorIRArgument packBoolArg(nb::handle value) {
+  MlirTensorIRArgument argument{};
+  argument.kind = MlirTensorIRArgumentKindScalar;
+  argument.value.scalar.type = MlirTensorIRElementTypeBool;
+  argument.value.scalar.bits = bitcastAndZExtTo64<bool>(nb::cast<bool>(value));
+  return argument;
+}
+
 std::string pythonTypeName(nb::handle value) {
   const char *name = Py_TYPE(value.ptr())->tp_name;
   return name ? std::string(name) : std::string("<unknown>");
@@ -351,6 +400,12 @@ std::string tensorIRTypeFromDLPack(DLDataType dtype) {
   if (dtype.code == kDLBfloat && dtype.bits == 16) {
     return "bf16";
   }
+  if (dtype.code == kDLFloat8_e4m3fn && dtype.bits == 8) {
+    return "f8E4M3FN";
+  }
+  if (dtype.code == kDLFloat8_e5m2 && dtype.bits == 8) {
+    return "f8E5M2";
+  }
   if (dtype.code == kDLInt || dtype.code == kDLUInt) {
     if (dtype.bits == 8 || dtype.bits == 16 || dtype.bits == 32 ||
         dtype.bits == 64) {
@@ -382,29 +437,64 @@ void appendDLPackTensorView(const DLTensor &tensor, PackedPythonArgs &packed) {
   packed.strides.push_back(std::move(stride));
 }
 
-MlirTensorIRArgument packDLPackTensorArg(nb::handle value,
+// A 0-d DLPack object used as a scalar argument; its element type comes
+// from its own dtype. GPU-resident 0-d objects are rejected below (see
+// the device_type check) -- express those as a real tensor operand
+// instead.
+MlirTensorIRArgument packDLPackScalarArg(const DLTensor &tensor) {
+  if (tensor.device.device_type != kDLCPU &&
+      tensor.device.device_type != kDLCUDAHost) {
+    throw nb::type_error(
+        "TensorIR 0-d DLPack scalar arguments must be host-resident (RTK's "
+        "by-value scalar ABI only supports the host argument mode)");
+  }
+  std::string spelling = tensorIRTypeFromDLPack(tensor.dtype);
+  MlirTensorIRElementType type;
+  std::string error;
+  if (mlirLogicalResultIsFailure(mlirTensorIRElementTypeFromSpelling(
+          mlirStringRefCreate(spelling.data(), spelling.size()), &type,
+          appendStringRef, &error))) {
+    throw nb::type_error(error.c_str());
+  }
+  size_t width =
+      static_cast<size_t>((tensor.dtype.bits * tensor.dtype.lanes + 7) / 8);
+  // tensorIRTypeFromDLPack validates dtype.bits for every code except
+  // kDLBool (which it accepts unconditionally), so an untrusted DLPack
+  // producer reporting an oversized bool width could otherwise make the
+  // memcpy below overrun `bits`.
+  if (width == 0 || width > sizeof(int64_t)) {
+    throw nb::type_error(
+        "TensorIR 0-d DLPack scalar dtype width must be between 1 and 64 "
+        "bits");
+  }
+  int64_t bits = 0;
+  std::memcpy(&bits, static_cast<char *>(tensor.data) + tensor.byte_offset,
+              width);
+  MlirTensorIRArgument argument{};
+  argument.kind = MlirTensorIRArgumentKindScalar;
+  argument.value.scalar.type = type;
+  argument.value.scalar.bits = bits;
+  return argument;
+}
+
+// Packs an N-d DLPack object as a Tensor argument. `capsule` must be the
+// result of createDLPackCapsule(value); ownership moves into
+// `packed.dlpackCapsules` so the data/shape/stride pointers below stay
+// valid for the whole runtime call.
+MlirTensorIRArgument packDLPackTensorArg(nb::object capsule,
                                          PackedPythonArgs &packed) {
-  DLTensor *tensor = keepDLPackTensorAlive(value, packed);
-  appendDLPackTensorView(*tensor, packed);
+  packed.dlpackCapsules.push_back(std::move(capsule));
+  const DLTensor &tensor = *getDLTensor(packed.dlpackCapsules.back());
+  appendDLPackTensorView(tensor, packed);
 
   std::vector<int64_t> &shape = packed.shapes.back();
   std::vector<int64_t> &stride = packed.strides.back();
-  char *data = static_cast<char *>(tensor->data) + tensor->byte_offset;
+  char *data = static_cast<char *>(tensor.data) + tensor.byte_offset;
   MlirTensorIRArgument argument{};
   argument.kind = MlirTensorIRArgumentKindTensor;
   argument.value.tensor = {data, static_cast<int32_t>(shape.size()),
                            shape.data(), stride.data()};
   return argument;
-}
-
-MlirTensorIRArgument packTensorArg(nb::handle value, PackedPythonArgs &packed) {
-  if (supportsDLPack(value)) {
-    return packDLPackTensorArg(value, packed);
-  }
-  throw nb::type_error(("TensorIR tensor arguments must be DLPack-compatible "
-                        "tensors with __dlpack__ and __dlpack_device__ (got " +
-                        pythonTypeName(value) + ")")
-                           .c_str());
 }
 
 PackedPythonArgs packArgs(nb::tuple pyArgs) {
@@ -416,14 +506,24 @@ PackedPythonArgs packArgs(nb::tuple pyArgs) {
     MlirTensorIRArgument argument{};
     if (arg.is_none()) {
       argument.kind = MlirTensorIRArgumentKindNone;
-    } else if (nb::isinstance<nb::int_>(arg)) {
-      argument.kind = MlirTensorIRArgumentKindInt64;
-      argument.value.int64Value = nb::cast<int64_t>(arg);
-    } else if (nb::isinstance<nb::float_>(arg)) {
-      argument.kind = MlirTensorIRArgumentKindFloat64;
-      argument.value.float64Value = nb::cast<double>(arg);
+    } else if (nb::isinstance<nb::bool_>(arg)) {
+      argument = packBoolArg(arg);
+    } else if (nb::isinstance<nb::int_>(arg) ||
+               nb::isinstance<nb::float_>(arg)) {
+      argument = packBareNumberArg(arg);
+    } else if (supportsDLPack(arg)) {
+      nb::object capsule = createDLPackCapsule(arg);
+      const DLTensor &tensor = *getDLTensor(capsule);
+      argument = tensor.ndim == 0
+                     ? packDLPackScalarArg(tensor)
+                     : packDLPackTensorArg(std::move(capsule), packed);
     } else {
-      argument = packTensorArg(arg, packed);
+      throw nb::type_error(
+          ("TensorIR arguments must be a bool, a number, or a "
+           "DLPack-compatible tensor with __dlpack__ and __dlpack_device__ "
+           "(got " +
+           pythonTypeName(arg) + ")")
+              .c_str());
     }
     packed.args.push_back(argument);
   }
@@ -457,7 +557,13 @@ nb::tuple tensorMetadataFromDLPack(nb::handle value) {
   DLTensor *tensor = getDLTensor(capsule);
   std::vector<int64_t> shape = dlpackShape(*tensor);
   std::vector<int64_t> stride = dlpackStrides(*tensor, shape);
-  return nb::make_tuple(shape, stride, tensorIRTypeFromDLPack(tensor->dtype));
+  // Match the effective address used by packDLPackTensorArg, including views.
+  // Return zero for null data; alignment policy belongs to the DSL backend.
+  uintptr_t pointer = tensor->data ? reinterpret_cast<uintptr_t>(tensor->data) +
+                                         tensor->byte_offset
+                                   : 0;
+  return nb::make_tuple(shape, stride, tensorIRTypeFromDLPack(tensor->dtype),
+                        pointer);
 }
 
 void *packStream(nb::object stream) {
@@ -753,10 +859,11 @@ NB_MODULE(_tensor_ir, m) {
       .def("serialize", &PyArtifact::serialize)
       .def_static("deserialize", &PyArtifact::deserialize, nb::arg("bytes"));
 
-  m.def("_tensor_metadata_from_dlpack", &tensorMetadataFromDLPack,
-        nb::arg("tensor"),
-        "Return (shape, stride, dtype) metadata for a DLPack-compatible "
-        "tensor.");
+  m.def(
+      "_tensor_metadata_from_dlpack", &tensorMetadataFromDLPack,
+      nb::arg("tensor"),
+      "Return (shape, stride, dtype, pointer) metadata for a DLPack-compatible "
+      "tensor.");
 
   m.def("calculate_cache_key", &calculateCacheKey, nb::arg("module"),
         nb::arg("options"),

@@ -1,3 +1,4 @@
+// RUN: tensor_ir-opt %s --split-input-file --tir-host-to-llvm --canonicalize --cse | FileCheck %s --check-prefix=ABI
 // RUN: tensor_ir-opt %s --split-input-file --tir-host-to-llvm | FileCheck %s --implicit-check-not=gpu.launch_func --implicit-check-not=builtin.unrealized_conversion_cast
 
 // CHECK-LABEL: llvm.func @negative_index_constant()
@@ -58,6 +59,55 @@ module attributes {gpu.container_module} {
   gpu.module @kernels {
     func.func @kernel(%value: f32) attributes {gpu.kernel, nv_tensor_ir.kernel_ordinal = 7 : i32} {
       %x = math.exp %value : f32
+      return
+    }
+  }
+}
+
+// -----
+
+module attributes {gpu.container_module} {
+  // ABI-LABEL: llvm.func @dispatch_identity(
+  // ABI: llvm.alloca {{.*}} x !llvm.struct<(array<3 x ptr>, array<3 x i64>)>
+  func.func private @dispatch_identity(%runtime: !llvm.ptr {nv_tensor_ir.runtime_context},
+      %view: memref<?x?xf32>) -> i32 {
+    %one = arith.constant 1 : index
+    %zero = arith.constant 0 : i32
+    gpu.launch_func @kernels::@kernel blocks in (%one, %one, %one)
+        threads in (%one, %one, %one) args(%view : memref<?x?xf32>)
+        {nv_tensor_ir.kernel_ordinal = 0 : i32}
+    return %zero : i32
+  }
+  gpu.module @kernels {
+    func.func @kernel(%view: memref<?x?xf32>) attributes {gpu.kernel} {
+      return
+    }
+  }
+}
+
+// -----
+
+// A signed-integer scalar kernel argument is converted to the signless
+// integer type LLVM dialect ops require before being stored into the
+// params slot.
+
+// CHECK-LABEL: llvm.func @dispatch_scalar_int(
+//  CHECK-SAME: {{.*}}%[[VALUE:[^:]+]]: i32) -> i32
+//       CHECK: llvm.store %[[VALUE]], %{{.*}} : i32, !llvm.ptr
+module attributes {gpu.container_module} {
+  func.func private @dispatch_scalar_int(
+      %runtime: !llvm.ptr {nv_tensor_ir.runtime_context}, %grid: index, %block: index, %smem: i32,
+      %value: si32) -> i32 {
+    %one = arith.constant 1 : index
+    %zero = arith.constant 0 : i32
+    gpu.launch_func @kernels::@kernel blocks in (%grid, %one, %one)
+        threads in (%block, %one, %one)
+        dynamic_shared_memory_size %smem args(%value : si32)
+        {nv_tensor_ir.kernel_ordinal = 3 : i32}
+    return %zero : i32
+  }
+  gpu.module @kernels {
+    func.func @kernel(%value: si32) attributes {gpu.kernel, nv_tensor_ir.kernel_ordinal = 3 : i32} {
       return
     }
   }

@@ -20,6 +20,11 @@ def TensorIR_GraphOp : TensorIR_Op<"graph",
     graph. The body is a single block in a "graph region", that is the
     ordering of the nodes does not matter.
 
+    An argument type is either a ranked tensor or a bare scalar (integer or
+    float) type. A bare scalar argument is a by-value runtime kernel
+    argument: its value may differ on every invocation without recompiling
+    the graph.
+
     Note: TensorIR is a flat graph model by design. Except for structured
     operations such as `scan_slice` which may contain isolated regions, there is
     no loop/for construct at this level; iteration is expressed at lower dialect
@@ -910,6 +915,12 @@ def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
     }
 
 
+    /// Returns the element types that a staged matmul can use for its result, for
+    /// the given `lhsType` and `rhsType`. Tensor IR must follow the CudaTile rules.
+    /// Returns `std::nullopt` if CudaTile has no such ops for the input types.
+    static std::optional<SmallVector<Type>> deduceCudaTileStagedMatmulTypes(
+      Type lhsType, Type rhsType);
+
     unsigned getNumIterSpaceDims();
 
     AffineMap computeCanonicalInputIterSpaceMap(unsigned inputIndex,
@@ -949,7 +960,7 @@ def TensorIR_DimOp : TensorIR_Op<"dim", [Pure, OpAsmOpInterface]> {
 
 // SplatOp takes a scalar input rather than a tensor, so it overrides the
 // IterationSpaceInfoInterface methods that assume tensor operands.
-def TensorIR_SplatOp : TensorIR_PointWiseOpBase<"splat", [
+def TensorIR_SplatOp : TensorIR_PureTensorOpBase<"splat", [
     DynamicDimsOpInterface,
     DeclareOpInterfaceMethods<IterationSpaceInfoInterface, [
       "getNumIterSpaceDims",
@@ -982,7 +993,6 @@ def TensorIR_SplatOp : TensorIR_PointWiseOpBase<"splat", [
 
   let arguments = (ins AnyTypeOf<[AnyInteger, AnyFloat]>:$input,
                        Variadic<Index>:$dynamic_sizes);
-  // Note: results already defined in TensorIR_PointWiseOpBase
 
   let assemblyFormat = [{
     $input
@@ -992,7 +1002,7 @@ def TensorIR_SplatOp : TensorIR_PointWiseOpBase<"splat", [
   let hasCanonicalizer = 1;
 }
 
-def TensorIR_BroadcastOp : TensorIR_PointWiseOpBase<"broadcast", [
+def TensorIR_BroadcastOp : TensorIR_PureTensorOpBase<"broadcast", [
     DynamicDimsOpInterface,
     DeclareOpInterfaceMethods<LayoutPropInterface, ["inferResultLayout"]>,
     DeclareOpInterfaceMethods<IterationSpaceInfoInterface, ["isIterationSpaceTransition"]>

@@ -19,8 +19,6 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/Ptr/IR/PtrAttrs.h"
-#include "mlir/Dialect/Ptr/IR/PtrDialect.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/SymbolTable.h"
 
@@ -59,9 +57,8 @@ getMemRefType(Type type, const TensorDescriptor &descriptor, Location loc) {
                     });
     layout = StridedLayoutAttr::get(type.getContext(), /*offset=*/0, strides);
   }
-  auto memorySpace = ptr::GenericSpaceAttr::get(type.getContext());
   return MemRefType::get(tensorType.getShape(), tensorType.getElementType(),
-                         layout, memorySpace);
+                         layout);
 }
 
 static void copySchedulingMetadata(GraphOp graph, func::FuncOp function) {

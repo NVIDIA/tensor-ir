@@ -96,6 +96,19 @@ nv_tensor_ir.graph @binaryOpTestGraph(
 }
 
 // -----
+// A bare scalar argument must be splatted to a tensor before reaching a
+// pointwise op; it is not implicitly broadcast.
+nv_tensor_ir.graph @scalarArgNeedsSplatGraph(
+  %lhs: tensor<10xf32>,
+  // expected-note@below{{prior use here}}
+  %rhs: f32
+) -> tensor<10xf32> {
+  // expected-error @below {{use of value '%rhs' expects different type than prior uses: 'tensor<10xf32>' vs 'f32'}}
+  %res = add %lhs, %rhs : tensor<10xf32>
+  results %res: tensor<10xf32>
+}
+
+// -----
 nv_tensor_ir.graph @broadcastTestGraph1(
   // expected-note@below{{prior use here}}
   %lhs: tensor<1x?xf32> {nv_tensor_ir.stride = "(?,1)"},
@@ -257,7 +270,7 @@ nv_tensor_ir.graph @broadcastNoOp(
 nv_tensor_ir.graph @ConvertOp(
   %input: tensor<16x1x64xf32>
 ) -> (tensor<16x2x64xf64>){
-  // expected-error @below {{'nv_tensor_ir.convert' op requires the same shape for all operands and results}}
+  // expected-error @below {{'nv_tensor_ir.convert' op all non-scalar operands/results must have the same shape and base type}}
   %1 = convert %input : tensor<16x1x64xf32> -> tensor<16x2x64xf64>
   results %1 : tensor<16x2x64xf64>
 }
@@ -266,7 +279,7 @@ nv_tensor_ir.graph @ConvertOp(
 nv_tensor_ir.graph @ConvertOp(
   %input: tensor<16x1x64xf32>
 ) -> (tensor<16x64xf64>){
-  // expected-error @below {{'nv_tensor_ir.convert' op requires the same shape for all operands and results}}
+  // expected-error @below {{'nv_tensor_ir.convert' op all non-scalar operands/results must have the same shape and base type}}
   %1 = convert %input : tensor<16x1x64xf32> -> tensor<16x64xf64>
   results %1 : tensor<16x64xf64>
 }
@@ -275,7 +288,7 @@ nv_tensor_ir.graph @ConvertOp(
 nv_tensor_ir.graph @ConvertOp(
   %input: tensor<?x?x?xf32>
 ) -> (tensor<?x?xf64>){
-  // expected-error @below {{'nv_tensor_ir.convert' op requires the same shape for all operands and results}}
+  // expected-error @below {{'nv_tensor_ir.convert' op all non-scalar operands/results must have the same shape and base type}}
   %1 = convert %input : tensor<?x?x?xf32> -> tensor<?x?xf64>
   results %1 : tensor<?x?xf64>
 }

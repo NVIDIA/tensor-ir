@@ -8,80 +8,91 @@ namespace tiling_analysis {
 namespace {
 
 static const ArchInfo archInfoSm80 = {
-    .maxBlocksPerSM = 32,
-    .maxWarpsPerSM = 64,
-    .maxSharedMemoryPerSM = 164,
-    .tensorCoreVersions = kMMAv2,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/32,
+    /*maxWarpsPerSM=*/64,
+    /*maxSharedMemoryPerSM=*/164,
+    /*tensorCoreVersions=*/kMMAv2,
 };
 
 static const ArchInfo archInfoSm86 = {
-    .maxBlocksPerSM = 16,
-    .maxWarpsPerSM = 48,
-    .maxSharedMemoryPerSM = 100,
-    .tensorCoreVersions = kMMAv2,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/16,
+    /*maxWarpsPerSM=*/48,
+    /*maxSharedMemoryPerSM=*/100,
+    /*tensorCoreVersions=*/kMMAv2,
 };
 
 static const ArchInfo archInfoSm87 = {
-    .maxBlocksPerSM = 16,
-    .maxWarpsPerSM = 48,
-    .maxSharedMemoryPerSM = 164,
-    .tensorCoreVersions = kMMAv2,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/16,
+    /*maxWarpsPerSM=*/48,
+    /*maxSharedMemoryPerSM=*/164,
+    /*tensorCoreVersions=*/kMMAv2,
 };
 
 static const ArchInfo archInfoSm89 = {
-    .maxBlocksPerSM = 24,
-    .maxWarpsPerSM = 48,
-    .maxSharedMemoryPerSM = 100,
-    .tensorCoreVersions = kMMAv2,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/24,
+    /*maxWarpsPerSM=*/48,
+    /*maxSharedMemoryPerSM=*/100,
+    /*tensorCoreVersions=*/kMMAv2,
 };
 
 static const ArchInfo archInfoSm90 = {
-    .maxBlocksPerSM = 32,
-    .maxWarpsPerSM = 64,
-    .maxSharedMemoryPerSM = 228,
-    .tensorCoreVersions = kMMAv2 | kMMAv3,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/32,
+    /*maxWarpsPerSM=*/64,
+    /*maxSharedMemoryPerSM=*/228,
+    /*tensorCoreVersions=*/kMMAv2 | kMMAv3,
 };
 
 static const ArchInfo archInfoSm100 = {
-    .maxBlocksPerSM = 32,
-    .maxWarpsPerSM = 64,
-    .maxSharedMemoryPerSM = 228,
-    .tensorCoreVersions = kMMAv2 | kMMAv5,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/32,
+    /*maxWarpsPerSM=*/64,
+    /*maxSharedMemoryPerSM=*/228,
+    /*tensorCoreVersions=*/kMMAv2 | kMMAv5,
 };
 
 static const ArchInfo archInfoSm103 = {
-    .maxBlocksPerSM = 32,
-    .maxWarpsPerSM = 64,
-    .maxSharedMemoryPerSM = 228,
-    .tensorCoreVersions = kMMAv2 | kMMAv5,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/32,
+    /*maxWarpsPerSM=*/64,
+    /*maxSharedMemoryPerSM=*/228,
+    /*tensorCoreVersions=*/kMMAv2 | kMMAv5,
 };
 
 static const ArchInfo archInfoSm110 = {
-    .maxBlocksPerSM = 24,
-    .maxWarpsPerSM = 48,
-    .maxSharedMemoryPerSM = 228,
-    .tensorCoreVersions = kMMAv2 | kMMAv5,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/24,
+    /*maxWarpsPerSM=*/48,
+    /*maxSharedMemoryPerSM=*/228,
+    /*tensorCoreVersions=*/kMMAv2 | kMMAv5,
 };
 
 static const ArchInfo archInfoSm120 = {
-    .maxBlocksPerSM = 24,
-    .maxWarpsPerSM = 48,
-    .maxSharedMemoryPerSM = 100,
-    .tensorCoreVersions = kMMAv2,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/24,
+    /*maxWarpsPerSM=*/48,
+    /*maxSharedMemoryPerSM=*/100,
+    /*tensorCoreVersions=*/kMMAv2,
 };
 
 static const ArchInfo archInfoSm121 = {
-    .maxBlocksPerSM = 24,
-    .maxWarpsPerSM = 48,
-    .maxSharedMemoryPerSM = 100,
-    .tensorCoreVersions = kMMAv2,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/24,
+    /*maxWarpsPerSM=*/48,
+    /*maxSharedMemoryPerSM=*/100,
+    /*tensorCoreVersions=*/kMMAv2,
 };
 
 static const ArchInfo archInfoGeneric = {
-    .maxBlocksPerSM = 16,
-    .maxWarpsPerSM = 48,
-    .maxSharedMemoryPerSM = 100,
-    .tensorCoreVersions = 0,
+    /*numSMs=*/0,
+    /*maxBlocksPerSM=*/16,
+    /*maxWarpsPerSM=*/48,
+    /*maxSharedMemoryPerSM=*/100,
+    /*tensorCoreVersions=*/0,
 };
 
 ArchInfo getArchInfo(ComputeCapability cc) {

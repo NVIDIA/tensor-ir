@@ -423,6 +423,22 @@ nv_tensor_ir.graph @splatTestGraph(
   results %1 : tensor<16x1x64xf16>
 }
 
+// A bare scalar graph argument, once splatted, can feed a pointwise op
+// alongside a real tensor operand.
+// CHECK-LABEL: nv_tensor_ir.graph @scalarArgSplatThenAddGraph
+// CHECK-SAME: %[[arg0:.*]]: tensor<10xf32>,
+// CHECK-SAME: %[[arg1:.*]]: f32
+nv_tensor_ir.graph @scalarArgSplatThenAddGraph(
+  %lhs: tensor<10xf32>,
+  %rhs: f32
+) -> (tensor<10xf32>) {
+  // CHECK: %[[splat:.*]] = splat %[[arg1]] : tensor<10xf32>
+  %rhs_splat = splat %rhs : tensor<10xf32>
+  // CHECK: %[[res:.*]] = add %[[arg0]], %[[splat]] : tensor<10xf32>
+  %res = add %lhs, %rhs_splat : tensor<10xf32>
+  results %res : tensor<10xf32>
+}
+
 // Binary Select Operation
 // CHECK-LABEL: nv_tensor_ir.graph @binarySelectTestGraph
 // CHECK-SAME: %[[arg0:.*]]: tensor<10xi1>,

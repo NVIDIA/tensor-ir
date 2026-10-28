@@ -11,7 +11,7 @@
 using namespace tensor_ir::rt;
 
 bool tensor_ir::rt::detail::packOperandIntoInt64Slot(
-    void *ptr, int64_t &slot, bool scalar, int32_t scalarBytes,
+    const void *ptr, int64_t &slot, bool scalar, int32_t scalarBytes,
     bool allowUnresolvedPointers) {
   if (!ptr && !allowUnresolvedPointers) {
     return false;

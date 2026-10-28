@@ -13,8 +13,11 @@ from .tracing import (
     NodeKind,
     TensorInfo,
     TraceGraph,
+    TraceOpEnum,
+    TracedScalar,
     TracedTensor,
     UnaryOp,
+    _binary as _trace_binary,
     _check_binary_tensor_types,
     _check_same_graph,
     _check_same_tensor_shape,
@@ -23,6 +26,7 @@ from .tracing import (
     _contiguous_stride,
     _current_trace_graph,
     _matmul as _trace_matmul,
+    _promote_and_broadcast_to,
     _trace_graph_context,
 )
 
@@ -113,6 +117,20 @@ def _shape_tuple(shape: object, op_name: str) -> tuple[int, ...]:
     return parsed
 
 
+def _result_shape_kwargs(
+    dynamic_dimensions: tuple[bool | None, ...] | None, rank: int
+) -> dict[str, object]:
+    if dynamic_dimensions is None:
+        return {}
+    if not isinstance(dynamic_dimensions, tuple) or any(
+        flag is not None and type(flag) is not bool for flag in dynamic_dimensions
+    ):
+        raise TypeError("dynamic_dimensions must be a tuple of bool or None")
+    if len(dynamic_dimensions) != rank:
+        raise ValueError("dynamic_dimensions must have one entry per result dimension")
+    return {"dynamic_dimensions": dynamic_dimensions}
+
+
 def _num_elements(shape: tuple[int, ...]) -> int:
     total = 1
     for dim in shape:
@@ -153,25 +171,39 @@ def _dimensions(values: object, rank: int, op_name: str) -> tuple[int, ...]:
     return parsed
 
 
-def _unary(op: UnaryOp, value: object) -> TracedTensor:
-    op_name = op.value
-    tensor = _ensure_traced(value, op_name)
-    return tensor._graph.add_node(NodeKind.UNARY, op, (tensor._id,), tensor.tensor_info)
-
-
-def _unary_with_beta(op: UnaryOp, value: object, beta: float) -> TracedTensor:
+def _unary(op: TraceOpEnum, value: object, **kwargs: object) -> TracedTensor:
     op_name = op.value
     tensor = _ensure_traced(value, op_name)
     return tensor._graph.add_node(
-        NodeKind.UNARY,
-        op,
-        (tensor._id,),
-        tensor.tensor_info,
-        kwargs={"beta": float(beta)},
+        NodeKind.UNARY, op, (tensor._id,), tensor.tensor_info, kwargs=kwargs
     )
 
 
-def _binary(op: BinaryOp, lhs: object, rhs: object) -> TracedTensor:
+def _unary_with_beta(op: TraceOpEnum, value: object, beta: float) -> TracedTensor:
+    tensor = _ensure_traced(value, op.value)
+    return _unary(op, tensor, beta=float(beta))
+
+
+def _binary(op: TraceOpEnum, lhs: object, rhs: object) -> TracedTensor:
+    op_name = op.value
+    lhs_is_scalar = isinstance(lhs, TracedScalar)
+    rhs_is_scalar = isinstance(rhs, TracedScalar)
+
+    if lhs_is_scalar and not rhs_is_scalar:
+        rhs_tensor = _ensure_traced(rhs, op_name)
+        lhs_tensor = _promote_and_broadcast_to(lhs, rhs_tensor)
+    elif rhs_is_scalar and not lhs_is_scalar:
+        lhs_tensor = _ensure_traced(lhs, op_name)
+        rhs_tensor = _promote_and_broadcast_to(rhs, lhs_tensor)
+    else:
+        lhs_tensor = _ensure_traced(lhs, op_name)
+        rhs_tensor = _ensure_traced(rhs, op_name)
+    return _trace_binary(lhs_tensor, rhs_tensor, op)
+
+
+def _binary_with_beta(
+    op: TraceOpEnum, lhs: object, rhs: object, beta: float
+) -> TracedTensor:
     op_name = op.value
     lhs_tensor = _ensure_traced(lhs, op_name)
     rhs_tensor = _ensure_traced(rhs, op_name)
@@ -182,6 +214,7 @@ def _binary(op: BinaryOp, lhs: object, rhs: object) -> TracedTensor:
         op,
         (lhs_tensor._id, rhs_tensor._id),
         lhs_tensor.tensor_info,
+        kwargs={"beta": float(beta)},
     )
 
 
@@ -205,12 +238,7 @@ def _logical_not(value: object) -> TracedTensor:
     tensor = _ensure_traced(value, "logical_not")
     if tensor.tensor_info.dtype != DataType.BOOL:
         raise TypeError("tir.logical_not expects an i1 tensor operand")
-    return tensor._graph.add_node(
-        NodeKind.UNARY,
-        UnaryOp.LOGICAL_NOT,
-        (tensor._id,),
-        tensor.tensor_info,
-    )
+    return _unary(UnaryOp.LOGICAL_NOT, tensor)
 
 
 def relu(value: object) -> TracedTensor:
@@ -246,13 +274,7 @@ def exp(value: object, *, rounding_mode: str = "full") -> TracedTensor:
         raise TypeError("tir.exp rounding_mode requires floating-point input")
     if rounding_mode == "approx" and dtype == DataType.F64:
         raise ValueError("tir.exp approx rounding_mode does not support FP64")
-    return tensor._graph.add_node(
-        NodeKind.UNARY,
-        UnaryOp.EXP,
-        (tensor._id,),
-        tensor.tensor_info,
-        kwargs={"rounding_mode": rounding_mode},
-    )
+    return _unary(UnaryOp.EXP, tensor, rounding_mode=rounding_mode)
 
 
 def floor(value: object) -> TracedTensor:
@@ -314,15 +336,29 @@ def elu(value: object, *, beta: float = 1.0) -> TracedTensor:
     return _unary_with_beta(UnaryOp.ELU_FWD, value, beta)
 
 
-def convert(value: object, *, dtype: object) -> TracedTensor:
+def convert(
+    value: object,
+    *,
+    dtype: object,
+    dynamic_dimensions: tuple[bool | None, ...] | None = None,
+) -> TracedTensor:
     tensor = _ensure_traced(value, "convert")
     result_info = replace(tensor.tensor_info, dtype=normalize_dtype(dtype))
     return tensor._graph.add_node(
-        NodeKind.CONVERT, "convert", (tensor._id,), result_info
+        NodeKind.CONVERT,
+        "convert",
+        (tensor._id,),
+        result_info,
+        kwargs=_result_shape_kwargs(dynamic_dimensions, len(result_info.shape)),
     )
 
 
-def reshape(value: object, *, shape: object) -> TracedTensor:
+def reshape(
+    value: object,
+    *,
+    shape: object,
+    dynamic_dimensions: tuple[bool | None, ...] | None = None,
+) -> TracedTensor:
     tensor = _ensure_traced(value, "reshape")
     result_shape = _shape_tuple(shape, "reshape")
     if _num_elements(result_shape) != _num_elements(tensor.tensor_info.shape):
@@ -337,6 +373,7 @@ def reshape(value: object, *, shape: object) -> TracedTensor:
         MovementOp.RESHAPE,
         (tensor._id,),
         result_info,
+        kwargs=_result_shape_kwargs(dynamic_dimensions, len(result_shape)),
     )
 
 
@@ -357,7 +394,12 @@ def transpose(value: object, *, permutation: object) -> TracedTensor:
     )
 
 
-def broadcast(value: object, *, shape: object) -> TracedTensor:
+def broadcast(
+    value: object,
+    *,
+    shape: object,
+    dynamic_dimensions: tuple[bool | None, ...] | None = None,
+) -> TracedTensor:
     tensor = _ensure_traced(value, "broadcast")
     result_shape = _shape_tuple(shape, "broadcast")
     if len(result_shape) != len(tensor.tensor_info.shape):
@@ -384,6 +426,7 @@ def broadcast(value: object, *, shape: object) -> TracedTensor:
         MovementOp.BROADCAST,
         (tensor._id,),
         result_info,
+        kwargs=_result_shape_kwargs(dynamic_dimensions, len(result_shape)),
     )
 
 
@@ -725,14 +768,26 @@ def constant(value: object, *, shape: object, dtype: DataType) -> TracedTensor:
     )
 
 
-def splat(value: object, *, shape: object, dtype: DataType) -> TracedTensor:
-    """Splat a scalar value into a statically shaped tensor."""
-    if isinstance(value, TracedTensor):
-        raise TypeError("splat value must be a Python scalar")
+def splat(
+    value: object,
+    *,
+    shape: object,
+    dtype: DataType,
+    dynamic_dimensions: tuple[bool | None, ...] | None = None,
+) -> TracedTensor:
+    """Splat a Python or traced scalar into a statically shaped tensor."""
     splat_shape = _shape_tuple(shape, "splat")
     splat_dtype = normalize_dtype(dtype)
-    graph = _current_trace_graph("splat")
-    scalar = _constant(graph, splat_dtype, value)
+    if isinstance(value, TracedScalar):
+        if value.dtype != splat_dtype:
+            raise TypeError("splat traced value and result must have the same dtype")
+        graph = value._graph
+        scalar = value
+    elif isinstance(value, TracedTensor):
+        raise TypeError("splat traced value must be a scalar")
+    else:
+        graph = _current_trace_graph("splat")
+        scalar = _constant(graph, splat_dtype, value)
     return graph.add_node(
         NodeKind.SPLAT,
         "splat",
@@ -743,6 +798,7 @@ def splat(value: object, *, shape: object, dtype: DataType) -> TracedTensor:
             shape=splat_shape,
             stride=_contiguous_stride(splat_shape),
         ),
+        kwargs=_result_shape_kwargs(dynamic_dimensions, len(splat_shape)),
     )
 
 

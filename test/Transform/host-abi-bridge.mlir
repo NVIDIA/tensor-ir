@@ -4,30 +4,30 @@
 module attributes {gpu.container_module} {
 
   // CHECK-LABEL: func.func private @dispatch(
-  // CHECK-SAME: %{{[^:]+}}: !llvm.ptr {nv_tensor_ir.runtime_context}, %{{[^:]+}}: memref<4xf32, #ptr.generic_space>, %{{[^:]+}}: f32) -> i32
+  // CHECK-SAME: %{{[^:]+}}: !llvm.ptr {nv_tensor_ir.runtime_context}, %{{[^:]+}}: memref<4xf32>, %{{[^:]+}}: f32) -> i32
   // CHECK: %[[OK:.*]] = arith.constant 0 : i32
   // CHECK: return %[[OK]] : i32
-  func.func @dispatch(%a: memref<4xf32, #ptr.generic_space>, %scale: f32) {
+  func.func @dispatch(%a: memref<4xf32>, %scale: f32) {
     %one = arith.constant 1 : index
     gpu.launch_func @kernels::@first blocks in (%one, %one, %one)
         threads in (%one, %one, %one)
-        args(%a : memref<4xf32, #ptr.generic_space>, %scale : f32)
+        args(%a : memref<4xf32>, %scale : f32)
     gpu.launch_func @kernels::@second blocks in (%one, %one, %one)
         threads in (%one, %one, %one)
     gpu.launch_func @kernels::@first blocks in (%one, %one, %one)
         threads in (%one, %one, %one)
-        args(%a : memref<4xf32, #ptr.generic_space>, %scale : f32)
+        args(%a : memref<4xf32>, %scale : f32)
     return
   }
 
   // CHECK-LABEL: func.func private @cycle1(
-  // CHECK-SAME: %[[CTX:[^:]+]]: !llvm.ptr {nv_tensor_ir.runtime_context}, %[[A:[^:]+]]: memref<4xf32, #ptr.generic_space>, %[[SCALE:[^:]+]]: f32) -> i32
-  // CHECK: %[[S2:.*]] = call @cycle2(%[[CTX]], %[[A]], %[[SCALE]]) : (!llvm.ptr, memref<4xf32, #ptr.generic_space>, f32) -> i32
+  // CHECK-SAME: %[[CTX:[^:]+]]: !llvm.ptr {nv_tensor_ir.runtime_context}, %[[A:[^:]+]]: memref<4xf32>, %[[SCALE:[^:]+]]: f32) -> i32
+  // CHECK: %[[S2:.*]] = call @cycle2(%[[CTX]], %[[A]], %[[SCALE]]) : (!llvm.ptr, memref<4xf32>, f32) -> i32
   // CHECK: %[[ZERO:.*]] = arith.constant 0 : i32
   // CHECK: %[[FAILED2:.*]] = arith.cmpi ne, %[[S2]], %[[ZERO]] : i32
   // CHECK: cf.cond_br %[[FAILED2]], ^[[FAIL:bb[0-9]+]](%[[S2]] : i32), ^[[NEXT:bb[0-9]+]]
   // CHECK: ^[[NEXT]]:
-  // CHECK: %[[S1:.*]] = call @cycle1(%[[CTX]], %[[A]], %[[SCALE]]) : (!llvm.ptr, memref<4xf32, #ptr.generic_space>, f32) -> i32
+  // CHECK: %[[S1:.*]] = call @cycle1(%[[CTX]], %[[A]], %[[SCALE]]) : (!llvm.ptr, memref<4xf32>, f32) -> i32
   // CHECK: %[[FAILED1:.*]] = arith.cmpi ne, %[[S1]], %{{.*}} : i32
   // CHECK: cf.cond_br %[[FAILED1]], ^[[FAIL]](%[[S1]] : i32), ^[[DONE:bb[0-9]+]]
   // CHECK: ^[[DONE]]:
@@ -35,19 +35,19 @@ module attributes {gpu.container_module} {
   // CHECK: return %[[OK]] : i32
   // CHECK: ^[[FAIL]](%[[STATUS:[^:]+]]: i32):
   // CHECK-NEXT: return %[[STATUS]] : i32
-  func.func @cycle1(%a: memref<4xf32, #ptr.generic_space>, %scale: f32) {
+  func.func @cycle1(%a: memref<4xf32>, %scale: f32) {
     %one = arith.constant 1 : index
     gpu.launch_func @kernels::@first blocks in (%one, %one, %one)
         threads in (%one, %one, %one)
-        args(%a : memref<4xf32, #ptr.generic_space>, %scale : f32)
-    call @cycle2(%a, %scale) : (memref<4xf32, #ptr.generic_space>, f32) -> ()
-    call @cycle1(%a, %scale) : (memref<4xf32, #ptr.generic_space>, f32) -> ()
+        args(%a : memref<4xf32>, %scale : f32)
+    call @cycle2(%a, %scale) : (memref<4xf32>, f32) -> ()
+    call @cycle1(%a, %scale) : (memref<4xf32>, f32) -> ()
     return
   }
 
   // CHECK-LABEL: func.func private @cycle2(
-  // CHECK-SAME: %{{[^:]+}}: !llvm.ptr {nv_tensor_ir.runtime_context}, %{{[^:]+}}: memref<4xf32, #ptr.generic_space>, %{{[^:]+}}: f32) -> i32
-  func.func @cycle2(%a: memref<4xf32, #ptr.generic_space>, %scale: f32) {
+  // CHECK-SAME: %{{[^:]+}}: !llvm.ptr {nv_tensor_ir.runtime_context}, %{{[^:]+}}: memref<4xf32>, %{{[^:]+}}: f32) -> i32
+  func.func @cycle2(%a: memref<4xf32>, %scale: f32) {
     %one = arith.constant 1 : index
     gpu.launch_func @kernels::@second blocks in (%one, %one, %one)
         threads in (%one, %one, %one)
@@ -120,10 +120,10 @@ module attributes {gpu.container_module} {
 
   // Device kernels keep their signatures.
   // CHECK-LABEL: gpu.module @kernels
-  // CHECK: func.func @first(%{{[^:]+}}: memref<4xf32, #ptr.generic_space>, %{{[^:]+}}: f32) attributes {gpu.kernel}
+  // CHECK: func.func @first(%{{[^:]+}}: memref<4xf32>, %{{[^:]+}}: f32) attributes {gpu.kernel}
   // CHECK: func.func @second() attributes {gpu.kernel}
   gpu.module @kernels {
-    func.func @first(%a: memref<4xf32, #ptr.generic_space>, %scale: f32) attributes {gpu.kernel} { return }
+    func.func @first(%a: memref<4xf32>, %scale: f32) attributes {gpu.kernel} { return }
     func.func @second() attributes {gpu.kernel} { return }
   }
 
@@ -149,22 +149,22 @@ module attributes {gpu.container_module} {
 // CHECK: %[[STRIDE:.*]] = llvm.load %[[STRIDE_SLOT]] : !llvm.ptr -> i64
 // CHECK: %[[WITH_SIZE:.*]] = llvm.insertvalue %[[SIZE]], %{{.*}}[3, 0]
 // CHECK: %[[DESC:.*]] = llvm.insertvalue %[[STRIDE]], %[[WITH_SIZE]][4, 0]
-// CHECK: %[[MEMREF:.*]] = builtin.unrealized_conversion_cast %[[DESC]] : {{.*}} to memref<4xf32, #ptr.generic_space>
+// CHECK: %[[MEMREF:.*]] = builtin.unrealized_conversion_cast %[[DESC]] : {{.*}} to memref<4xf32>
 // CHECK: %[[SCALE_SLOT:.*]] = llvm.getelementptr %[[PACKED]][3]
 // CHECK: %[[SCALE_BITS:.*]] = llvm.load %[[SCALE_SLOT]] : !llvm.ptr -> i64
 // CHECK: %[[SCALE_I32:.*]] = llvm.trunc %[[SCALE_BITS]] : i64 to i32
 // CHECK: %[[SCALE:.*]] = llvm.bitcast %[[SCALE_I32]] : i32 to f32
-// CHECK: %[[STATUS:.*]] = call @dispatch(%[[RUNTIME]], %[[MEMREF]], %[[SCALE]]) : (!llvm.ptr, memref<4xf32, #ptr.generic_space>, f32) -> i32
+// CHECK: %[[STATUS:.*]] = call @dispatch(%[[RUNTIME]], %[[MEMREF]], %[[SCALE]]) : (!llvm.ptr, memref<4xf32>, f32) -> i32
 // CHECK: return %[[STATUS]] : i32
 
 // CHECK-LABEL: func.func @tensor_ir_host_entry_cycle1_v1(
 // CHECK-SAME: %[[RUNTIME:[^:]+]]: !llvm.ptr
-// CHECK: %[[STATUS:.*]] = call @cycle1(%[[RUNTIME]], %{{.*}}, %{{.*}}) : (!llvm.ptr, memref<4xf32, #ptr.generic_space>, f32) -> i32
+// CHECK: %[[STATUS:.*]] = call @cycle1(%[[RUNTIME]], %{{.*}}, %{{.*}}) : (!llvm.ptr, memref<4xf32>, f32) -> i32
 // CHECK: return %[[STATUS]] : i32
 
 // CHECK-LABEL: func.func @tensor_ir_host_entry_cycle2_v1(
 // CHECK-SAME: %[[RUNTIME:[^:]+]]: !llvm.ptr
-// CHECK: %[[STATUS:.*]] = call @cycle2(%[[RUNTIME]], %{{.*}}, %{{.*}}) : (!llvm.ptr, memref<4xf32, #ptr.generic_space>, f32) -> i32
+// CHECK: %[[STATUS:.*]] = call @cycle2(%[[RUNTIME]], %{{.*}}, %{{.*}}) : (!llvm.ptr, memref<4xf32>, f32) -> i32
 // CHECK: return %[[STATUS]] : i32
 // CHECK-NOT: func.func
 

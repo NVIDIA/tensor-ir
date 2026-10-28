@@ -17,11 +17,13 @@ add_tensor_ir_library(NVTensorIRTransform
   CudaTileInsertGdcWait.cpp
   DiscoverIterationSpaceInfo.cpp
   FormGrid.cpp
+  StaticPersistence.cpp
   TileReductions.cpp
   MaterializeDefaultStrides.cpp
   OutlineKernel.cpp
   TileAnalyzerPass.cpp
   TileSelectionPass.cpp
+  RewriteUnsupportedOps.cpp
 
   DEPENDS
   NVTensorIRTransformPassesIncGen
@@ -32,9 +34,11 @@ add_tensor_ir_library(NVTensorIRTransform
   MLIRArithDialect
   MLIRArithToLLVM
   MLIRArithTransforms
+  MLIRArithUtils
   MLIRBufferizationDialect
   MLIRControlFlowDialect
   MLIRControlFlowToLLVM
+  MLIRDialectUtils
   MLIRFuncDialect
   MLIRFuncToLLVM
   MLIRGPUDialect

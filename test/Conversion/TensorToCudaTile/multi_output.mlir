@@ -14,9 +14,9 @@
 // CHECK: %[[Y_VIEW:.+]] = make_tensor_view %[[Y_PTR]], shape = [64, 16], strides = [16, 1]
 // CHECK: %[[Y_PART:.+]] = make_partition_view %[[Y_VIEW]]
 // CHECK: store_view_tko weak %[[Y_RESULT]], %[[Y_PART]][%[[ROW]], %[[ZERO]]] : tile<32x16xf32>
+// CHECK: %[[COMPACT:.+]] = extract %[[BCAST]][%[[ZERO]], %[[ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: %[[S_VIEW:.+]] = make_tensor_view %[[STAT_PTR]], shape = [64, 1], strides = [1, 2]
 // CHECK: %[[S_PART:.+]] = make_partition_view %[[S_VIEW]]
-// CHECK: %[[COMPACT:.+]] = extract %[[BCAST]][%[[ZERO]], %[[ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: store_view_tko weak %[[COMPACT]], %[[S_PART]][%[[ROW]], %[[ZERO]]] : tile<32x1xf32>
 nv_tensor_ir.graph @rmsnorm_fwd_train(
     %x: tensor<64x16xf32> {nv_tensor_ir.stride = "(16,1)"},
@@ -47,9 +47,9 @@ nv_tensor_ir.graph @rmsnorm_fwd_train(
 // CHECK: %[[REDUCE:.+]] = reduce {{.*}} : tile<32x16xf32> -> tile<32xf32>
 // CHECK: %[[RESHAPE:.+]] = reshape %[[REDUCE]] : tile<32xf32> -> tile<32x1xf32>
 // CHECK: %[[BCAST:.+]] = broadcast %[[RESHAPE]] : tile<32x1xf32> -> tile<32x16xf32>
+// CHECK: %[[COMPACT:.+]] = extract %[[BCAST]][%[[ZERO]], %[[ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: %[[RS_VIEW:.+]] = make_tensor_view %[[RSTAT_PTR]], shape = [64, 1], strides = [1, 2]
 // CHECK: %[[RS_PART:.+]] = make_partition_view %[[RS_VIEW]]
-// CHECK: %[[COMPACT:.+]] = extract %[[BCAST]][%[[ZERO]], %[[ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: store_view_tko weak %[[COMPACT]], %[[RS_PART]][%[[ROW]], %[[ZERO]]] : tile<32x1xf32>
 // CHECK: %[[RY_RESULT:.+]] = mulf {{.*}}, %[[BCAST]] : tile<32x16xf32>
 // CHECK: %[[RY_VIEW:.+]] = make_tensor_view %[[RY_PTR]], shape = [64, 16], strides = [16, 1]
@@ -90,9 +90,9 @@ nv_tensor_ir.graph @rmsnorm_fwd_train_reversed(
 // CHECK: %[[TY_VIEW:.+]] = make_tensor_view %[[TY_PTR]], shape = [64, 16], strides = [16, 1]
 // CHECK: %[[TY_PART:.+]] = make_partition_view %[[TY_VIEW]]
 // CHECK: store_view_tko weak %[[TY_RESULT]], %[[TY_PART]][%[[ROW]], %[[ZERO]]] : tile<32x16xf32>
+// CHECK: %[[COMPACT:.+]] = extract %[[BCAST]][%[[ZERO]], %[[ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: %[[TR_VIEW:.+]] = make_tensor_view %[[TR_PTR]], shape = [64, 1], strides = [1, 2]
 // CHECK: %[[TR_PART:.+]] = make_partition_view %[[TR_VIEW]] : partition_view<tile=(32x1), tensor_view<64x1xf32, strides=[1,2]>>
-// CHECK: %[[COMPACT:.+]] = extract %[[BCAST]][%[[ZERO]], %[[ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: store_view_tko weak %[[COMPACT]], %[[TR_PART]][%[[ROW]], %[[ZERO]]] : tile<32x1xf32>
 // CHECK-NOT: = transpose
 nv_tensor_ir.graph @rmsnorm_fwd_train_transposed_statistic(
@@ -123,9 +123,9 @@ nv_tensor_ir.graph @rmsnorm_fwd_train_transposed_statistic(
 // CHECK-DAG: %[[REV_ZERO:.+]] = constant <i32: 0>
 // CHECK: %[[REV_ROW:.+]], %{{.+}}, %{{.+}} = get_tile_block_id
 // CHECK: %[[REV_BCAST:.+]] = broadcast {{.*}} : tile<32x1xf32> -> tile<32x16xf32>
+// CHECK: %[[REV_COMPACT:.+]] = extract %[[REV_BCAST]][%[[REV_ZERO]], %[[REV_ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: %[[REV_TR_VIEW:.+]] = make_tensor_view %[[REV_TR_PTR]], shape = [64, 1], strides = [1, 2]
 // CHECK: %[[REV_TR_PART:.+]] = make_partition_view %[[REV_TR_VIEW]]
-// CHECK: %[[REV_COMPACT:.+]] = extract %[[REV_BCAST]][%[[REV_ZERO]], %[[REV_ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: store_view_tko weak %[[REV_COMPACT]], %[[REV_TR_PART]][%[[REV_ROW]], %[[REV_ZERO]]] : tile<32x1xf32>
 // CHECK: %[[REV_Y_RESULT:.+]] = mulf {{.*}}, %[[REV_BCAST]] : tile<32x16xf32>
 // CHECK: %[[REV_Y_VIEW:.+]] = make_tensor_view %[[REV_Y_PTR]], shape = [64, 16], strides = [16, 1]
@@ -160,9 +160,9 @@ nv_tensor_ir.graph @transposed_statistic_reversed(
 // CHECK: %[[EQ_Y_VIEW:.+]] = make_tensor_view %[[EQ_Y_PTR]], shape = [16, 16], strides = [16, 1]
 // CHECK: %[[EQ_Y_PART:.+]] = make_partition_view %[[EQ_Y_VIEW]]
 // CHECK: store_view_tko weak %[[EQ_Y_RESULT]], %[[EQ_Y_PART]][%[[EQ_ROW]], %[[EQ_ZERO]]] : tile<8x16xf32>
+// CHECK: %[[EQ_COMPACT:.+]] = extract %[[EQ_BCAST]][%[[EQ_ZERO]], %[[EQ_ZERO]]] : tile<8x16xf32> -> tile<8x1xf32>
 // CHECK: %[[EQ_VIEW:.+]] = make_tensor_view %[[EQ_TR_PTR]], shape = [16, 1], strides = [1, 2]
 // CHECK: %[[EQ_PART:.+]] = make_partition_view %[[EQ_VIEW]]
-// CHECK: %[[EQ_COMPACT:.+]] = extract %[[EQ_BCAST]][%[[EQ_ZERO]], %[[EQ_ZERO]]] : tile<8x16xf32> -> tile<8x1xf32>
 // CHECK: store_view_tko weak %[[EQ_COMPACT]], %[[EQ_PART]][%[[EQ_ROW]], %[[EQ_ZERO]]] : tile<8x1xf32>
 // CHECK-NOT: = transpose
 nv_tensor_ir.graph @transposed_statistic_equal_extents(
@@ -193,9 +193,9 @@ nv_tensor_ir.graph @transposed_statistic_equal_extents(
 // CHECK: %[[ER_Y_VIEW:.+]] = make_tensor_view %[[ER_Y_PTR]], shape = [16, 16], strides = [16, 1]
 // CHECK: %[[ER_Y_PART:.+]] = make_partition_view %[[ER_Y_VIEW]]
 // CHECK: store_view_tko weak %[[ER_Y_RESULT]], %[[ER_Y_PART]][%[[EQ_RESHAPE_ROW]], %[[EQ_RESHAPE_ZERO]]] : tile<8x16xf32>
+// CHECK: %[[EQ_RESHAPE_COMPACT:.+]] = extract %[[EQ_RESHAPE_BCAST]][%[[EQ_RESHAPE_ZERO]], %[[EQ_RESHAPE_ZERO]]] : tile<8x16xf32> -> tile<8x1xf32>
 // CHECK: %[[EQ_RESHAPE_VIEW:.+]] = make_tensor_view %[[EQ_RESHAPE_PTR]], shape = [16, 1], strides = [1, 2]
 // CHECK: %[[ER_PART:.+]] = make_partition_view %[[EQ_RESHAPE_VIEW]]
-// CHECK: %[[EQ_RESHAPE_COMPACT:.+]] = extract %[[EQ_RESHAPE_BCAST]][%[[EQ_RESHAPE_ZERO]], %[[EQ_RESHAPE_ZERO]]] : tile<8x16xf32> -> tile<8x1xf32>
 // CHECK: store_view_tko weak %[[EQ_RESHAPE_COMPACT]], %[[ER_PART]][%[[EQ_RESHAPE_ROW]], %[[EQ_RESHAPE_ZERO]]] : tile<8x1xf32>
 nv_tensor_ir.graph @reshaped_statistic_equal_extents(
     %x: tensor<16x16xf32> {nv_tensor_ir.stride = "(16,1)"}
@@ -223,9 +223,9 @@ nv_tensor_ir.graph @reshaped_statistic_equal_extents(
 // CHECK: %[[TR3_Y_PART:.+]] = make_partition_view %[[TR3_Y_VIEW]]
 // CHECK: store_view_tko weak %[[TR3_Y]], %[[TR3_Y_PART]][%[[TR3_ZERO]], %[[TR3_ZERO]], %[[TR3_ZERO]]] : tile<4x8x16xf32>
 // CHECK: %[[TR3_BCAST:.+]] = broadcast {{.*}} -> tile<4x8x16xf32>
+// CHECK: %[[TR3_COMPACT:.+]] = extract %[[TR3_BCAST]][%[[TR3_ZERO]], %[[TR3_ZERO]], %[[TR3_ZERO]]] : tile<4x8x16xf32> -> tile<4x1x16xf32>
 // CHECK: %[[TR3_VIEW:.+]] = make_tensor_view %[[TR3_PTR]], shape = [4, 1, 16], strides = [1, 2, 4]
 // CHECK: %[[TR3_S_PART:.+]] = make_partition_view %[[TR3_VIEW]]
-// CHECK: %[[TR3_COMPACT:.+]] = extract %[[TR3_BCAST]][%[[TR3_ZERO]], %[[TR3_ZERO]], %[[TR3_ZERO]]] : tile<4x8x16xf32> -> tile<4x1x16xf32>
 // CHECK: store_view_tko weak %[[TR3_COMPACT]], %[[TR3_S_PART]][%[[TR3_ZERO]], %[[TR3_ZERO]], %[[TR3_ZERO]]] : tile<4x1x16xf32>
 // CHECK-NOT: = transpose
 nv_tensor_ir.graph @transposed_statistic_3d(
@@ -256,9 +256,9 @@ nv_tensor_ir.graph @transposed_statistic_3d(
 // CHECK: %[[LOOP_Y_VIEW:.+]] = make_tensor_view %[[LOOP_Y_PTR]], shape = [8, 512], strides = [512, 1]
 // CHECK: %[[LOOP_Y_PART:.+]] = make_partition_view %[[LOOP_Y_VIEW]]
 // CHECK: store_view_tko weak %[[LOOP_Y_RESULT]], %[[LOOP_Y_PART]][%[[ROW]], %[[ZERO]]] : tile<1x512xf32>
+// CHECK: %[[COMPACT:.+]] = extract %[[BCAST]][%[[ZERO]], %[[ZERO]]] : tile<1x512xf32> -> tile<1x1xf32>
 // CHECK: %[[LOOP_S_VIEW:.+]] = make_tensor_view %[[LOOP_STAT_PTR]], shape = [8, 1], strides = [1, 2]
 // CHECK: %[[LOOP_S_PART:.+]] = make_partition_view %[[LOOP_S_VIEW]]
-// CHECK: %[[COMPACT:.+]] = extract %[[BCAST]][%[[ZERO]], %[[ZERO]]] : tile<1x512xf32> -> tile<1x1xf32>
 // CHECK: store_view_tko weak %[[COMPACT]], %[[LOOP_S_PART]][%[[ROW]], %[[ZERO]]] : tile<1x1xf32>
 nv_tensor_ir.graph @rmsnorm_fwd_looped_reduction(
     %x: tensor<8x512xf32> {nv_tensor_ir.stride = "(512,1)"}
@@ -286,9 +286,9 @@ nv_tensor_ir.graph @rmsnorm_fwd_looped_reduction(
 // CHECK: %[[B1_DX_PART:.+]] = make_partition_view %[[B1_DX_VIEW]]
 // CHECK: store_view_tko weak %[[B1_DX_RESULT]], %[[B1_DX_PART]][%[[ROW]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32>
 // CHECK: %[[BCAST:.+]] = broadcast {{.*}} -> tile<1x8x16xf32>
+// CHECK: %[[PARTIAL:.+]] = extract %[[BCAST]][%[[ZERO]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32> -> tile<1x1x16xf32>
 // CHECK: %[[B1_P_VIEW:.+]] = make_tensor_view %[[B1_PARTIAL_PTR]], shape = [4, 1, 16], strides = [16, 2, 1]
 // CHECK: %[[B1_P_PART:.+]] = make_partition_view %[[B1_P_VIEW]]
-// CHECK: %[[PARTIAL:.+]] = extract %[[BCAST]][%[[ZERO]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32> -> tile<1x1x16xf32>
 // CHECK: store_view_tko weak %[[PARTIAL]], %[[B1_P_PART]][%[[ROW]], %[[ZERO]], %[[ZERO]]] : tile<1x1x16xf32>
 nv_tensor_ir.graph @rmsnorm_bwd_kernel1(
     %x: tensor<4x8x16xf32> {nv_tensor_ir.stride = "(128,16,1)"}
@@ -340,13 +340,13 @@ nv_tensor_ir.graph @rmsnorm_bwd_kernel2(
 // CHECK: %[[LN_Y_VIEW:.+]] = make_tensor_view %[[LN_Y_PTR]], shape = [64, 16], strides = [16, 1]
 // CHECK: %[[LN_Y_PART:.+]] = make_partition_view %[[LN_Y_VIEW]]
 // CHECK: store_view_tko weak %[[LN_Y_RESULT]], %[[LN_Y_PART]][%[[ROW]], %[[ZERO]]] : tile<32x16xf32>
+// CHECK: %[[LN_MEAN:.+]] = extract %[[LN_MEAN_BCAST]][%[[ZERO]], %[[ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: %[[LN_MEAN_VIEW:.+]] = make_tensor_view %[[LN_MEAN_PTR]], shape = [64, 1], strides = [1, 2]
 // CHECK: %[[LN_MEAN_PART:.+]] = make_partition_view %[[LN_MEAN_VIEW]]
-// CHECK: %[[LN_MEAN:.+]] = extract %[[LN_MEAN_BCAST]][%[[ZERO]], %[[ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: store_view_tko weak %[[LN_MEAN]], %[[LN_MEAN_PART]][%[[ROW]], %[[ZERO]]] : tile<32x1xf32>
+// CHECK: %[[LN_INV:.+]] = extract %[[LN_INV_BCAST]][%[[ZERO]], %[[ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: %[[LN_INV_VIEW:.+]] = make_tensor_view %[[LN_INV_PTR]], shape = [64, 1], strides = [1, 2]
 // CHECK: %[[LN_INV_PART:.+]] = make_partition_view %[[LN_INV_VIEW]]
-// CHECK: %[[LN_INV:.+]] = extract %[[LN_INV_BCAST]][%[[ZERO]], %[[ZERO]]] : tile<32x16xf32> -> tile<32x1xf32>
 // CHECK: store_view_tko weak %[[LN_INV]], %[[LN_INV_PART]][%[[ROW]], %[[ZERO]]] : tile<32x1xf32>
 nv_tensor_ir.graph @layernorm_fwd_train(
     %x: tensor<64x16xf32> {nv_tensor_ir.stride = "(16,1)"},
@@ -389,13 +389,13 @@ nv_tensor_ir.graph @layernorm_fwd_train(
 // CHECK: %[[LNB_PS_BCAST:.+]] = broadcast %[[SCALE_CARRIER]] : tile<1x1x16xf32> -> tile<1x8x16xf32>
 // CHECK: %[[BIAS_CARRIER:.+]] = reshape %[[LNB_PB_RESHAPE]] : tile<1x16x1xf32> -> tile<1x1x16xf32>
 // CHECK: %[[LNB_PB_BCAST:.+]] = broadcast %[[BIAS_CARRIER]] : tile<1x1x16xf32> -> tile<1x8x16xf32>
+// CHECK: %[[LNB_PS:.+]] = extract %[[LNB_PS_BCAST]][%[[ZERO]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32> -> tile<1x1x16xf32>
 // CHECK: %[[LNB_PS_VIEW:.+]] = make_tensor_view %[[LNB_PS_PTR]], shape = [4, 1, 16], strides = [16, 2, 1]
 // CHECK: %[[LNB_PS_PART:.+]] = make_partition_view %[[LNB_PS_VIEW]]
-// CHECK: %[[LNB_PS:.+]] = extract %[[LNB_PS_BCAST]][%[[ZERO]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32> -> tile<1x1x16xf32>
 // CHECK: store_view_tko weak %[[LNB_PS]], %[[LNB_PS_PART]][%[[ROW]], %[[ZERO]], %[[ZERO]]] : tile<1x1x16xf32>
+// CHECK: %[[LNB_PB:.+]] = extract %[[LNB_PB_BCAST]][%[[ZERO]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32> -> tile<1x1x16xf32>
 // CHECK: %[[LNB_PB_VIEW:.+]] = make_tensor_view %[[LNB_PB_PTR]], shape = [4, 1, 16], strides = [16, 2, 1]
 // CHECK: %[[LNB_PB_PART:.+]] = make_partition_view %[[LNB_PB_VIEW]]
-// CHECK: %[[LNB_PB:.+]] = extract %[[LNB_PB_BCAST]][%[[ZERO]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32> -> tile<1x1x16xf32>
 // CHECK: store_view_tko weak %[[LNB_PB]], %[[LNB_PB_PART]][%[[ROW]], %[[ZERO]], %[[ZERO]]] : tile<1x1x16xf32>
 nv_tensor_ir.graph @layernorm_bwd_kernel1(
     %x: tensor<4x8x16xf32> {nv_tensor_ir.stride = "(128,16,1)"},
@@ -431,13 +431,13 @@ nv_tensor_ir.graph @layernorm_bwd_kernel1(
 // CHECK: %[[SCALE_BCAST:.+]] = broadcast %[[SCALE_CARRIER]] : tile<1x16xf32> -> tile<4x16xf32>
 // CHECK: %[[BIAS_CARRIER:.+]] = reshape %[[BIAS_RESHAPE]] : tile<16x1xf32> -> tile<1x16xf32>
 // CHECK: %[[BIAS_BCAST:.+]] = broadcast %[[BIAS_CARRIER]] : tile<1x16xf32> -> tile<4x16xf32>
+// CHECK: %[[SCALE_SLICE:.+]] = extract %[[SCALE_BCAST]][%[[ZERO]], %[[ZERO]]] : tile<4x16xf32> -> tile<1x16xf32>
 // CHECK: %[[SCALE_VIEW:.+]] = make_tensor_view %[[SCALE_PTR]], shape = [1, 16], strides = [2, 1]
 // CHECK: %[[SCALE_PART:.+]] = make_partition_view %[[SCALE_VIEW]]
-// CHECK: %[[SCALE_SLICE:.+]] = extract %[[SCALE_BCAST]][%[[ZERO]], %[[ZERO]]] : tile<4x16xf32> -> tile<1x16xf32>
 // CHECK: store_view_tko weak %[[SCALE_SLICE]], %[[SCALE_PART]][%[[ZERO]], %[[ZERO]]] : tile<1x16xf32>
+// CHECK: %[[BIAS_SLICE:.+]] = extract %[[BIAS_BCAST]][%[[ZERO]], %[[ZERO]]] : tile<4x16xf32> -> tile<1x16xf32>
 // CHECK: %[[BIAS_VIEW:.+]] = make_tensor_view %[[BIAS_PTR]], shape = [1, 16], strides = [2, 1]
 // CHECK: %[[BIAS_PART:.+]] = make_partition_view %[[BIAS_VIEW]]
-// CHECK: %[[BIAS_SLICE:.+]] = extract %[[BIAS_BCAST]][%[[ZERO]], %[[ZERO]]] : tile<4x16xf32> -> tile<1x16xf32>
 // CHECK: store_view_tko weak %[[BIAS_SLICE]], %[[BIAS_PART]][%[[ZERO]], %[[ZERO]]] : tile<1x16xf32>
 nv_tensor_ir.graph @layernorm_bwd_kernel2(
     %partial_scale: tensor<4x16xf32> {nv_tensor_ir.stride = "(16,1)"},
@@ -554,14 +554,14 @@ nv_tensor_ir.graph @original_and_transpose_non_default_output_strides(
 // CHECK-DAG: %[[ZERO:.+]] = constant <i32: 0>
 // CHECK: %[[ROW:.+]], %{{.+}}, %{{.+}} = get_tile_block_id
 // CHECK: %[[C_BCAST:.+]] = broadcast {{.*}} : tile<1x1x16xf32> -> tile<1x8x16xf32>
+// CHECK: %[[C_SLICE:.+]] = extract %[[C_BCAST]][%[[ZERO]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32> -> tile<1x1x16xf32>
 // CHECK: %[[C_VIEW:.+]] = make_tensor_view %[[C_PTR]], shape = [64, 1, 16], strides = [16, 2, 1]
 // CHECK: %[[C_PART:.+]] = make_partition_view %[[C_VIEW]]
-// CHECK: %[[C_SLICE:.+]] = extract %[[C_BCAST]][%[[ZERO]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32> -> tile<1x1x16xf32>
 // CHECK: store_view_tko weak %[[C_SLICE]], %[[C_PART]][%[[ROW]], %[[ZERO]], %[[ZERO]]] : tile<1x1x16xf32>
 // CHECK: %[[D_BCAST:.+]] = broadcast {{.*}} : tile<1x8x1xf32> -> tile<1x8x16xf32>
+// CHECK: %[[D_SLICE:.+]] = extract %[[D_BCAST]][%[[ZERO]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32> -> tile<1x8x1xf32>
 // CHECK: %[[D_VIEW:.+]] = make_tensor_view %[[D_PTR]], shape = [64, 8, 1], strides = [8, 1, 2]
 // CHECK: %[[D_PART:.+]] = make_partition_view %[[D_VIEW]]
-// CHECK: %[[D_SLICE:.+]] = extract %[[D_BCAST]][%[[ZERO]], %[[ZERO]], %[[ZERO]]] : tile<1x8x16xf32> -> tile<1x8x1xf32>
 // CHECK: store_view_tko weak %[[D_SLICE]], %[[D_PART]][%[[ROW]], %[[ZERO]], %[[ZERO]]] : tile<1x8x1xf32>
 nv_tensor_ir.graph @crossed_reductions(
     %x: tensor<64x8x16xf32> {nv_tensor_ir.stride = "(128,16,1)"}

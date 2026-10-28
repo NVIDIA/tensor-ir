@@ -109,7 +109,7 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     MLIR_RETURN_IF_ERROR(state.update(rewriter, op));
     // Pre-rewrite legality: the splat input must be scalar.
-    MLIR_RETURN_IF_ERROR(validatePointwiseOpLowerable(op));
+    MLIR_RETURN_IF_ERROR(validateSplatOpLowerable(op));
 
     // The converted input is the tile form of the (scalar) splat input.
     auto inputType = cast<ShapedType>(adaptor.getInput().getType());
@@ -181,25 +181,19 @@ Value buildExp(OpBuilder &rewriter, Location loc, Value tile,
 
 /// Adapts affine-map operands to the shared pointwise emitter.
 class PointwiseOpConversion
-    : public OpInterfaceConversionPattern<PointwiseOpInterface> {
+    : public OpTraitConversionPattern<OpTrait::Elementwise> {
 public:
   PointwiseOpConversion(ConversionState &state,
                         const TypeConverter &typeConverter, MLIRContext *ctx,
                         bool enableExperimentalCudaTileOps,
                         cuda_tile::BytecodeVersion targetBytecodeVersion)
-      : OpInterfaceConversionPattern(typeConverter, ctx), state(state),
+      : OpTraitConversionPattern(typeConverter, ctx), state(state),
         enableExperimentalCudaTileOps(enableExperimentalCudaTileOps),
         targetBytecodeVersion(targetBytecodeVersion) {}
 
   LogicalResult
-  matchAndRewrite(PointwiseOpInterface pointwise,
-                  ArrayRef<ValueRange> convertedOperands,
+  matchAndRewrite(Operation *op, ArrayRef<ValueRange> convertedOperands,
                   ConversionPatternRewriter &rewriter) const override {
-    Operation *op = pointwise.getOperation();
-    if (isa<SplatOp>(op)) {
-      return rewriter.notifyMatchFailure(
-          op, "handled by the dedicated splat conversion");
-    }
     MLIR_RETURN_IF_ERROR(state.update(rewriter, op));
     MLIR_RETURN_IF_ERROR(validatePointwiseOpLowerable(op));
 
@@ -224,7 +218,7 @@ public:
         getTypeConverter()->convertType(op->getResult(0).getType()));
     auto resultType = cuda_tile::TileType::get(state.getTileShape(),
                                                convertedType.getElementType());
-    return lowerPointwiseOp(pointwise, operands, resultType, rewriter,
+    return lowerPointwiseOp(op, operands, resultType, rewriter,
                             enableExperimentalCudaTileOps,
                             targetBytecodeVersion);
   }
@@ -403,17 +397,14 @@ LogicalResult validatePointwiseOpLowerable(Operation *op) {
         }
         return success();
       })
-      .Case<SplatOp>([&](SplatOp typedOp) -> LogicalResult {
-        // The splat input must be a scalar (non-shaped) value. This mirrors the
-        // 0-D-tile check the pattern performs on the converted operand: a valid
-        // TensorIR splat carries a scalar input, which the type converter maps
-        // to a 0-D tile.
-        if (isa<ShapedType>(typedOp.getInput().getType())) {
-          return typedOp.emitError("expected scalar input");
-        }
-        return success();
-      })
       .Default([](Operation *) { return success(); });
+}
+
+LogicalResult validateSplatOpLowerable(SplatOp op) {
+  if (isa<ShapedType>(op.getInput().getType())) {
+    return op.emitError("expected scalar input");
+  }
+  return success();
 }
 
 /// Shared pre-rewrite legality check for `ConstantOp`. Single source of truth

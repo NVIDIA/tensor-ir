@@ -63,6 +63,11 @@ _BINARY_REFERENCES: dict[str, BinaryReference] = {
     "or": torch.logical_or,
 }
 
+_BINARY_WITH_BETA_REFERENCES: dict[
+    str, Callable[[torch.Tensor, torch.Tensor, float], torch.Tensor]
+] = {}
+
+
 _CMP_REFERENCES: dict[str, BinaryReference] = {
     "eq": torch.eq,
     "neq": torch.ne,
@@ -105,7 +110,11 @@ def evaluate_kernel_reference(
     """
     graph = _trace(kernel_func, *inputs, output=output)
     outputs = output if isinstance(output, tuple) else (output,)
-    return evaluate_trace_reference(graph, *inputs, device=outputs[0].device)
+    return evaluate_trace_reference(
+        graph,
+        *inputs,
+        device=outputs[0].device,
+    )
 
 
 def evaluate_trace_reference(
@@ -117,7 +126,13 @@ def evaluate_trace_reference(
         raise TypeError(f"Expected {len(graph.input_ids)} inputs, got {len(inputs)}")
 
     values: dict[int, object] = {}
-    reference_device = inputs[0].device if inputs else device
+    # A 0-d tensor is a scalar argument, which (unlike a real tensor input)
+    # is always CPU-resident regardless of where the kernel itself runs; skip
+    # it here so it can't override reference_device with the wrong device.
+    tensor_inputs = [
+        value for value in inputs if isinstance(value, torch.Tensor) and value.dim() > 0
+    ]
+    reference_device = tensor_inputs[0].device if tensor_inputs else device
     for node_id, value in zip(graph.input_ids, inputs):
         values[node_id] = value
 
@@ -129,21 +144,21 @@ def evaluate_trace_reference(
         if node.kind == NodeKind.CONSTANT:
             if node.kwargs.get("is_tensor", False):
                 values[node_id] = torch.full(
-                    node.tensor_info.shape,
+                    node.value_info.shape,
                     node.kwargs["value"],
-                    dtype=_torch_dtype_from_tensor_ir(node.tensor_info.dtype),
+                    dtype=_torch_dtype_from_tensor_ir(node.value_info.dtype),
                     device=reference_device,
                 )
             else:
                 values[node_id] = node.kwargs["value"]
         elif node.kind == NodeKind.SPLAT:
-            shape = node.tensor_info.shape
+            shape = node.value_info.shape
             if "like" in node.kwargs:
                 shape = tuple(values[int(node.kwargs["like"])].shape)
             values[node_id] = torch.full(
                 shape,
                 args[0],
-                dtype=_torch_dtype_from_tensor_ir(node.tensor_info.dtype),
+                dtype=_torch_dtype_from_tensor_ir(node.value_info.dtype),
                 device=reference_device,
             )
         elif node.kind == NodeKind.UNARY:
@@ -165,11 +180,19 @@ def evaluate_trace_reference(
                     node.op_name, _UNARY_REFERENCES[node.op_name], *args
                 )
         elif node.kind == NodeKind.BINARY:
-            values[node_id] = _run_torch_reference(
-                node.op_name,
-                _BINARY_REFERENCES[node.op_name],
-                *map(convert_unsupported_torch_dtype, args),
-            )
+            if node.op_name in _BINARY_WITH_BETA_REFERENCES:
+                values[node_id] = _run_torch_reference(
+                    node.op_name,
+                    _BINARY_WITH_BETA_REFERENCES[node.op_name],
+                    *map(convert_unsupported_torch_dtype, args),
+                    float(node.kwargs["beta"]),
+                )
+            else:
+                values[node_id] = _run_torch_reference(
+                    node.op_name,
+                    _BINARY_REFERENCES[node.op_name],
+                    *map(convert_unsupported_torch_dtype, args),
+                )
             if node.op_name == "div" and not args[0].dtype.is_floating_point:
                 # seems tensor_ir div with int types has rounding mode of round towards zero
                 values[node_id] = values[node_id].trunc().to(args[0].dtype)
@@ -177,17 +200,17 @@ def evaluate_trace_reference(
                 values[node_id] = values[node_id].to(args[0].dtype)
         elif node.kind == NodeKind.CONVERT:
             values[node_id] = args[0].to(
-                _torch_dtype_from_tensor_ir(node.tensor_info.dtype)
+                _torch_dtype_from_tensor_ir(node.value_info.dtype)
             )
         elif node.kind == NodeKind.MOVEMENT:
             if node.op_name == "reshape":
-                values[node_id] = torch.reshape(args[0], node.tensor_info.shape)
+                values[node_id] = torch.reshape(args[0], node.value_info.shape)
             elif node.op_name == "transpose":
                 values[node_id] = torch.permute(
                     args[0], tuple(node.kwargs["permutation"])
                 )
             elif node.op_name == "broadcast":
-                values[node_id] = torch.broadcast_to(args[0], node.tensor_info.shape)
+                values[node_id] = torch.broadcast_to(args[0], node.value_info.shape)
             elif node.op_name == "slice":
                 slices = tuple(
                     slice(start, limit, stride)
@@ -203,9 +226,9 @@ def evaluate_trace_reference(
         elif node.kind == NodeKind.CONCATENATE:
             values[node_id] = torch.cat(args, dim=int(node.kwargs["dimension"]))
         elif node.kind == NodeKind.IOTA:
-            dtype = _torch_dtype_from_tensor_ir(node.tensor_info.dtype)
+            dtype = _torch_dtype_from_tensor_ir(node.value_info.dtype)
             dim = int(node.kwargs["dimension"])
-            shape = node.tensor_info.shape
+            shape = node.value_info.shape
             view_shape = [1] * len(shape)
             view_shape[dim] = shape[dim]
             iota_device = args[0].device if args else reference_device
@@ -267,7 +290,7 @@ def evaluate_trace_reference(
                 *map(convert_unsupported_torch_dtype, args)
             ).to(args[1].dtype)
         elif node.kind == NodeKind.MATMUL:
-            result_dtype = _torch_dtype_from_tensor_ir(node.tensor_info.dtype)
+            result_dtype = _torch_dtype_from_tensor_ir(node.value_info.dtype)
             lhs, rhs = args
             if lhs.dtype in (torch.int8, torch.uint8) and result_dtype == torch.int32:
                 lhs = lhs.to(torch.int32)
@@ -294,6 +317,8 @@ def _run_torch_reference(op_name: str, fn: Callable, *args: object):
                 _unsupported_reference_message(op_name, args)
             ) from exc
         raise
+
+
 
 
 def _unsupported_reference_message(op_name: str, args: tuple[object, ...]) -> str:

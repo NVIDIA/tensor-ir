@@ -17,9 +17,8 @@
 //    - Replaces bufferization.to_tensor inputs with tiled LoadOps having
 //      concrete offsets, sizes, strides, alignments, and tile slice
 //      coordinates.
-//    - Folds layout-modifying operations (ReshapeOp, TransposeOp, BroadcastOp,
-//      SliceOp) directly into access descriptors, eliminating them from the
-//      tiled computation DAG.
+//    - Folds layout-modifying operations into access descriptors, then restores
+//      broadcast dimensions with explicit tile broadcasts.
 //    - Evaluates ConcatenateOps into nested scf.if branches partitioned along
 //      the concatenation dimension.
 //    - Materializes IotaOps by composing local tile coordinates with global
@@ -39,11 +38,11 @@
 #include "tensor_ir/Utils/Utils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/Ptr/IR/PtrOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
@@ -79,14 +78,10 @@ namespace tcg = mlir::nv_tensor_ir::tcutegen;
 struct BoundaryAccess {
   /// Memref function argument bound to the boundary tensor.
   Value buffer;
-  /// Base pointer to the buffer memory.
-  Value base;
   /// Mixed static (IntegerAttr) and dynamic (SSA Value) buffer dimension sizes.
   SmallVector<OpFoldResult> sizes;
   /// Mixed static (IntegerAttr) and dynamic (SSA Value) buffer dimension strides.
   SmallVector<OpFoldResult> strides;
-  /// Base offset into the buffer, in elements.
-  OpFoldResult offset;
   /// Known memory alignment in bytes.
   IntegerAttr alignment;
   /// Whether the backend may use TMA for accesses to the buffer.
@@ -105,25 +100,10 @@ struct BoundaryAccess {
 /// and derives the corresponding dynamic value mapping.
 static TensorSourceAttr buildTensorSource(MLIRContext *context,
                                           const BoundaryAccess &access) {
-  tcg::Shape shape;
-  for (OpFoldResult size : access.sizes) {
-    if (auto attr = size.dyn_cast<Attribute>()) {
-      shape.append(cast<IntegerAttr>(attr).getInt());
-    } else {
-      shape.appendDynamic();
-    }
-  }
-  tcg::Stride stride;
-  for (OpFoldResult value : access.strides) {
-    if (auto attr = value.dyn_cast<Attribute>()) {
-      stride.append(cast<IntegerAttr>(attr).getInt());
-    } else {
-      stride.appendDynamic();
-    }
-  }
-  tcg::Layout layout(shape, stride);
-  // The physical buffer offset is applied separately from the logical view
-  // offset when access metadata is created.
+  auto type = cast<MemRefType>(access.buffer.getType());
+  auto [strides, offset] = type.getStridesAndOffset();
+  tcg::Layout layout(tcg::Shape(type.getShape()), tcg::Stride(strides));
+  // Boundary buffers have statically zero offsets.
   return TensorSourceAttr::get(context, /*tensorId=*/-1, /*offset=*/0,
                                layout.toString(),
                                getDynamicValueMapping(layout));
@@ -189,7 +169,7 @@ static FailureOr<SmallVector<LayoutSourceAttrInterface>>
 inferOperandLayouts(Operation *op, LayoutSourceAttrInterface layout,
                     const LayoutPropagationAnalysis &propagation) {
   SmallVector<LayoutSourceAttrInterface> operandLayouts(op->getNumOperands());
-  if (isa<PointwiseOpInterface>(op) && !isa<BroadcastOp>(op)) {
+  if (op->hasTrait<OpTrait::Elementwise>()) {
     auto annotated = dyn_cast_or_null<CompositeSourceAttr>(
         propagation.getLayout(op->getResult(0)));
     if (annotated && op->getNumOperands() > 1) {
@@ -322,84 +302,48 @@ mapDynamicValues(TensorSourceAttr source, const BoundaryAccess &access,
   return values;
 }
 
-/// Finalized memory access parameters ready to be attached to a tiled LoadOp or
-/// StoreOp.
-struct AccessMetadata {
-  /// Base offset in elements (including any logical source offset).
-  OpFoldResult offset;
-  /// Tensor extents in elements for each dimension.
-  SmallVector<OpFoldResult> sizes;
-  /// Tensor strides in elements for each dimension.
-  SmallVector<OpFoldResult> strides;
-  /// Memory alignment in bytes, adjusted for any non-zero byte offset.
-  IntegerAttr alignment;
-};
-
 /// Extracts descriptor metadata from a boundary memref function argument.
 ///
 /// Static metadata is derived from the memref type. Emits
-/// `memref.extract_strided_metadata` for dynamic metadata when needed and
-/// `ptr.to_ptr` for the base pointer. Dynamic sizes and strides are flattened
+/// `memref.dim` for dynamic sizes and `memref.extract_strided_metadata` for
+/// dynamic strides. Dynamic sizes and strides are flattened
 /// into `dynamicValues` for indexing by `TensorSourceAttr`'s dynamic-value
 /// mapping.
 static FailureOr<BoundaryAccess> getBoundaryAccess(OpBuilder &builder,
                                                    func::FuncOp function,
                                                    Value buffer,
                                                    Operation *diagnosticOp) {
-  auto argument = dyn_cast<BlockArgument>(buffer);
-  auto type = dyn_cast<MemRefType>(buffer.getType());
-  if (!argument || argument.getOwner() != &function.getBody().front() ||
-      !type) {
-    return diagnosticOp->emitError(
-        "bufferized TensorIR boundary must be a memref function argument");
-  }
-  SmallVector<int64_t> strides;
-  int64_t offset;
-  if (failed(type.getStridesAndOffset(strides, offset))) {
+  // getLayoutBoundary already validated the strided memref argument.
+  auto argument = cast<BlockArgument>(buffer);
+  auto type = cast<MemRefType>(buffer.getType());
+  auto [strides, offset] = type.getStridesAndOffset();
+  if (offset != 0) {
     return diagnosticOp->emitError()
-           << "bufferized TensorIR boundary must be strided, but got " << type;
-  }
-  auto memorySpace =
-      dyn_cast_if_present<ptr::MemorySpaceAttrInterface>(type.getMemorySpace());
-  if (!memorySpace) {
-    return diagnosticOp->emitError()
-           << "bufferized TensorIR boundary must be in a pointer memory "
-              "space, but got "
+           << "bufferized TensorIR boundary must have a statically zero "
+              "offset, but got "
            << type;
+  }
+  if (type.getMemorySpace()) {
+    return diagnosticOp->emitError() << "bufferized TensorIR boundary must be "
+                                        "in the default memory space, but got "
+                                     << type;
   }
 
   memref::ExtractStridedMetadataOp metadata;
-  if (!type.hasStaticShape() || ShapedType::isDynamic(offset) ||
-      llvm::any_of(strides, ShapedType::isDynamic)) {
+  if (llvm::any_of(strides, ShapedType::isDynamic)) {
     metadata = memref::ExtractStridedMetadataOp::create(
         builder, diagnosticOp->getLoc(), buffer);
   }
-  auto pointerType = ptr::PtrType::get(builder.getContext(), memorySpace);
   BoundaryAccess access;
   access.buffer = buffer;
-  access.base = ptr::ToPtrOp::create(builder, diagnosticOp->getLoc(),
-                                     pointerType, buffer);
   access.elementType = type.getElementType();
-  for (auto [dimension, size] : llvm::enumerate(type.getShape())) {
-    if (!ShapedType::isDynamic(size)) {
-      access.sizes.push_back(builder.getIndexAttr(size));
-      continue;
-    }
-    access.sizes.push_back(metadata.getSizes()[dimension]);
-    access.dynamicValues.push_back(metadata.getSizes()[dimension]);
-  }
-  for (auto [dimension, stride] : llvm::enumerate(strides)) {
-    if (!ShapedType::isDynamic(stride)) {
-      access.strides.push_back(builder.getIndexAttr(stride));
-      continue;
-    }
-    access.strides.push_back(metadata.getStrides()[dimension]);
-    access.dynamicValues.push_back(metadata.getStrides()[dimension]);
-  }
-  access.offset = ShapedType::isDynamic(offset)
-                      ? OpFoldResult(metadata.getOffset())
-                      : OpFoldResult(builder.getIndexAttr(offset));
-
+  access.sizes = memref::getMixedSizes(builder, diagnosticOp->getLoc(), buffer);
+  access.dynamicValues = decomposeMixedValues(access.sizes).second;
+  access.strides = metadata
+                       ? metadata.getConstifiedMixedStrides()
+                       : getAsIndexOpFoldResult(builder.getContext(), strides);
+  llvm::append_range(access.dynamicValues,
+                     decomposeMixedValues(access.strides).second);
   auto alignment = function.getArgAttrOfType<IntegerAttr>(
       argument.getArgNumber(), TensorIRDialect::getAlignmentAttrName());
   int64_t elementBytes =
@@ -412,18 +356,34 @@ static FailureOr<BoundaryAccess> getBoundaryAccess(OpBuilder &builder,
   return access;
 }
 
+/// Reuse the boundary memref when its logical view is unchanged. Otherwise
+/// describe the complete view with a reinterpret cast; offset is relative to
+/// the aligned base, as required by memref.reinterpret_cast.
+static Value createAccessView(OpBuilder &builder, Location loc,
+                              const BoundaryAccess &access, OpFoldResult offset,
+                              ArrayRef<OpFoldResult> sizes,
+                              ArrayRef<OpFoldResult> strides) {
+  auto staticOffset = getConstantIntValue(offset);
+  if (staticOffset == 0 && sizes == ArrayRef(access.sizes) &&
+      strides == ArrayRef(access.strides)) {
+    return access.buffer;
+  }
+  if (staticOffset) {
+    offset = builder.getIndexAttr(*staticOffset);
+  }
+  return memref::ReinterpretCastOp::create(builder, loc, access.buffer, offset,
+                                           sizes, strides);
+}
+
 /// Decoded logical view of a tensor after resolving its CuTe layout against the
 /// boundary access's dynamic runtime values.
 struct LogicalDescriptor {
+  /// Logical source offset relative to the zero-offset boundary buffer.
+  OpFoldResult offset;
   SmallVector<OpFoldResult> sizes;
   SmallVector<OpFoldResult> strides;
-
-  /// Extract the dynamic SSA values from the decoded sizes, returning null
-  /// Value for static dimensions.
-  SmallVector<Value> getDynamicExtents() const {
-    return llvm::map_to_vector(
-        sizes, [](OpFoldResult size) { return size.dyn_cast<Value>(); });
-  }
+  /// Byte alignment of the view origin, adjusted for the logical offset.
+  IntegerAttr alignment;
 };
 
 /// Decode a TensorSourceAttr's CuTe layout into concrete OpFoldResult sizes and
@@ -482,20 +442,6 @@ decodeLogicalDescriptor(TensorSourceAttr source, const BoundaryAccess &access,
            << " unused dynamic descriptor value(s)";
   }
 
-  return LogicalDescriptor{std::move(sizes), std::move(strides)};
-}
-
-/// Compute concrete access parameters (offset, sizes, strides, alignment) for a
-/// tiled memory operation.
-///
-/// Combines the physical buffer offset with the logical source offset, checking
-/// for static overflow or emitting dynamic index addition. Adjusts the base
-/// buffer alignment using std::gcd with the byte offset.
-static FailureOr<AccessMetadata>
-createAccessMetadata(OpBuilder &builder, Operation *diagnosticOp,
-                     TensorSourceAttr source, const BoundaryAccess &access,
-                     const LogicalDescriptor &descriptor) {
-  Location loc = diagnosticOp->getLoc();
   int64_t alignment = access.alignment.getInt();
   unsigned elementBytes =
       std::max(1u, access.elementType.getIntOrFloatBitWidth() / 8);
@@ -503,33 +449,83 @@ createAccessMetadata(OpBuilder &builder, Operation *diagnosticOp,
   if (offsetBytes != 0) {
     alignment = std::gcd(alignment, std::abs(offsetBytes));
   }
-  OpFoldResult offset = access.offset;
-  if (auto attr = offset.dyn_cast<Attribute>()) {
-    int64_t combinedOffset;
-    if (llvm::AddOverflow(cast<IntegerAttr>(attr).getInt(), source.getOffset(),
-                          combinedOffset)) {
-      return emitError(loc, "logical buffer offset overflows index range");
-    }
-    offset = builder.getIndexAttr(combinedOffset);
-  } else if (source.getOffset() != 0) {
-    Value increment =
-        arith::ConstantIndexOp::create(builder, loc, source.getOffset());
-    offset = arith::AddIOp::create(builder, loc, cast<Value>(offset), increment)
-                 .getResult();
-  }
-  return AccessMetadata{offset, descriptor.sizes, descriptor.strides,
-                        builder.getI64IntegerAttr(alignment)};
+  return LogicalDescriptor{builder.getIndexAttr(source.getOffset()),
+                           std::move(sizes), std::move(strides),
+                           builder.getI64IntegerAttr(alignment)};
 }
 
-/// Convert an OpFoldResult into an SSA Value, materializing an arith.constant
-/// when the value is a static attribute.
-static Value materializeIndex(OpBuilder &builder, Location loc,
-                              OpFoldResult value) {
-  if (auto dynamic = value.dyn_cast<Value>()) {
-    return dynamic;
+/// Load broadcast axes at extent one with non-unit strides, then broadcast
+/// to the requested tile shape.
+static Value createTiledLoad(OpBuilder &builder, Location loc,
+                             const BoundaryAccess &access,
+                             const LogicalDescriptor &metadata,
+                             ArrayRef<OpFoldResult> coordinates,
+                             ArrayRef<int64_t> tileShape) {
+  SmallVector<OpFoldResult> sizes, strides, indices;
+  SmallVector<int64_t> loadShape;
+  for (auto [size, stride, coordinate, tile] : llvm::zip_equal(
+           metadata.sizes, metadata.strides, coordinates, tileShape)) {
+    if (getConstantIntValue(stride) == 0) {
+      sizes.push_back(builder.getIndexAttr(1));
+      strides.push_back(builder.getIndexAttr(2));
+      indices.push_back(builder.getIndexAttr(0));
+      loadShape.push_back(1);
+      continue;
+    }
+    sizes.push_back(size);
+    strides.push_back(stride);
+    indices.push_back(coordinate);
+    loadShape.push_back(tile);
   }
-  return arith::ConstantIndexOp::create(
-      builder, loc, cast<IntegerAttr>(cast<Attribute>(value)).getInt());
+  Value memory =
+      createAccessView(builder, loc, access, metadata.offset, sizes, strides);
+  auto loadType = RankedTensorType::get(loadShape, access.elementType);
+  Value result =
+      LoadOp::create(builder, loc, loadType, memory, indices,
+                     metadata.alignment, TilePaddingAttr{}, access.allowTma);
+  if (loadShape != tileShape) {
+    auto resultType = RankedTensorType::get(tileShape, access.elementType);
+    result = BroadcastOp::create(builder, loc, resultType, result);
+  }
+  return result;
+}
+
+/// Select one representative slice for zero-stride output dimensions and
+/// retain those axes at extent one with non-unit strides.
+static void createTiledStore(OpBuilder &builder, Location loc, Value tile,
+                             const BoundaryAccess &access,
+                             const LogicalDescriptor &metadata,
+                             ArrayRef<OpFoldResult> coordinates) {
+  auto tileType = cast<RankedTensorType>(tile.getType());
+  SmallVector<int64_t> sliceShape(tileType.getShape());
+  SmallVector<OpFoldResult> sizes, strides, indices;
+  for (auto [dimension, values] : llvm::enumerate(
+           llvm::zip_equal(metadata.sizes, metadata.strides, coordinates))) {
+    auto [size, stride, coordinate] = values;
+    if (getConstantIntValue(stride) == 0) {
+      sliceShape[dimension] = 1;
+      sizes.push_back(builder.getIndexAttr(1));
+      strides.push_back(builder.getIndexAttr(2));
+      indices.push_back(builder.getIndexAttr(0));
+      continue;
+    }
+    sizes.push_back(size);
+    strides.push_back(stride);
+    indices.push_back(coordinate);
+  }
+  if (!llvm::equal(sliceShape, tileType.getShape())) {
+    SmallVector<int64_t> starts(sliceShape.size(), 0);
+    SmallVector<int64_t> sliceStrides(sliceShape.size(), 1);
+    auto sliceType = RankedTensorType::get(sliceShape, access.elementType);
+    tile = SliceOp::create(builder, loc, sliceType, tile,
+                           builder.getDenseI64ArrayAttr(starts),
+                           builder.getDenseI64ArrayAttr(sliceShape),
+                           builder.getDenseI64ArrayAttr(sliceStrides));
+  }
+  Value memory =
+      createAccessView(builder, loc, access, metadata.offset, sizes, strides);
+  StoreOp::create(builder, loc, tile, memory, indices, metadata.alignment,
+                  access.allowTma);
 }
 
 /// Delinearize a 1D linear block index into multi-dimensional tile coordinates.
@@ -573,8 +569,8 @@ delinearize(OpBuilder &builder, Location loc, Value linear,
       result.push_back(zero);
       continue;
     }
-    Value count =
-        materializeIndex(builder, loc, dimensionTileCounts[dimension]);
+    Value count = getValueOrCreateConstantIndexOp(
+        builder, loc, dimensionTileCounts[dimension]);
     Value coordinate = arith::RemUIOp::create(builder, loc, linear, count);
     result.push_back(coordinate);
     linear = arith::DivUIOp::create(builder, loc, linear, count);
@@ -1260,7 +1256,7 @@ private:
     auto offsetAtStep = [&](OpFoldResult base, int64_t stride) -> Value {
       Value strideValue = arith::ConstantIndexOp::create(builder, loc, stride);
       Value offset = arith::MulIOp::create(builder, loc, step, strideValue);
-      Value baseValue = materializeIndex(builder, loc, base);
+      Value baseValue = getValueOrCreateConstantIndexOp(builder, loc, base);
       return arith::AddIOp::create(builder, loc, baseValue, offset);
     };
     IRMapping mapping;
@@ -1285,10 +1281,7 @@ private:
       const BoundaryAccess &access = accessIt->second;
       MLIR_ASSIGN_OR_RETURN(auto descriptor,
                             decodeLogicalDescriptor(view, access, scanSlice));
-      MLIR_ASSIGN_OR_RETURN(
-          auto metadata,
-          createAccessMetadata(builder, scanSlice, view, access, descriptor));
-      Value offset = offsetAtStep(metadata.offset, input.getScanStride());
+      Value offset = offsetAtStep(descriptor.offset, input.getScanStride());
       BlockArgument argument = scanSlice.getBlockArgumentForOperand(operand);
       auto argumentType = cast<TensorType>(argument.getType());
       if (!llvm::equal(view.getShape(), argumentType.getShape())) {
@@ -1308,22 +1301,20 @@ private:
         indices.push_back(axis < 0 ? OpFoldResult(builder.getIndexAttr(0))
                                    : getAsOpFoldResult(coordinates[axis]));
       }
-      auto type =
-          RankedTensorType::get(inputShape, argumentType.getElementType());
-      // metadata.alignment already accounts for the static source offset.
+      // descriptor.alignment already accounts for the static source offset.
       // Every step adds scanStride elements (also for reverse scans), so the
       // view origin retains the gcd of that byte stride and its alignment.
       // Factor out the element-byte gcd to avoid overflowing stride * bytes.
-      int64_t alignment = metadata.alignment.getInt();
+      int64_t alignment = descriptor.alignment.getInt();
       int64_t elementBytes =
           std::max(1u, access.elementType.getIntOrFloatBitWidth() / 8);
       int64_t byteAlignment = std::gcd(alignment, elementBytes);
       alignment = byteAlignment *
                   std::gcd(alignment / byteAlignment, input.getScanStride());
-      Value tile = LoadOp::create(builder, loc, type, access.base, offset,
-                                  metadata.sizes, metadata.strides, indices,
-                                  builder.getI64IntegerAttr(alignment),
-                                  TilePaddingAttr{}, access.allowTma);
+      descriptor.offset = offset;
+      descriptor.alignment = builder.getI64IntegerAttr(alignment);
+      Value tile = createTiledLoad(builder, loc, access, descriptor, indices,
+                                   inputShape);
       mapping.map(argument, tile);
       axes[argument] = std::move(*inputAxes);
     }
@@ -1430,10 +1421,11 @@ private:
           indices[dim] = builder.getIndexAttr(0);
         }
       }
-      Value offset = offsetAtStep(store.offset, slice.scanStride);
+      Value offset = offsetAtStep(builder.getIndexAttr(0), slice.scanStride);
       Value tile = mapping.lookup(yield.getOperand(index + 1));
-      StoreOp::create(builder, loc, tile, store.base, offset, sizes, strides,
-                      indices, builder.getI64IntegerAttr(1), store.allowTma);
+      LogicalDescriptor metadata{offset, sizes, strides,
+                                 builder.getI64IntegerAttr(1)};
+      createTiledStore(builder, loc, tile, store, metadata, indices);
     }
     Value nextCarry = mapping.lookup(yield.getOperand(0));
     scf::YieldOp::create(builder, loc, nextCarry);
@@ -1587,9 +1579,8 @@ private:
 
   /// Replaces an untiled boundary input with a tiled LoadOp.
   ///
-  /// Decodes the logical layout descriptor, constructs AccessMetadata with
-  /// adjusted offset and alignment, clamps coordinates to 0 for broadcast
-  /// dimensions (stride == 0), and emits a fixed-shape tiled LoadOp.
+  /// Decodes the logical layout descriptor and alignment, then loads the
+  /// varying dimensions. Explicit broadcasts restore the requested tile shape.
   FailureOr<Value> loadSource(bufferization::ToTensorOp input,
                               LayoutSourceAttrInterface expectedLayout,
                               ArrayRef<Value> coordinates,
@@ -1622,24 +1613,8 @@ private:
     const BoundaryAccess &access = it->second;
     MLIR_ASSIGN_OR_RETURN(LogicalDescriptor descriptor,
                           decodeLogicalDescriptor(source, access, input));
-    MLIR_ASSIGN_OR_RETURN(
-        AccessMetadata metadata,
-        createAccessMetadata(builder, input, source, access, descriptor));
-    SmallVector<OpFoldResult> sourceCoordinates =
-        getAsOpFoldResult(coordinates);
-    auto sourceLayout = source.getCuteLayout();
-    for (size_t dimension = 0; dimension < sourceCoordinates.size();
-         ++dimension) {
-      auto stride = tcg::get(sourceLayout.stride(), dimension);
-      if (tcg::is_static(stride) && stride.as_int() == 0) {
-        sourceCoordinates[dimension] = builder.getIndexAttr(0);
-      }
-    }
-    auto resultType = RankedTensorType::get(tileShape, access.elementType);
-    Value result = LoadOp::create(
-        builder, loc, resultType, access.base, metadata.offset, metadata.sizes,
-        metadata.strides, sourceCoordinates, metadata.alignment,
-        /*padding=*/TilePaddingAttr{}, access.allowTma);
+    Value result = createTiledLoad(builder, loc, access, descriptor,
+                                   getAsOpFoldResult(coordinates), tileShape);
     loadedValues.insert(input.getResult(), source, coordinates, tileShape,
                         result);
     return result;
@@ -1963,15 +1938,7 @@ static FailureOr<TensorSourceAttr> getBoundarySource(func::FuncOp function,
     return diagnosticOp->emitError()
            << "bufferized TensorIR boundary must be strided, but got " << type;
   }
-  tcg::Stride stride;
-  for (int64_t value : strides) {
-    if (ShapedType::isDynamic(value)) {
-      stride.appendDynamic();
-    } else {
-      stride.append(value);
-    }
-  }
-  tcg::Layout layout(getShapeRef(tensorType), stride);
+  tcg::Layout layout(getShapeRef(tensorType), tcg::Stride(strides));
   return TensorSourceAttr::get(function.getContext(), argument.getArgNumber(),
                                /*offset=*/0, layout.toString(),
                                getDynamicValueMapping(layout));
@@ -2101,10 +2068,8 @@ static LogicalResult formGrid(func::FuncOp function) {
 
   SmallVector<BoundaryAccess> outputAccesses;
   llvm::DenseMap<Value, BoundaryAccess> outputAccessByValue;
-  SmallVector<TensorSourceAttr> outputViews;
   SmallVector<LogicalDescriptor> outputDescriptors;
   outputAccesses.reserve(outputs.size());
-  outputViews.reserve(outputs.size());
   for (auto [index, output] : llvm::enumerate(outputs)) {
     if (output->getNumResults() != 0) {
       return output.emitError(
@@ -2119,7 +2084,6 @@ static LogicalResult formGrid(func::FuncOp function) {
     MLIR_ASSIGN_OR_RETURN(TensorSourceAttr view,
                           getOutputView(function, outputAccesses.back(), index,
                                         rootShape, resultViews));
-    outputViews.push_back(view);
     MLIR_ASSIGN_OR_RETURN(
         LogicalDescriptor descriptor,
         decodeLogicalDescriptor(view, outputAccesses.back(), output));
@@ -2128,11 +2092,10 @@ static LogicalResult formGrid(func::FuncOp function) {
 
   SmallVector<Value> dynamicRootExtents(rootShape.size());
   for (const LogicalDescriptor &descriptor : outputDescriptors) {
-    SmallVector<Value> outputRootExtents = descriptor.getDynamicExtents();
     for (auto [rootExtent, outputExtent] :
-         llvm::zip_equal(dynamicRootExtents, outputRootExtents)) {
-      if (!rootExtent && outputExtent) {
-        rootExtent = outputExtent;
+         llvm::zip_equal(dynamicRootExtents, descriptor.sizes)) {
+      if (!rootExtent) {
+        rootExtent = dyn_cast<Value>(outputExtent);
       }
     }
   }
@@ -2181,8 +2144,10 @@ static LogicalResult formGrid(func::FuncOp function) {
         continue;
       }
     }
-    Value lhs = materializeIndex(entryBuilder, function.getLoc(), totalTiles);
-    Value rhs = materializeIndex(entryBuilder, function.getLoc(), count);
+    Value lhs = getValueOrCreateConstantIndexOp(entryBuilder, function.getLoc(),
+                                                totalTiles);
+    Value rhs =
+        getValueOrCreateConstantIndexOp(entryBuilder, function.getLoc(), count);
     totalTiles =
         arith::MulIOp::create(entryBuilder, function.getLoc(), lhs, rhs)
             .getResult();
@@ -2215,18 +2180,9 @@ static LogicalResult formGrid(func::FuncOp function) {
             bodyStatus = failure();
             return;
           }
-          FailureOr<AccessMetadata> metadata = createAccessMetadata(
-              builder, output, outputViews[index], outputAccesses[index],
-              outputDescriptors[index]);
-          if (failed(metadata)) {
-            bodyStatus = failure();
-            return;
-          }
-          StoreOp::create(builder, output.getLoc(), *tiledResult,
-                          outputAccesses[index].base, metadata->offset,
-                          metadata->sizes, metadata->strides,
-                          getAsOpFoldResult(coordinates), metadata->alignment,
-                          outputAccesses[index].allowTma);
+          createTiledStore(builder, output.getLoc(), *tiledResult,
+                           outputAccesses[index], outputDescriptors[index],
+                           getAsOpFoldResult(coordinates));
         }
         scf::InParallelOp::create(builder, loc);
       });

@@ -132,21 +132,33 @@ packNativeHostArgs(const KernelMetadata &metadata, PackedArgs args) {
   }
   llvm::SmallVector<int64_t> packed;
   for (auto [i, argument] : llvm::enumerate(metadata.args)) {
+    const Any *value = args[i];
+    if (!value) {
+      return Status::InvalidArgument(
+          "Native host argument index out of bounds");
+    }
+    if (const auto *scalarDesc = std::get_if<ScalarArgDesc>(&argument)) {
+      if (value->typeIndex != TypeIndex::kScalar ||
+          value->scalar.type != scalarDesc->elementType) {
+        return Status::InvalidArgument("Native host scalar type mismatch");
+      }
+      packed.push_back(value->scalar.bits);
+      continue;
+    }
     const auto *desc = std::get_if<TensorArgDesc>(&argument);
     if (!desc) {
-      return Status::NotSupported(
-          "Native runtime scalar arguments are not supported");
+      return Status::InvalidArgument("Unsupported native host argument kind");
     }
-    TIR_ASSIGN_OR_RETURN(auto value, args[i]);
     const TensorView *view =
-        value.typeIndex == TypeIndex::kTensor ? &value.tensorView : nullptr;
-    if ((!view && value.typeIndex != TypeIndex::kPointer) ||
+        value->typeIndex == TypeIndex::kTensor ? &value->tensorView : nullptr;
+    if ((!view && value->typeIndex != TypeIndex::kPointer) ||
         (view &&
          (view->ndim != desc->rank() || (view->ndim && !view->shape)))) {
       return Status::InvalidArgument(
           "Native host tensor rank or type mismatch");
     }
-    packed.push_back(reinterpret_cast<intptr_t>(view ? view->data : value.ptr));
+    packed.push_back(
+        reinterpret_cast<intptr_t>(view ? view->data : value->ptr));
     llvm::SmallVector<int64_t> shape, strides(desc->rank());
     for (int d = 0; d < desc->rank(); ++d) {
       int64_t size = view ? view->shape[d] : desc->shape()[d];

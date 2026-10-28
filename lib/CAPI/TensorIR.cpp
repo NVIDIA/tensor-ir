@@ -18,6 +18,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MemoryBuffer.h"
 
@@ -39,6 +40,7 @@ using mlir::nv_tensor_ir::StatusCode;
 using mlir::nv_tensor_ir::StatusOr;
 using tensor_ir::rt::Any;
 using tensor_ir::rt::CudaTileRuntimeKernel;
+using tensor_ir::rt::ElementType;
 using tensor_ir::rt::PackedArgs;
 using tensor_ir::rt::Stream;
 using tensor_ir::rt::TensorView;
@@ -63,7 +65,44 @@ unwrapBytecodeVersion(MlirTensorIRBytecodeVersion version) {
   return *cppVersion;
 }
 
-llvm::SmallVector<Any, 8> unwrapPackedArgs(MlirTensorIRPackedArgs args) {
+StatusOr<ElementType> unwrapElementType(MlirTensorIRElementType type) {
+  switch (type) {
+  case MlirTensorIRElementTypeBool:
+    return ElementType::Bool;
+  case MlirTensorIRElementTypeF16:
+    return ElementType::F16;
+  case MlirTensorIRElementTypeBF16:
+    return ElementType::BF16;
+  case MlirTensorIRElementTypeF32:
+    return ElementType::F32;
+  case MlirTensorIRElementTypeF64:
+    return ElementType::F64;
+  case MlirTensorIRElementTypeSI8:
+    return ElementType::SI8;
+  case MlirTensorIRElementTypeSI16:
+    return ElementType::SI16;
+  case MlirTensorIRElementTypeSI32:
+    return ElementType::SI32;
+  case MlirTensorIRElementTypeSI64:
+    return ElementType::SI64;
+  case MlirTensorIRElementTypeUI8:
+    return ElementType::UI8;
+  case MlirTensorIRElementTypeUI16:
+    return ElementType::UI16;
+  case MlirTensorIRElementTypeUI32:
+    return ElementType::UI32;
+  case MlirTensorIRElementTypeUI64:
+    return ElementType::UI64;
+  case MlirTensorIRElementTypeF8E4M3FN:
+    return ElementType::F8E4M3FN;
+  case MlirTensorIRElementTypeF8E5M2:
+    return ElementType::F8E5M2;
+  }
+  return Status::InvalidArgument("unsupported TensorIR element type");
+}
+
+StatusOr<llvm::SmallVector<Any, 8>>
+unwrapPackedArgs(MlirTensorIRPackedArgs args) {
   llvm::SmallVector<Any, 8> unpacked;
   unpacked.reserve(args.numArgs);
   for (size_t index = 0; index < args.numArgs; ++index) {
@@ -71,12 +110,6 @@ llvm::SmallVector<Any, 8> unwrapPackedArgs(MlirTensorIRPackedArgs args) {
     switch (argument.kind) {
     case MlirTensorIRArgumentKindNone:
       unpacked.emplace_back();
-      break;
-    case MlirTensorIRArgumentKindInt64:
-      unpacked.emplace_back(argument.value.int64Value);
-      break;
-    case MlirTensorIRArgumentKindFloat64:
-      unpacked.emplace_back(argument.value.float64Value);
       break;
     case MlirTensorIRArgumentKindPointer:
       unpacked.emplace_back(argument.value.pointerValue);
@@ -86,8 +119,19 @@ llvm::SmallVector<Any, 8> unwrapPackedArgs(MlirTensorIRPackedArgs args) {
           argument.value.tensor.data, argument.value.tensor.rank,
           argument.value.tensor.shape, argument.value.tensor.strides});
       break;
+    case MlirTensorIRArgumentKindScalar: {
+      StatusOr<ElementType> type =
+          unwrapElementType(argument.value.scalar.type);
+      if (!type.ok()) {
+        return type.status();
+      }
+      unpacked.push_back(
+          Any::makeScalarAny(*type, &argument.value.scalar.bits));
+      break;
+    }
     default:
-      llvm_unreachable("unsupported TensorIR runtime argument kind");
+      return Status::InvalidArgument(
+          "unsupported TensorIR runtime argument kind");
     }
   }
   return unpacked;
@@ -154,6 +198,37 @@ prepareCompile(MlirTensorIRCompilerInvocation invocation,
 
 void mlirTensorIRRegisterAllDialects(MlirDialectRegistry registry) {
   mlir::nv_tensor_ir::registerDialects(*unwrap(registry));
+}
+
+MlirLogicalResult mlirTensorIRElementTypeFromSpelling(
+    MlirStringRef spelling, MlirTensorIRElementType *result,
+    MlirStringCallback errorCallback, void *errorUserData) {
+  llvm::StringRef name(spelling.data, spelling.length);
+  auto match = llvm::StringSwitch<std::optional<MlirTensorIRElementType>>(name)
+                   .Case("i1", MlirTensorIRElementTypeBool)
+                   .Case("f16", MlirTensorIRElementTypeF16)
+                   .Case("bf16", MlirTensorIRElementTypeBF16)
+                   .Case("f32", MlirTensorIRElementTypeF32)
+                   .Case("f64", MlirTensorIRElementTypeF64)
+                   .Case("si8", MlirTensorIRElementTypeSI8)
+                   .Case("si16", MlirTensorIRElementTypeSI16)
+                   .Case("si32", MlirTensorIRElementTypeSI32)
+                   .Case("si64", MlirTensorIRElementTypeSI64)
+                   .Case("ui8", MlirTensorIRElementTypeUI8)
+                   .Case("ui16", MlirTensorIRElementTypeUI16)
+                   .Case("ui32", MlirTensorIRElementTypeUI32)
+                   .Case("ui64", MlirTensorIRElementTypeUI64)
+                   .Case("f8E4M3FN", MlirTensorIRElementTypeF8E4M3FN)
+                   .Case("f8E5M2", MlirTensorIRElementTypeF8E5M2)
+                   .Default(std::nullopt);
+  if (!match) {
+    return reportStatus(
+        mlir::nv_tensor_ir::Status::InvalidArgument(
+            "Unsupported TensorIR element type spelling: " + name.str()),
+        errorCallback, errorUserData);
+  }
+  *result = *match;
+  return mlirLogicalResultSuccess();
 }
 
 // BytecodeVersion C API
@@ -384,9 +459,12 @@ MlirLogicalResult mlirTensorIRRuntimeKernelCheckSupport(
         Status::InvalidArgument("TensorIR runtime kernel is null"),
         errorCallback, errorUserData);
   }
-  auto unpacked = unwrapPackedArgs(args);
+  StatusOr<llvm::SmallVector<Any, 8>> unpacked = unwrapPackedArgs(args);
+  if (!unpacked.ok()) {
+    return reportStatus(unpacked.status(), errorCallback, errorUserData);
+  }
   Status status = static_cast<tensor_ir::rt::IRuntimeKernel *>(kernel.ptr)
-                      ->checkSupport(makePackedArgs(unpacked));
+                      ->checkSupport(makePackedArgs(*unpacked));
   *supported = status.ok();
   if (status.code() == StatusCode::kConstraintNotSatisfied) {
     return mlirLogicalResultSuccess();
@@ -403,9 +481,12 @@ MlirLogicalResult mlirTensorIRRuntimeKernelQueryWorkspaceSize(
         Status::InvalidArgument("TensorIR runtime kernel is null"),
         errorCallback, errorUserData);
   }
-  auto unpacked = unwrapPackedArgs(args);
+  StatusOr<llvm::SmallVector<Any, 8>> unpacked = unwrapPackedArgs(args);
+  if (!unpacked.ok()) {
+    return reportStatus(unpacked.status(), errorCallback, errorUserData);
+  }
   *workspaceSize = static_cast<tensor_ir::rt::IRuntimeKernel *>(kernel.ptr)
-                       ->queryWorkspaceSize(makePackedArgs(unpacked));
+                       ->queryWorkspaceSize(makePackedArgs(*unpacked));
   return mlirLogicalResultSuccess();
 }
 
@@ -418,9 +499,12 @@ MlirLogicalResult mlirTensorIRRuntimeKernelLaunch(
         Status::InvalidArgument("TensorIR runtime kernel is null"),
         errorCallback, errorUserData);
   }
-  auto unpacked = unwrapPackedArgs(args);
+  StatusOr<llvm::SmallVector<Any, 8>> unpacked = unwrapPackedArgs(args);
+  if (!unpacked.ok()) {
+    return reportStatus(unpacked.status(), errorCallback, errorUserData);
+  }
   return reportStatus(static_cast<tensor_ir::rt::IRuntimeKernel *>(kernel.ptr)
-                          ->launch(makePackedArgs(unpacked),
+                          ->launch(makePackedArgs(*unpacked),
                                    Workspace{workspaceData, workspaceSize},
                                    reinterpret_cast<Stream>(stream)),
                       errorCallback, errorUserData);

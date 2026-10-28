@@ -43,13 +43,10 @@ module {
 module {
   gpu.module @kernels {
   func.func @unlowered(
-      %arg: memref<4xf32, #ptr.generic_space>) attributes {gpu.kernel} {
+      %arg: memref<4xf32>) attributes {gpu.kernel} {
     %zero = arith.constant 0 : index
-    %ptr = ptr.to_ptr %arg : memref<4xf32, #ptr.generic_space>
-        -> !ptr.ptr<#ptr.generic_space>
-    %tile = nv_tensor_ir.load %ptr[%zero]
-        view offset: [0], sizes: [4], strides: [1], alignment: 4
-        : !ptr.ptr<#ptr.generic_space> to tensor<4xf32>
+    %tile = nv_tensor_ir.load %arg tile_indices [%zero], alignment 4
+        : memref<4xf32> to tensor<4xf32>
     // expected-error @+1 {{failed to legalize operation 'nv_tensor_ir.gelu_bwd'}}
     %unused = "nv_tensor_ir.gelu_bwd"(%tile, %tile) : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
     return
@@ -80,6 +77,28 @@ module {
   func.func @tensor_argument(%arg: tensor<4xf32>) attributes {gpu.kernel} {
     return
   }
+  }
+}
+
+// -----
+
+module {
+  gpu.module @kernels {
+    // expected-error @below {{outlined TensorIR kernel memref arguments must have a statically zero offset}}
+    func.func @static_offset(%arg: memref<16xf32, strided<[1], offset: 3>>) attributes {gpu.kernel} {
+      return
+    }
+  }
+}
+
+// -----
+
+module {
+  gpu.module @kernels {
+    // expected-error @below {{outlined TensorIR kernel memref arguments must have a statically zero offset}}
+    func.func @dynamic_offset(%arg: memref<16xf32, strided<[1], offset: ?>>) attributes {gpu.kernel} {
+      return
+    }
   }
 }
 

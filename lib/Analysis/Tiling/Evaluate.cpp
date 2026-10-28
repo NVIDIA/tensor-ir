@@ -28,6 +28,9 @@ namespace tiling_analysis {
 /// Size value used for dynamic dimensions.
 constexpr int64_t kDynamicSizeValue = 128;
 
+/// Overhead of load masking (bytes).
+constexpr int kLoadMaskingOverhead = 2 * kRegisterSize;
+
 /// ----- Layout analysis ------------------------------------------------------
 ///
 /// The evaluator computes layout propagation and normalization on demand:
@@ -196,7 +199,7 @@ findPivots(GraphOp graph, const LayoutPropagationAnalysis &propagation,
     }
 
     // Pointwise operations split the layout.
-    if (isa<PointwiseOpInterface>(op)) {
+    if (op->hasTrait<OpTrait::Elementwise>()) {
       if (op->getNumOperands() == 1) {
         return process(op->getOperand(0), layout);
       }
@@ -572,11 +575,11 @@ std::optional<TilingEvaluation> evaluateV5(MatmulOp matmul,
   }
 
   int64_t mmaCount = tile.b * tile.k / kSize;
-  return TilingEvaluation{
-      .registerStorageBytes = storageSize,
-      .sharedStorageBytes = sharedMemorySize,
-      .mmaOperationCount = {0, 0, mmaCount},
-  };
+  TilingEvaluation result{};
+  result.registerStorageBytes = storageSize;
+  result.sharedStorageBytes = sharedMemorySize;
+  result.mmaOperationCount = {0, 0, mmaCount};
+  return result;
 }
 
 std::optional<TilingEvaluation> evaluateV3(MatmulOp matmul,
@@ -608,11 +611,11 @@ std::optional<TilingEvaluation> evaluateV3(MatmulOp matmul,
       tile.b * tile.m * tile.n * getSizeBytes(matmul.getResult().getType());
 
   int64_t mmaCount = tile.b * tile.k / kSize;
-  return TilingEvaluation{
-      .registerStorageBytes = storageSize,
-      .sharedStorageBytes = sharedMemorySize,
-      .mmaOperationCount = {0, mmaCount, 0},
-  };
+  TilingEvaluation result{};
+  result.registerStorageBytes = storageSize;
+  result.sharedStorageBytes = sharedMemorySize;
+  result.mmaOperationCount = {0, mmaCount, 0};
+  return result;
 }
 
 int64_t getMatmulRegisterStorage(MatmulOp matmul, const MmaTileSize &tile) {
@@ -642,11 +645,11 @@ std::optional<TilingEvaluation> evaluateV2(MatmulOp matmul,
   int64_t registerStorage = getMatmulRegisterStorage(matmul, tile);
 
   int64_t mmaCount = tile.b * (tile.m / 16) * (tile.n / 8) * (tile.k / kSize);
-  return TilingEvaluation{
-      .registerStorageBytes =
-          std::max(std::max(lhsStorageSize, rhsStorageSize), registerStorage),
-      .mmaOperationCount = {mmaCount, 0, 0},
-  };
+  TilingEvaluation result{};
+  result.registerStorageBytes =
+      std::max(std::max(lhsStorageSize, rhsStorageSize), registerStorage);
+  result.mmaOperationCount = {mmaCount, 0, 0};
+  return result;
 }
 
 /// ----- Evaluation iterator --------------------------------------------------
@@ -658,14 +661,17 @@ std::optional<TilingEvaluation> evaluateV2(MatmulOp matmul,
 /// with their combination.
 ///
 /// Tensor sources are the memory accesses. Each one counts as one access, and
-/// the number of cache lines is estimated from the CuTe layout clamped to the
+/// the number of sectors is estimated from the CuTe layout clamped to the
 /// tile shape:
 ///
 /// - Broadcast dimensions (stride 0) are skipped.
-/// - Dimensions with a stride below the cache line size are densely packed.
+/// - Dimensions with a stride below the sector size are densely packed.
 ///   Together they form one contiguous run per combination of the other
-///   dimensions, which may straddle one extra cache line if it is unaligned.
+///   dimensions, which may straddle one extra sector if it is unaligned.
 /// - Every step along a larger (or dynamic) stride starts a new run.
+/// - Stores (output layouts) cost twice as much when the runs only partially
+///   cover their sectors, modeling the read-modify-write: the runs are not a
+///   whole number of sectors (e.g. single elements) or have gaps.
 ///
 /// Tensor sources without a graph input or output (e.g. constants) cost
 /// nothing. The other layouts combine the evaluations of their children:
@@ -695,6 +701,11 @@ public:
   EvaluationLayoutIterator(TilingEvaluator &parent, TilingConfig config)
       : TilingLayoutIterator(std::move(config)), parent(parent) {}
 
+  LogicalResult start(LayoutSourceAttrInterface layout, bool writes) {
+    this->writes = writes;
+    return dispatch(layout);
+  }
+
   LogicalResult processTensor(TensorSourceAttr tensor) override;
   LogicalResult processComposite(CompositeSourceAttr composite) override;
   LogicalResult processConcat(ConcatSourceAttr concat) override;
@@ -707,6 +718,7 @@ public:
 private:
   TilingEvaluator &parent;
   SmallVector<TilingEvaluation> evals;
+  bool writes = false;
 };
 
 LogicalResult EvaluationLayoutIterator::processTensor(TensorSourceAttr tensor) {
@@ -733,16 +745,15 @@ LogicalResult EvaluationLayoutIterator::processTensor(TensorSourceAttr tensor) {
 
   // Get the element type size (bytes).
   int elementSizeBytes = getSizeBytes(elementType);
-  int elementsPerCacheLine = kCacheLineSize / elementSizeBytes;
+  int elementsPerSector = kMemorySectorSize / elementSizeBytes;
 
-  // If the offset is not aligned to the cache line boundary, an additional
-  // cache line access may be needed.
-  bool isUnalignedAccess =
-      (tensor.getOffset() * elementSizeBytes) % kCacheLineSize != 0;
+  // If the offset is not aligned to the sector boundary, an additional sector
+  // access may be needed.
+  bool isUnalignedAccess = tensor.getOffset() % elementsPerSector != 0;
 
-  // Calculate the number of cache line accessed for the current tile.
-  int64_t cacheLineAccesses = 1;
-  int64_t innerSpan = 0;
+  // Calculate the number of sector accessed for the current tile.
+  int64_t sectorAccesses = 1;
+  int64_t innerSpan = 0, innerSize = 1;
   for (auto [tileSize, dimLayout] :
        llvm::zip_equal(config.tileShape, cuteLayout)) {
     auto cgShape = dimLayout.shape();
@@ -754,46 +765,58 @@ LogicalResult EvaluationLayoutIterator::processTensor(TensorSourceAttr tensor) {
     int64_t actualSize = std::min<int64_t>(tileSize, maxSize);
 
     // Assume large stride value for dynamic strides.
-    int64_t cacheLinesInDim = actualSize;
     if (tcutegen::is_static(cgStride)) {
       // Skip broadcasted dimensions.
       int64_t stride = cgStride.as_int();
       if (stride == 0) {
         continue;
       }
-      if (stride < elementsPerCacheLine) {
-        // If the accesses are not aligned to the cache line boundary, an
-        // additional cache line access may be needed.
+      if (stride < elementsPerSector) {
+        // If the accesses are not aligned to the sector boundary, an additional
+        // sector access may be needed.
         int64_t accessSize = actualSize * stride;
-        isUnalignedAccess |= accessSize % elementsPerCacheLine != 0 &&
-                             elementsPerCacheLine % accessSize != 0;
+        isUnalignedAccess |= accessSize % elementsPerSector != 0 &&
+                             elementsPerSector % accessSize != 0;
         // Extend the contiguous span by this dimension's extent.
         innerSpan += accessSize - stride;
-        cacheLinesInDim = 1;
-      } else {
-        // Each step along a large-stride dimension starts a new contiguous run.
-        // Unless the stride is a multiple of the cache line size, these runs
-        // start mid-line and may straddle an extra cache line.
-        isUnalignedAccess |= stride % elementsPerCacheLine != 0;
+        innerSize *= actualSize;
+        continue;
       }
+      // Each step along a large-stride dimension starts a new contiguous run.
+      // Unless the stride is a multiple of the sector size, these runs start
+      // mid-sector and may straddle an extra sector.
+      isUnalignedAccess |= stride % elementsPerSector != 0;
     }
-    cacheLineAccesses *= cacheLinesInDim;
+    sectorAccesses *= actualSize;
   }
 
-  // Densely packed dimensions (stride below a cache line size) form a single
+  // Densely packed dimensions (stride below a sector size) form a single
   // contiguous run per combination of the remaining dimensions. The run covers
-  // `innerSpan` elements and may straddle one extra cache line when the access
+  // `innerSpan` elements and may straddle one extra sector when the access
   // is unaligned.
   if (innerSpan > 0) {
-    cacheLineAccesses *= llvm::divideCeil(innerSpan + 1, elementsPerCacheLine) +
-                         isUnalignedAccess;
+    sectorAccesses *=
+        llvm::divideCeil(innerSpan + 1, elementsPerSector) + isUnalignedAccess;
+  }
+
+  // Stores that only partially cover a sector need a read-modify-write: the
+  // sector is read before the written elements are merged into it. This is
+  // the case when the run is not a whole number of sectors (including runs of
+  // a single element, when there are no densely packed dimensions), when it
+  // has gaps (the span is larger than the number of written elements), or when
+  // it is unaligned (the first and last sectors are partially covered).
+  bool isPartialWrite = isUnalignedAccess ||
+                        innerSize % elementsPerSector != 0 ||
+                        innerSpan + 1 != innerSize;
+  if (writes && isPartialWrite) {
+    sectorAccesses *= 2;
   }
 
   // Add the evaluation result.
-  evals.push_back(TilingEvaluation{
-      .memoryAccessCount = 1,
-      .memoryAccessCost = cacheLineAccesses,
-  });
+  TilingEvaluation result{};
+  result.memoryAccessCount = 1;
+  result.memoryAccessCost = sectorAccesses;
+  evals.push_back(result);
   return success();
 }
 
@@ -912,9 +935,11 @@ EvaluationLayoutIterator::processReduction(ReductionSourceAttr reduction) {
   int64_t repeats = 1;
   SmallVector<int32_t> reductionTileShape = calculateReductionTileShape(
       reduction.getReductionShape(), config.reductionTileSize);
+  bool maskNeeded = false;
   for (auto [size, tileSize] :
        llvm::zip_equal(reduction.getReductionShape(), reductionTileShape)) {
     repeats *= llvm::divideCeil(size, tileSize);
+    maskNeeded |= size % tileSize != 0;
   }
 
   // Update the evaluation result.
@@ -923,7 +948,7 @@ EvaluationLayoutIterator::processReduction(ReductionSourceAttr reduction) {
   result.memoryAccessCost *= repeats;
   if (repeats > 1) {
     result.loopIterationCount =
-        repeats * std::max(result.loopIterationCount, 1l);
+        repeats * std::max(result.loopIterationCount, int64_t{1});
   }
   for (int i = 0; i < 3; ++i) {
     result.mmaOperationCount[i] *= repeats;
@@ -937,15 +962,20 @@ EvaluationLayoutIterator::processReduction(ReductionSourceAttr reduction) {
     tileSize *= stride.as_int() > 0 ? config.tileShape[idx] : 1;
   }
 
-  // Calculate the total storage needed by the operand iteration space.
-  int64_t storageBytes = tileSize * operandLiveSizes[0];
+  // Add the codegen overhead to the live size.
+  int liveSize = operandLiveSizes[0];
   if (repeats > 1) {
-    int64_t accumulatorSize =
+    int accumulatorSize =
         llvm::sum_of(llvm::map_range(reduceOp->getResultTypes(), getSizeBytes));
-    storageBytes += tileSize * accumulatorSize;
+    liveSize += accumulatorSize + kRegisterSize; // Loop overhead.
   }
+  if (maskNeeded) {
+    liveSize += kLoadMaskingOverhead;
+  }
+
+  // Set the total storage needed by the operand iteration space.
   result.registerStorageBytes =
-      std::max(result.registerStorageBytes, storageBytes);
+      std::max(result.registerStorageBytes, tileSize * liveSize);
 
   return success();
 }
@@ -953,7 +983,7 @@ EvaluationLayoutIterator::processReduction(ReductionSourceAttr reduction) {
 LogicalResult EvaluationLayoutIterator::processMatmul(MatmulSourceAttr matmul) {
   // Get the operation and the live sizes.
   Operation *matmulOp = parent.pivots[matmul];
-  ArrayRef<int> operandLiveSizes = parent.liveSizes[matmulOp];
+  SmallVector<int> operandLiveSizes = parent.liveSizes[matmulOp];
   if (!matmulOp) {
     return parent.graph.emitError() << "missing pivot: " << matmul;
   }
@@ -965,11 +995,19 @@ LogicalResult EvaluationLayoutIterator::processMatmul(MatmulSourceAttr matmul) {
 
   // Calculate the number of loop iterations.
   int64_t repeats = 1;
+  bool maskNeeded = false;
   SmallVector<int32_t> reductionTileShape = calculateReductionTileShape(
       matmul.getContractingShape(), config.reductionTileSize);
   for (auto [size, tileSize] :
        llvm::zip_equal(matmul.getContractingShape(), reductionTileShape)) {
     repeats *= llvm::divideCeil(size, tileSize);
+    maskNeeded |= size % tileSize != 0;
+  }
+
+  // If the mask is needed, add the overhead to the live sizes.
+  if (maskNeeded) {
+    operandLiveSizes[0] += kLoadMaskingOverhead;
+    operandLiveSizes[1] += kLoadMaskingOverhead;
   }
 
   // Calculate tile B/M/N/K sizes.
@@ -1006,10 +1044,8 @@ LogicalResult EvaluationLayoutIterator::processMatmul(MatmulSourceAttr matmul) {
     int64_t lhsStorageSize = tile.b * tile.m * tile.k * operandLiveSizes[0];
     int64_t rhsStorageSize = tile.b * tile.n * tile.k * operandLiveSizes[1];
     int64_t registerStorage = getMatmulRegisterStorage(matmulCast, tile);
-    result = TilingEvaluation{
-        .registerStorageBytes =
-            std::max(std::max(lhsStorageSize, rhsStorageSize), registerStorage),
-    };
+    result.registerStorageBytes =
+        std::max(std::max(lhsStorageSize, rhsStorageSize), registerStorage);
   }
 
   // Accumulate the results from the child evals.
@@ -1027,7 +1063,7 @@ LogicalResult EvaluationLayoutIterator::processMatmul(MatmulSourceAttr matmul) {
   }
   if (repeats > 1) {
     result.loopIterationCount =
-        repeats * std::max(result.loopIterationCount, 1l);
+        repeats * std::max(result.loopIterationCount, int64_t{1});
   }
 
   // Replace the child evals with the accumulated result.
@@ -1102,7 +1138,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
 }
 
 bool TilingEvaluation::operator<(const TilingEvaluation &other) const {
-  // Total number of memory cache lines accessed is the main discriminator.
+  // Total number of memory sectors accessed is the main discriminator.
   int64_t score = blockCount * memoryAccessCost;
   int64_t otherScore = other.blockCount * other.memoryAccessCost;
   if (score != otherScore) {
@@ -1260,13 +1296,13 @@ TilingEvaluator::evaluate(const TilingConfig &config) {
 
   // Get the evaluation result for the input layout.
   EvaluationLayoutIterator iterator(*this, config);
-  if (failed(iterator.dispatch(inputLayout))) {
+  if (failed(iterator.start(inputLayout, /*writes=*/false))) {
     return failure();
   }
   TilingEvaluation result = iterator.getResult();
 
   // Get the evaluation result for the output layout.
-  if (failed(iterator.dispatch(outputLayout))) {
+  if (failed(iterator.start(outputLayout, /*writes=*/true))) {
     return failure();
   }
   TilingEvaluation output = iterator.getResult();

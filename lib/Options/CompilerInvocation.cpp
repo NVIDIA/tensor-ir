@@ -88,6 +88,8 @@ Status CompilerInvocation::validate() const {
                                    deviceTarget.kernelTarget + "'");
   }
 
+  const int32_t targetCc = target->getComputeCapabilityVersion();
+
   if (cudaTile.persistenceMode == PersistenceMode::Static &&
       cudaTile.smCount <= 0) {
     return Status::InvalidArgument(
@@ -95,9 +97,12 @@ Status CompilerInvocation::validate() const {
         std::to_string(cudaTile.smCount));
   }
 
-  if (cudaTile.artifactKind == ArtifactKind::Cubin &&
-      target->getPortability() != ArchPortability::arch_conditional) {
-    return Status::InvalidArgument("Cubin requires an arch-conditional target");
+  if (targetCc >= toCcInt(ComputeCapability::Sm90)) {
+    if (cudaTile.artifactKind == ArtifactKind::Cubin &&
+        target->getPortability() != ArchPortability::arch_conditional) {
+      return Status::InvalidArgument(
+          "Cubin requires an arch-conditional target");
+    }
   }
 
   return Status::Ok();

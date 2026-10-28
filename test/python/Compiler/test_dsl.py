@@ -5,13 +5,12 @@
 # REQUIRES: cuda-gpu
 
 from __future__ import annotations
-import os
 
 import pytest
 import torch
 
 from nv_tensor_ir import dsl as tir
-from nv_tensor_ir.runtime import Artifact
+from nv_tensor_ir.runtime import Artifact, ArchPortability
 from dsl_reference import evaluate_trace_reference
 from dsl_test_utils import (
     _assert_compile_error,
@@ -241,6 +240,34 @@ def test_add_sample_module_builder(profiling: bool) -> None:
     _run_assert_trace(compiled, a, b, output=output, profile=profiling)
 
 
+def test_dynamic_tensors_without_unit_stride(profiling: bool) -> None:
+    a = torch.randn(16, device="cuda", dtype=torch.float32)[::2]
+    b = torch.randn(16, device="cuda", dtype=torch.float32)[::2]
+    output = torch.full((16,), float("nan"), device="cuda")[::2]
+    options = tir.CompileOptions()
+    options.codegen_strategy = tir.CodegenStrategy.LayoutPropagation
+    # Explicit tiles bypass automatic tile analysis, which needs static layouts.
+    options.tile_sizes = [8]
+
+    compiled = tir.compile(
+        add_kernel, a, b, output=output, options=options, dynamic_shape=True
+    )
+
+    for node_id in compiled.graph.input_ids + compiled.graph.output_ref_ids:
+        assert compiled.graph.nodes[node_id].value_info.stride == (2,)
+    assert compiled.module.operation.verify()
+    mlir = _module_text(compiled)
+    assert "tensor<?xf32>" in mlir
+    assert mlir.count('nv_tensor_ir.stride = "(?)"') == 3
+    assert "nv_tensor_ir.alignment" not in mlir
+    assert compiled.get_bytecode()
+
+    _require_runtime_launch()
+    _run_kernel(compiled, a, b, output=output, profile=profiling)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output, a + b)
+
+
 def test_trace_then_compile(profiling: bool) -> None:
     a = torch.randn((8, 8), device="cuda", dtype=torch.float32)
     b = torch.randn((8, 8), device="cuda", dtype=torch.float32)
@@ -289,9 +316,6 @@ def test_serialize_deserialize_round_trip(tmp_path) -> None:
 
 def test_run_profile_executes_kernel() -> None:
     import_or_skip = True
-    # ${tir-internal-release begin}
-    import_or_skip = os.getenv("CI") not in ("1", "true")
-    # ${tir-internal-release end}
     if import_or_skip:
         pytest.importorskip("cupti")
 
@@ -742,7 +766,7 @@ def test_compile_accepts_tensor_specs() -> None:
     assert "nv_tensor_ir.graph @add_from_tensor_specs" in mlir
     assert "tensor<8x8xf32>" in mlir
     assert 'nv_tensor_ir.stride = "(8,1)"' in mlir
-    assert compiled.graph.nodes[compiled.graph.input_ids[0]].tensor_info.dtype is (
+    assert compiled.graph.nodes[compiled.graph.input_ids[0]].value_info.dtype is (
         tir.DataType.F32
     )
 
@@ -797,7 +821,7 @@ def test_compile_accepts_numpy_dlpack_metadata(profiling: bool) -> None:
 
     mlir = _module_text(compiled)
     assert "tensor<8x8xf32>" in mlir
-    assert compiled.graph.nodes[compiled.graph.input_ids[0]].tensor_info.dtype is (
+    assert compiled.graph.nodes[compiled.graph.input_ids[0]].value_info.dtype is (
         tir.DataType.F32
     )
 
@@ -912,7 +936,7 @@ def test_convert_accepts_data_type() -> None:
     ).graph
 
     result_id = graph.result_ids[0]
-    assert graph.nodes[result_id].tensor_info.dtype is tir.DataType.F32
+    assert graph.nodes[result_id].value_info.dtype is tir.DataType.F32
 
 
 def test_public_api_surface() -> None:
@@ -1417,3 +1441,38 @@ def test_scan_slice_two_inputs_different_axes(reverse, with_history):
         kernel, values, scales, initial, output=outputs, tile_sizes=(1, 8)
     )
     _run_assert_trace(compiled, values, scales, initial, output=outputs, rtol=0, atol=0)
+
+
+def test_reduction_reshape_preserves_contracting_axes():
+    _require_runtime_launch()
+
+    @tir.kernel
+    def kernel(seed, bias):
+        reduced = tir.reduce(seed, dimensions=(0, 2))
+        result = tir.reshape(reduced, shape=(2, 4))
+        return result + tir.transpose(bias, permutation=(1, 0))
+
+    seed = torch.arange(128, device="cuda", dtype=torch.float32).reshape(4, 8, 4)
+    bias = torch.arange(8, device="cuda", dtype=torch.float32).reshape(4, 2)
+    output = torch.empty((2, 4), device="cuda", dtype=torch.float32)
+    compiled = tir.compile(kernel, seed, bias, output=output, tile_sizes=(1, 2))
+    _run_assert_trace(compiled, seed, bias, output=output, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("cc", [80, 90, 100])
+def test_cubin_compilation(cc):
+    @tir.kernel
+    def _tir_kernel(A, B):
+        result = tir.matmul(A, B)
+        return result
+
+    options = tir.CompileOptions()
+    options.compute_capability = cc
+    options.artifact_kind = 1
+    if cc >= 90:
+        options.arch_portability = ArchPortability.arch_conditional
+
+    a = tir.TensorSpec((8, 8), dtype=tir.DataType.F16)
+    b = tir.TensorSpec((8, 8), dtype=tir.DataType.F16)
+    c = tir.TensorSpec((8, 8), dtype=tir.DataType.F16)
+    tir.compile(_tir_kernel, a, b, output=c, options=options)

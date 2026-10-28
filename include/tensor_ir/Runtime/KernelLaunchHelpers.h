@@ -43,7 +43,7 @@ namespace tensor_ir::rt {
 namespace detail {
 
 /// Pack the common pointer/scalar slot, optionally seeding unresolved operands.
-bool packOperandIntoInt64Slot(void *ptr, int64_t &slot, bool scalar,
+bool packOperandIntoInt64Slot(const void *ptr, int64_t &slot, bool scalar,
                               int32_t scalarBytes,
                               bool allowUnresolvedPointers);
 

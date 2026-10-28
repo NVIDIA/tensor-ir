@@ -17,7 +17,6 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/Ptr/IR/PtrOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 
 #include "llvm/ADT/DenseSet.h"
@@ -69,76 +68,30 @@ convertPaddingValue(MLIRContext *context, TilePaddingAttr padding) {
                  : cuda_tile::PaddingValueAttr{};
 }
 
-struct BackendTensorViewLayout {
-  SmallVector<int64_t> shape;
-  SmallVector<int64_t> strides;
-};
-
 struct ViewMetadata {
   ArrayRef<int64_t> shape;
-  ArrayRef<int64_t> strides;
+  SmallVector<int64_t> strides;
   int64_t offset;
   int64_t alignment;
 };
 
 template <typename OpTy>
 static ViewMetadata getViewMetadata(OpTy op) {
-  return {op.getStaticSizes(), op.getStaticStrides(),
-          op.getStaticOffsets().front(), op.getAlignmentAttr().getInt()};
+  auto type = cast<MemRefType>(op.getView().getType());
+  auto [strides, offset] = type.getStridesAndOffset();
+  return {type.getShape(), std::move(strides), offset,
+          op.getAlignmentAttr().getInt()};
 }
 
-/// CudaTile tensor views require strictly positive constant strides. Represent
-/// a zero-stride TensorIR dimension as a size-one backend dimension with an
-/// arbitrary non-unit stride. The non-unit stride keeps the collapsed dimension
-/// from being mistaken for a contiguous dimension. Tile accesses restore the
-/// logical broadcast after loads and select one representative slice before
-/// stores.
-static BackendTensorViewLayout getBackendLayout(ViewMetadata view) {
-  constexpr int64_t kCollapsedBroadcastStride = 2;
-  BackendTensorViewLayout layout{SmallVector<int64_t>(view.shape),
-                                 SmallVector<int64_t>(view.strides)};
-  for (size_t dimension = 0; dimension < layout.shape.size(); ++dimension) {
-    if (layout.strides[dimension] != 0) {
-      continue;
-    }
-    layout.shape[dimension] = 1;
-    layout.strides[dimension] = kCollapsedBroadcastStride;
-  }
-  return layout;
-}
-
-static bool isBroadcastTileDimension(ViewMetadata view, size_t tileDimension) {
-  return view.strides[tileDimension] == 0;
-}
-
-static SmallVector<int64_t> getBackendTileShape(ViewMetadata view,
-                                                ArrayRef<int64_t> tileShape) {
-  SmallVector<int64_t> shape(tileShape);
-  for (size_t dimension = 0; dimension < shape.size(); ++dimension) {
-    if (isBroadcastTileDimension(view, dimension)) {
-      shape[dimension] = 1;
-    }
-  }
-  return shape;
-}
-
-struct BackendPartition {
-  Value value;
-  SmallVector<int64_t> tileShape;
-};
-
-static BackendPartition
+static cuda_tile::MakePartitionViewOp
 createBackendPartition(ConversionPatternRewriter &rewriter, Location loc,
-                       ViewMetadata sourceView, Value backendView,
-                       ArrayRef<int64_t> sourceTileShape,
+                       Value backendView, ArrayRef<int64_t> sourceTileShape,
                        TilePaddingAttr padding) {
-  SmallVector<int64_t> backendTileShape =
-      getBackendTileShape(sourceView, sourceTileShape);
   SmallVector<int32_t> partitionTileShape;
   SmallVector<int32_t> dimMap;
-  partitionTileShape.reserve(backendTileShape.size());
-  dimMap.reserve(backendTileShape.size());
-  for (auto [dimension, extent] : llvm::enumerate(backendTileShape)) {
+  partitionTileShape.reserve(sourceTileShape.size());
+  dimMap.reserve(sourceTileShape.size());
+  for (auto [dimension, extent] : llvm::enumerate(sourceTileShape)) {
     partitionTileShape.push_back(extent);
     dimMap.push_back(dimension);
   }
@@ -147,21 +100,21 @@ createBackendPartition(ConversionPatternRewriter &rewriter, Location loc,
       DenseI32ArrayAttr::get(rewriter.getContext(), partitionTileShape),
       cast<cuda_tile::TensorViewType>(backendView.getType()), dimMap,
       convertPaddingValue(rewriter.getContext(), padding));
-  Value partition = cuda_tile::MakePartitionViewOp::create(
-      rewriter, loc, partitionType, backendView);
-  return {partition, std::move(backendTileShape)};
+  return cuda_tile::MakePartitionViewOp::create(rewriter, loc, partitionType,
+                                                backendView);
 }
 
 /// Materialize static coordinates in the backend's scalar index type.
 static SmallVector<Value> convertIndices(ConversionPatternRewriter &rewriter,
                                          Location loc,
                                          ArrayRef<int64_t> staticIndices,
-                                         ValueRange dynamicIndices) {
+                                         ArrayRef<ValueRange> dynamicIndices) {
   SmallVector<Value> indices;
   auto dynamic = dynamicIndices.begin();
   for (int64_t index : staticIndices) {
     if (ShapedType::isDynamic(index)) {
-      indices.push_back(*dynamic++);
+      assert(dynamic->size() == 1 && "index must convert to one value");
+      indices.push_back((dynamic++)->front());
     } else {
       Value coordinate = createConstant(
           rewriter, loc,
@@ -173,29 +126,12 @@ static SmallVector<Value> convertIndices(ConversionPatternRewriter &rewriter,
   return indices;
 }
 
-static Value zeroBroadcastCoordinates(ConversionPatternRewriter &rewriter,
-                                      Location loc, ViewMetadata view,
-                                      MutableArrayRef<Value> coordinates) {
-  Value zero;
-  for (size_t dimension = 0; dimension < coordinates.size(); ++dimension) {
-    if (!isBroadcastTileDimension(view, dimension)) {
-      continue;
-    }
-    if (!zero) {
-      zero = createConstant(
-          rewriter, loc,
-          cuda_tile::TileType::get(
-              ArrayRef<int64_t>{},
-              IntegerType::get(rewriter.getContext(), /*width=*/32)),
-          int64_t{0});
-    }
-    coordinates[dimension] = zero;
-  }
-  return zero;
-}
-
-/// Type conversion for the staged ABI. A memref becomes a pointer followed by
-/// dynamic sizes and explicit dynamic strides.
+/// Kernel argument memrefs have statically zero offsets and expand to a pointer,
+/// dynamic sizes, and explicit dynamic strides. Internal views additionally
+/// carry a dynamic offset, when present, immediately after the pointer. Static
+/// fields come from the memref type. Identity-layout strides are derived from
+/// sizes. Reinterpret casts replace the offset relative to the aligned pointer,
+/// leaving that pointer unchanged.
 class OutlinedKernelTypeConverter : public TypeConverter {
 public:
   explicit OutlinedKernelTypeConverter(MLIRContext *context) {
@@ -217,13 +153,11 @@ public:
       return cuda_tile::TileType::get(
           type.getShape(), convertElementType(context, type.getElementType()));
     });
-    addConversion([context](ptr::PtrType) -> Type {
-      Type bytePointer =
-          cuda_tile::PointerType::get(IntegerType::get(context, /*width=*/8));
-      return cuda_tile::TileType::get(ArrayRef<int64_t>{}, bytePointer);
-    });
     addConversion([context](MemRefType type, SmallVectorImpl<Type> &results)
                       -> std::optional<LogicalResult> {
+      if (type.getMemorySpace()) {
+        return failure();
+      }
       SmallVector<int64_t> strides;
       int64_t offset;
       if (failed(type.getStridesAndOffset(strides, offset))) {
@@ -233,19 +167,12 @@ public:
       Type pointerType = cuda_tile::PointerType::get(elementType);
       results.push_back(
           cuda_tile::TileType::get(ArrayRef<int64_t>{}, pointerType));
-      Type indexType = scalarIndex(context);
-      for (int64_t size : type.getShape()) {
-        if (ShapedType::isDynamic(size)) {
-          results.push_back(indexType);
-        }
-      }
+      unsigned numDynamicFields =
+          ShapedType::isDynamic(offset) + type.getNumDynamicDims();
       if (!type.getLayout().isIdentity()) {
-        for (int64_t stride : strides) {
-          if (ShapedType::isDynamic(stride)) {
-            results.push_back(indexType);
-          }
-        }
+        numDynamicFields += llvm::count_if(strides, ShapedType::isDynamic);
       }
+      results.append(numDynamicFields, scalarIndex(context));
       return success();
     });
   }
@@ -346,13 +273,7 @@ static Value applyOffsetAndAlignment(ConversionPatternRewriter &rewriter,
                                      Location loc, Value pointer, Value offset,
                                      int64_t staticOffset, int64_t alignment,
                                      Type elementType) {
-  if (!offset && staticOffset != 0) {
-    offset = createConstant(
-        rewriter, loc,
-        OutlinedKernelTypeConverter::scalarIndex(rewriter.getContext()),
-        staticOffset);
-  }
-  if (offset) {
+  if (staticOffset != 0) {
     pointer = cuda_tile::OffsetOp::create(rewriter, loc, pointer, offset);
   }
 
@@ -366,181 +287,155 @@ static Value applyOffsetAndAlignment(ConversionPatternRewriter &rewriter,
   return pointer;
 }
 
-static FailureOr<Value>
-createBackendTensorView(ConversionPatternRewriter &rewriter, Location loc,
-                        ViewMetadata view, Value base, ValueRange dynamicShapes,
-                        ValueRange dynamicStrides, ValueRange dynamicOffset,
-                        Type sourceElementType) {
-  Type elementType =
-      convertElementType(rewriter.getContext(), sourceElementType);
-  auto pointerType = cuda_tile::TileType::get(
-      ArrayRef<int64_t>{}, cuda_tile::PointerType::get(elementType));
-  Value pointer = base;
-  if (pointer.getType() != pointerType) {
-    // Bufferization's ptr.to_ptr result is lowered through an opaque i8
-    // pointer. Recover the already typed source when this access immediately
-    // casts it back to the memref element type.
-    auto cast = pointer.getDefiningOp<cuda_tile::PtrToPtrOp>();
-    if (cast && cast.getSource().getType() == pointerType) {
-      pointer = cast.getSource();
-    } else {
-      pointer =
-          cuda_tile::PtrToPtrOp::create(rewriter, loc, pointerType, pointer);
-    }
-  }
+/// Decode the compact memref descriptor. Static fields come from the type;
+/// identity-layout strides are derived from sizes rather than ABI arguments.
+struct ConvertedMemRef {
+  Value base;
+  Value offset;
+  SmallVector<Value> sizes;
+  SmallVector<Value> strides;
+};
 
-  FailureOr<Value> convertedOffset = only(dynamicOffset);
-  if (failed(convertedOffset) && !dynamicOffset.empty()) {
+static FailureOr<ConvertedMemRef>
+decodeMemRef(ConversionPatternRewriter &rewriter, Location loc, MemRefType type,
+             ValueRange descriptor) {
+  if (descriptor.empty()) {
     return failure();
   }
-  Value offset = dynamicOffset.empty() ? Value{} : *convertedOffset;
-  pointer = applyOffsetAndAlignment(rewriter, loc, pointer, offset, view.offset,
-                                    view.alignment, elementType);
-
-  BackendTensorViewLayout layout = getBackendLayout(view);
-  auto resultType = cuda_tile::TensorViewType::get(
-      rewriter.getContext(), elementType, layout.shape, layout.strides);
-  SmallVector<Value> backendDynamicShapes;
-  backendDynamicShapes.reserve(dynamicShapes.size());
-  size_t dynamicShapeIndex = 0;
-  for (auto [dimension, extent] : llvm::enumerate(view.shape)) {
-    if (!ShapedType::isDynamic(extent)) {
-      continue;
+  auto [strides, offset] = type.getStridesAndOffset();
+  auto constant = [&](int64_t value) {
+    return createConstant(
+        rewriter, loc,
+        OutlinedKernelTypeConverter::scalarIndex(rewriter.getContext()), value);
+  };
+  unsigned field = 1;
+  auto read = [&](int64_t value) -> Value {
+    if (!ShapedType::isDynamic(value)) {
+      return constant(value);
     }
-    if (dynamicShapeIndex >= dynamicShapes.size()) {
+    return field < descriptor.size() ? descriptor[field++] : Value{};
+  };
+  ConvertedMemRef result;
+  result.base = descriptor.front();
+  result.offset = read(offset);
+  if (!result.offset) {
+    return failure();
+  }
+  for (int64_t size : type.getShape()) {
+    Value value = read(size);
+    if (!value) {
       return failure();
     }
-    Value dynamicShape = dynamicShapes[dynamicShapeIndex++];
-    if (view.strides[dimension] != 0) {
-      backendDynamicShapes.push_back(dynamicShape);
+    result.sizes.push_back(value);
+  }
+  result.strides.resize(type.getRank());
+  if (type.getLayout().isIdentity()) {
+    Value running = constant(1);
+    for (int64_t dim = type.getRank() - 1; dim >= 0; --dim) {
+      result.strides[dim] = running;
+      if (dim != 0) {
+        running = cuda_tile::MulIOp::create(rewriter, loc, running,
+                                            result.sizes[dim]);
+      }
+    }
+  } else {
+    for (unsigned dim = 0; dim < strides.size(); ++dim) {
+      result.strides[dim] = read(strides[dim]);
+      if (!result.strides[dim]) {
+        return failure();
+      }
     }
   }
-  if (dynamicShapeIndex != dynamicShapes.size()) {
+  if (field != descriptor.size()) {
     return failure();
   }
+  return result;
+}
+
+static FailureOr<Value>
+createBackendMemRefView(ConversionPatternRewriter &rewriter, Location loc,
+                        MemRefType type, ValueRange descriptor,
+                        const ViewMetadata &view) {
+  auto decoded = decodeMemRef(rewriter, loc, type, descriptor);
+  if (failed(decoded)) {
+    return failure();
+  }
+  Type elementType =
+      convertElementType(rewriter.getContext(), type.getElementType());
+  auto pointerType = cuda_tile::TileType::get(
+      ArrayRef<int64_t>{}, cuda_tile::PointerType::get(elementType));
+  if (decoded->base.getType() != pointerType) {
+    return failure();
+  }
+  Value pointer =
+      applyOffsetAndAlignment(rewriter, loc, decoded->base, decoded->offset,
+                              view.offset, view.alignment, elementType);
+  SmallVector<int64_t> shape(view.shape), strides(view.strides);
+  SmallVector<Value> dynamicSizes, dynamicStrides;
+  for (auto [dim, stride] : llvm::enumerate(strides)) {
+    if (ShapedType::isDynamic(shape[dim])) {
+      dynamicSizes.push_back(decoded->sizes[dim]);
+    }
+    if (ShapedType::isDynamic(stride)) {
+      dynamicStrides.push_back(decoded->strides[dim]);
+    }
+  }
+  auto resultType = cuda_tile::TensorViewType::get(rewriter.getContext(),
+                                                   elementType, shape, strides);
   return cuda_tile::MakeTensorViewOp::create(rewriter, loc, resultType, pointer,
-                                             backendDynamicShapes,
-                                             dynamicStrides)
+                                             dynamicSizes, dynamicStrides)
       .getResult();
 }
 
-class ToPtrConversion : public OpConversionPattern<ptr::ToPtrOp> {
+template <typename OpTy>
+class TiledMemoryConversion : public OpConversionPattern<OpTy> {
 public:
-  using OpConversionPattern::OpConversionPattern;
+  using OpConversionPattern<OpTy>::OpConversionPattern;
 
   LogicalResult
-  matchAndRewrite(ptr::ToPtrOp op, OneToNOpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    if (!isa<ptr::GenericSpaceAttr>(op.getType().getMemorySpace())) {
-      return op.emitError(
-          "staged CudaTile lowering requires generic pointer space");
-    }
-    ValueRange source = adaptor.getPtr();
-    if (source.empty()) {
-      return rewriter.notifyMatchFailure(op,
-                                         "missing converted source pointer");
-    }
-    auto resultType =
-        typeConverter->convertType<cuda_tile::TileType>(op.getType());
-    if (!resultType) {
-      return rewriter.notifyMatchFailure(op, "pointer type is not convertible");
-    }
-    Value result = source.front();
-    if (result.getType() != resultType) {
-      result = cuda_tile::PtrToPtrOp::create(rewriter, op.getLoc(), resultType,
-                                             result);
-    }
-    rewriter.replaceOp(op, result);
-    return success();
-  }
-};
-
-class LoadConversion : public OpConversionPattern<LoadOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(LoadOp op, OpAdaptor adaptor,
+  matchAndRewrite(OpTy op,
+                  typename OpConversionPattern<OpTy>::OneToNOpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto tileType =
-        typeConverter->convertType<cuda_tile::TileType>(op.getType());
+        this->getTypeConverter()->template convertType<cuda_tile::TileType>(
+            op.getTile().getType());
     if (!tileType) {
       return failure();
     }
     ViewMetadata view = getViewMetadata(op);
-    FailureOr<Value> backendView = createBackendTensorView(
-        rewriter, op.getLoc(), view, adaptor.getBase(), adaptor.getSizes(),
-        adaptor.getStrides(), adaptor.getOffsets(),
-        op.getType().getElementType());
+    FailureOr<Value> backendView = createBackendMemRefView(
+        rewriter, op.getLoc(), cast<MemRefType>(op.getView().getType()),
+        adaptor.getView(), view);
     if (failed(backendView)) {
       return rewriter.notifyMatchFailure(op,
                                          "failed to form backend tensor view");
     }
-    auto sourceTileType = cast<RankedTensorType>(op.getType());
-    BackendPartition partition =
-        createBackendPartition(rewriter, op.getLoc(), view, *backendView,
-                               sourceTileType.getShape(), op.getPaddingAttr());
+    TilePaddingAttr padding;
+    if constexpr (std::is_same_v<OpTy, LoadOp>) {
+      padding = op.getPaddingAttr();
+    }
+    auto partition = createBackendPartition(rewriter, op.getLoc(), *backendView,
+                                            tileType.getShape(), padding);
     SmallVector<Value> indices = convertIndices(
         rewriter, op.getLoc(), op.getStaticIndices(), adaptor.getIndices());
-    zeroBroadcastCoordinates(rewriter, op.getLoc(), view, indices);
-    auto loadType = cuda_tile::TileType::get(partition.tileShape,
-                                             tileType.getElementType());
-    auto load = cuda_tile::LoadViewTkoOp::create(
-        rewriter, op.getLoc(), loadType,
-        cuda_tile::TokenType::get(rewriter.getContext()),
-        cuda_tile::MemoryOrderingSemantics::WEAK, /*memory_scope=*/nullptr,
-        partition.value, indices, /*token=*/nullptr,
-        createLoadStoreOptimizationHints(rewriter.getContext(),
-                                         op.getAllowTma(), /*latency=*/-1));
-    Value result = load.getResult(0);
-    if (loadType != tileType) {
-      result = cuda_tile::BroadcastOp::create(rewriter, op.getLoc(), tileType,
-                                              result);
+    auto hints = createLoadStoreOptimizationHints(
+        rewriter.getContext(), op.getAllowTma(), /*latency=*/-1);
+    if constexpr (std::is_same_v<OpTy, LoadOp>) {
+      auto load = cuda_tile::LoadViewTkoOp::create(
+          rewriter, op.getLoc(), tileType,
+          cuda_tile::TokenType::get(rewriter.getContext()),
+          cuda_tile::MemoryOrderingSemantics::WEAK, /*memory_scope=*/nullptr,
+          partition, indices, /*token=*/nullptr, hints);
+      rewriter.replaceOp(op, load.getResult(0));
+    } else {
+      Value tile = adaptor.getTile().front();
+      cuda_tile::StoreViewTkoOp::create(
+          rewriter, op.getLoc(),
+          cuda_tile::TokenType::get(rewriter.getContext()),
+          cuda_tile::MemoryOrderingSemantics::WEAK, /*memory_scope=*/nullptr,
+          tile, partition, indices, /*token=*/nullptr, hints);
+      rewriter.eraseOp(op);
     }
-    rewriter.replaceOp(op, result);
-    return success();
-  }
-};
-
-class StoreConversion : public OpConversionPattern<StoreOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(StoreOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    Value tile = adaptor.getTile();
-    ViewMetadata view = getViewMetadata(op);
-    FailureOr<Value> backendView = createBackendTensorView(
-        rewriter, op.getLoc(), view, adaptor.getBase(), adaptor.getSizes(),
-        adaptor.getStrides(), adaptor.getOffsets(),
-        op.getTile().getType().getElementType());
-    if (failed(backendView)) {
-      return rewriter.notifyMatchFailure(op,
-                                         "failed to form backend tensor view");
-    }
-    auto sourceTileType = cast<RankedTensorType>(op.getTile().getType());
-    BackendPartition partition = createBackendPartition(
-        rewriter, op.getLoc(), view, *backendView, sourceTileType.getShape(),
-        /*padding=*/TilePaddingAttr{});
-    SmallVector<Value> indices = convertIndices(
-        rewriter, op.getLoc(), op.getStaticIndices(), adaptor.getIndices());
-    Value zero = zeroBroadcastCoordinates(rewriter, op.getLoc(), view, indices);
-    auto tileType = cast<cuda_tile::TileType>(tile.getType());
-    auto storeType = cuda_tile::TileType::get(partition.tileShape,
-                                              tileType.getElementType());
-    if (storeType != tileType) {
-      SmallVector<Value> extractIndices(indices.size(), zero);
-      tile = cuda_tile::ExtractOp::create(rewriter, op.getLoc(), storeType,
-                                          tile, extractIndices);
-    }
-    cuda_tile::StoreViewTkoOp::create(
-        rewriter, op.getLoc(), cuda_tile::TokenType::get(rewriter.getContext()),
-        cuda_tile::MemoryOrderingSemantics::WEAK, /*memory_scope=*/nullptr,
-        tile, partition.value, indices, /*token=*/nullptr,
-        createLoadStoreOptimizationHints(rewriter.getContext(),
-                                         op.getAllowTma(), /*latency=*/-1));
-    rewriter.eraseOp(op);
     return success();
   }
 };
@@ -772,21 +667,18 @@ public:
     auto memrefType = cast<MemRefType>(op.getSource().getType());
     int64_t size = memrefType.getDimSize(*dimension);
     if (!ShapedType::isDynamic(size)) {
-      rewriter.replaceOp(
-          op, createConstant(rewriter, op.getLoc(),
-                             OutlinedKernelTypeConverter::scalarIndex(
-                                 rewriter.getContext()),
-                             size));
+      Value result = createConstant(
+          rewriter, op.getLoc(),
+          OutlinedKernelTypeConverter::scalarIndex(rewriter.getContext()),
+          size);
+      rewriter.replaceOp(op, result);
       return success();
     }
 
     ValueRange descriptor = adaptor.getSource();
-    unsigned field = 1;
-    for (int64_t dim = 0; dim < *dimension; ++dim) {
-      if (memrefType.isDynamicDim(dim)) {
-        ++field;
-      }
-    }
+    auto [strides, offset] = memrefType.getStridesAndOffset();
+    unsigned field = 1 + ShapedType::isDynamic(offset) +
+                     memrefType.getDynamicDimIndex(*dimension);
     if (field >= descriptor.size()) {
       return op.emitError("missing dynamic size in converted memref ABI");
     }
@@ -795,116 +687,67 @@ public:
   }
 };
 
-static FailureOr<Value> getDescriptorSize(ValueRange descriptor,
-                                          MemRefType type, unsigned dimension) {
-  if (!type.isDynamicDim(dimension)) {
-    return failure();
-  }
-  unsigned field = 1;
-  for (unsigned dim = 0; dim < dimension; ++dim) {
-    if (type.isDynamicDim(dim)) {
-      ++field;
-    }
-  }
-  if (field >= descriptor.size()) {
-    return failure();
-  }
-  return descriptor[field];
-}
-
-static FailureOr<Value> getDescriptorStride(ValueRange descriptor,
-                                            MemRefType type,
-                                            ArrayRef<int64_t> strides,
-                                            unsigned dimension) {
-  if (!ShapedType::isDynamic(strides[dimension])) {
-    return failure();
-  }
-  unsigned field = 1;
-  field += llvm::count_if(type.getShape(), ShapedType::isDynamic);
-  for (unsigned dim = 0; dim < dimension; ++dim) {
-    if (ShapedType::isDynamic(strides[dim])) {
-      ++field;
-    }
-  }
-  if (field >= descriptor.size()) {
-    return failure();
-  }
-  return descriptor[field];
-}
-
-/// Reconstruct strided metadata from the flattened kernel ABI. The pointer ABI
-/// argument already denotes the logical memref origin, so the extracted offset
-/// is zero; dynamic sizes and strides select their corresponding ABI fields.
 class ExtractStridedMetadataConversion
     : public OpConversionPattern<memref::ExtractStridedMetadataOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
-
   LogicalResult
   matchAndRewrite(memref::ExtractStridedMetadataOp op, OneToNOpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    ValueRange descriptor = adaptor.getSource();
-    if (descriptor.empty()) {
+    auto decoded = decodeMemRef(rewriter, op.getLoc(),
+                                cast<MemRefType>(op.getSource().getType()),
+                                adaptor.getSource());
+    if (failed(decoded)) {
       return failure();
     }
-    auto sourceType = cast<MemRefType>(op.getSource().getType());
-    SmallVector<int64_t> strides;
-    int64_t sourceOffset;
-    if (failed(sourceType.getStridesAndOffset(strides, sourceOffset))) {
-      return failure();
-    }
-    auto constant = [&](int64_t value) {
-      return createConstant(
-          rewriter, op.getLoc(),
-          OutlinedKernelTypeConverter::scalarIndex(rewriter.getContext()),
-          value);
-    };
+    SmallVector<Value> values{decoded->base, decoded->offset};
+    llvm::append_range(values, decoded->sizes);
+    llvm::append_range(values, decoded->strides);
+    rewriter.replaceOp(op, values);
+    return success();
+  }
+};
 
-    SmallVector<Value> replacements;
-    replacements.reserve(2 + 2 * sourceType.getRank());
-    replacements.push_back(descriptor.front());
-    replacements.push_back(constant(0));
-    SmallVector<Value> sizes;
-    sizes.reserve(sourceType.getRank());
-    for (auto [dimension, size] : llvm::enumerate(sourceType.getShape())) {
-      if (!ShapedType::isDynamic(size)) {
-        sizes.push_back(constant(size));
-        continue;
+/// Reinterpret casts replace descriptor metadata without moving the base.
+class ReinterpretCastConversion
+    : public OpConversionPattern<memref::ReinterpretCastOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(memref::ReinterpretCastOp op, OneToNOpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto type = op.getType();
+    auto [strides, offset] = type.getStridesAndOffset();
+    SmallVector<Value> descriptor{adaptor.getSource().front()};
+    auto appendDynamic = [&](ArrayRef<OpFoldResult> mixed,
+                             ArrayRef<ValueRange> converted,
+                             ArrayRef<int64_t> resultStaticFields) {
+      unsigned operandIndex = 0;
+      for (auto [value, field] : llvm::zip_equal(mixed, resultStaticFields)) {
+        Value lowered;
+        // Consume each SSA operand even when the result type makes its field
+        // static and therefore omits it from the converted descriptor.
+        if (isa<Value>(value)) {
+          lowered = converted[operandIndex++].front();
+        }
+        if (!ShapedType::isDynamic(field)) {
+          continue;
+        }
+        if (!lowered) {
+          lowered = createConstant(
+              rewriter, op.getLoc(),
+              OutlinedKernelTypeConverter::scalarIndex(rewriter.getContext()),
+              *getConstantIntValue(value));
+        }
+        descriptor.push_back(lowered);
       }
-      FailureOr<Value> dynamic =
-          getDescriptorSize(descriptor, sourceType, dimension);
-      if (failed(dynamic)) {
-        return op.emitError("missing dynamic size in converted memref ABI");
-      }
-      sizes.push_back(*dynamic);
+    };
+    appendDynamic(op.getMixedOffsets(), adaptor.getOffsets(), {offset});
+    appendDynamic(op.getMixedSizes(), adaptor.getSizes(), type.getShape());
+    if (!type.getLayout().isIdentity()) {
+      appendDynamic(op.getMixedStrides(), adaptor.getStrides(), strides);
     }
-    llvm::append_range(replacements, sizes);
-    if (sourceType.getLayout().isIdentity()) {
-      SmallVector<Value> identityStrides(sourceType.getRank());
-      Value running = constant(1);
-      for (size_t position = sourceType.getRank(); position > 0; --position) {
-        size_t dimension = position - 1;
-        identityStrides[dimension] = running;
-        running = cuda_tile::MulIOp::create(rewriter, op.getLoc(), running,
-                                            sizes[dimension]);
-      }
-      llvm::append_range(replacements, identityStrides);
-      rewriter.replaceOp(op, replacements);
-      return success();
-    }
-    for (auto [dimension, stride] : llvm::enumerate(strides)) {
-      if (!ShapedType::isDynamic(stride)) {
-        replacements.push_back(constant(stride));
-        continue;
-      }
-      FailureOr<Value> dynamic =
-          getDescriptorStride(descriptor, sourceType, strides, dimension);
-      if (failed(dynamic)) {
-        return op.emitError("missing dynamic stride in converted memref ABI");
-      }
-      replacements.push_back(*dynamic);
-    }
-    rewriter.replaceOp(op, replacements);
+    rewriter.replaceOpWithMultiple(op, {descriptor});
     return success();
   }
 };
@@ -951,6 +794,12 @@ static LogicalResult verifyOutlinedKernel(func::FuncOp kernel) {
                 "strided memrefs, but got "
              << type;
     }
+    if (offset != 0) {
+      return kernel.emitError()
+             << "outlined TensorIR kernel memref arguments must have a "
+                "statically zero offset, but got "
+             << type;
+    }
   }
   return success();
 }
@@ -980,9 +829,9 @@ convertOutlinedKernels(ModuleOp module,
   OutlinedKernelTypeConverter typeConverter(context);
   ConversionTarget target(*context);
   target.addLegalDialect<cuda_tile::CudaTileDialect, LLVM::LLVMDialect>();
-  target.addIllegalDialect<
-      TensorIRDialect, arith::ArithDialect, func::FuncDialect, gpu::GPUDialect,
-      memref::MemRefDialect, ptr::PtrDialect, scf::SCFDialect>();
+  target.addIllegalDialect<TensorIRDialect, arith::ArithDialect,
+                           func::FuncDialect, gpu::GPUDialect,
+                           memref::MemRefDialect, scf::SCFDialect>();
   target.addIllegalOp<UnrealizedConversionCastOp>();
   target.addLegalOp<mlir::ModuleOp>();
   target.addDynamicallyLegalOp<func::FuncOp>(
@@ -993,13 +842,14 @@ convertOutlinedKernels(ModuleOp module,
 
   RewritePatternSet patterns(context);
   patterns.add<KernelFuncConversion>(typeConverter, context, optimizationHints);
-  patterns.add<ReturnConversion, UnrealizedCastConversion, ToPtrConversion,
-               LoadConversion, StoreConversion, BlockIdConversion,
-               GridDimConversion, ForConversion, IfConversion, YieldConversion,
-               ArithConstantConversion, IndexCastConversion, SIToFPConversion,
-               UIToFPConversion, DimConversion,
-               ExtractStridedMetadataConversion, ModuleConversion>(
-      typeConverter, context);
+  patterns.add<ReturnConversion, UnrealizedCastConversion,
+               TiledMemoryConversion<LoadOp>, TiledMemoryConversion<StoreOp>,
+               BlockIdConversion, GridDimConversion, ForConversion,
+               IfConversion, YieldConversion, ArithConstantConversion,
+               IndexCastConversion, SIToFPConversion, UIToFPConversion,
+               DimConversion, ExtractStridedMetadataConversion,
+               ReinterpretCastConversion, ModuleConversion>(typeConverter,
+                                                            context);
 
   registerOutlinedComputePatterns(patterns, typeConverter,
                                   enableExperimentalCudaTileOps,

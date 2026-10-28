@@ -3,21 +3,13 @@
 module @copy_module {
   gpu.module @kernels {
   func.func @copy(
-      %input: memref<65xf32, #ptr.generic_space>,
-      %output: memref<65xf32, #ptr.generic_space>) attributes {gpu.kernel} {
+      %input: memref<65xf32>,
+      %output: memref<65xf32>) attributes {gpu.kernel} {
     %block = gpu.block_id x
-    %input_ptr = ptr.to_ptr %input
-        : memref<65xf32, #ptr.generic_space>
-          -> !ptr.ptr<#ptr.generic_space>
-    %tile = nv_tensor_ir.load %input_ptr[%block]
-        view offset: [0], sizes: [65], strides: [1], alignment: 16 padding = <zero>
-        : !ptr.ptr<#ptr.generic_space> to tensor<32xf32>
-    %output_ptr = ptr.to_ptr %output
-        : memref<65xf32, #ptr.generic_space>
-          -> !ptr.ptr<#ptr.generic_space>
-    nv_tensor_ir.store %tile, %output_ptr[%block]
-        view offset: [0], sizes: [65], strides: [1], alignment: 16
-        : tensor<32xf32>, !ptr.ptr<#ptr.generic_space>
+    %tile = nv_tensor_ir.load %input tile_indices [%block], alignment 16, padding <zero>
+        : memref<65xf32> to tensor<32xf32>
+    nv_tensor_ir.store %tile, %output tile_indices [%block], alignment 16
+        : tensor<32xf32>, memref<65xf32>
     return
   }
   }
@@ -43,25 +35,18 @@ module @copy_module {
 module @padding_values_module {
   gpu.module @kernels {
   func.func @padding_values(
-      %input: memref<32xf32, #ptr.generic_space>) attributes {gpu.kernel} {
+      %input: memref<32xf32>) attributes {gpu.kernel} {
     %c0 = arith.constant 0 : index
-    %ptr = ptr.to_ptr %input : memref<32xf32, #ptr.generic_space>
-        -> !ptr.ptr<#ptr.generic_space>
-    %0 = nv_tensor_ir.load %ptr[%c0]
-        view offset: [0], sizes: [32], strides: [1], alignment: 4 padding = <zero>
-        : !ptr.ptr<#ptr.generic_space> to tensor<16xf32>
-    %1 = nv_tensor_ir.load %ptr[%c0]
-        view offset: [0], sizes: [32], strides: [1], alignment: 4 padding = <neg_zero>
-        : !ptr.ptr<#ptr.generic_space> to tensor<16xf32>
-    %2 = nv_tensor_ir.load %ptr[%c0]
-        view offset: [0], sizes: [32], strides: [1], alignment: 4 padding = <nan>
-        : !ptr.ptr<#ptr.generic_space> to tensor<16xf32>
-    %3 = nv_tensor_ir.load %ptr[%c0]
-        view offset: [0], sizes: [32], strides: [1], alignment: 4 padding = <pos_inf>
-        : !ptr.ptr<#ptr.generic_space> to tensor<16xf32>
-    %4 = nv_tensor_ir.load %ptr[%c0]
-        view offset: [0], sizes: [32], strides: [1], alignment: 4 padding = <neg_inf>
-        : !ptr.ptr<#ptr.generic_space> to tensor<16xf32>
+    %0 = nv_tensor_ir.load %input tile_indices [%c0], alignment 4, padding <zero>
+        : memref<32xf32> to tensor<16xf32>
+    %1 = nv_tensor_ir.load %input tile_indices [%c0], alignment 4, padding <neg_zero>
+        : memref<32xf32> to tensor<16xf32>
+    %2 = nv_tensor_ir.load %input tile_indices [%c0], alignment 4, padding <nan>
+        : memref<32xf32> to tensor<16xf32>
+    %3 = nv_tensor_ir.load %input tile_indices [%c0], alignment 4, padding <pos_inf>
+        : memref<32xf32> to tensor<16xf32>
+    %4 = nv_tensor_ir.load %input tile_indices [%c0], alignment 4, padding <neg_inf>
+        : memref<32xf32> to tensor<16xf32>
     return
   }
   }
@@ -79,32 +64,26 @@ module @padding_values_module {
 module @dynamic_module {
   gpu.module @kernels {
   func.func @dynamic(
-      %input: memref<?x128xf32, strided<[?, 1], offset: ?>, #ptr.generic_space>,
-      %output: memref<?x128xf32, strided<[?, 1], offset: ?>, #ptr.generic_space>) attributes {gpu.kernel} {
+      %input: memref<?x128xf32, strided<[?, 1]>>,
+      %output: memref<?x128xf32, strided<[?, 1]>>) attributes {gpu.kernel} {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %input_base, %input_offset, %input_sizes:2, %input_strides:2 =
         memref.extract_strided_metadata %input
-        : memref<?x128xf32, strided<[?, 1], offset: ?>, #ptr.generic_space>
-          -> memref<f32, #ptr.generic_space>, index, index, index, index, index
-    %input_ptr = ptr.to_ptr %input
-        : memref<?x128xf32, strided<[?, 1], offset: ?>, #ptr.generic_space>
-          -> !ptr.ptr<#ptr.generic_space>
-    %tile = nv_tensor_ir.load %input_ptr[%c0, %c1]
-        view offset: [0], sizes: [%input_sizes#0, 128],
-             strides: [%input_strides#0, 1], alignment: 4
-        : !ptr.ptr<#ptr.generic_space> to tensor<16x32xf32>
+        : memref<?x128xf32, strided<[?, 1]>>
+          -> memref<f32>, index, index, index, index, index
+    %access_view_0 = memref.reinterpret_cast %input to offset: [0], sizes: [%input_sizes#0, 128], strides: [%input_strides#0, 1]
+        : memref<?x128xf32, strided<[?, 1]>> to memref<?x128xf32, strided<[?, 1], offset: 0>>
+    %tile = nv_tensor_ir.load %access_view_0 tile_indices [%c0, %c1], alignment 4
+        : memref<?x128xf32, strided<[?, 1], offset: 0>> to tensor<16x32xf32>
     %output_base, %output_offset, %output_sizes:2, %output_strides:2 =
         memref.extract_strided_metadata %output
-        : memref<?x128xf32, strided<[?, 1], offset: ?>, #ptr.generic_space>
-          -> memref<f32, #ptr.generic_space>, index, index, index, index, index
-    %output_ptr = ptr.to_ptr %output
-        : memref<?x128xf32, strided<[?, 1], offset: ?>, #ptr.generic_space>
-          -> !ptr.ptr<#ptr.generic_space>
-    nv_tensor_ir.store %tile, %output_ptr[%c0, %c1]
-        view offset: [0], sizes: [%output_sizes#0, 128],
-             strides: [%output_strides#0, 1], alignment: 4
-        : tensor<16x32xf32>, !ptr.ptr<#ptr.generic_space>
+        : memref<?x128xf32, strided<[?, 1]>>
+          -> memref<f32>, index, index, index, index, index
+    %access_view_1 = memref.reinterpret_cast %output to offset: [0], sizes: [%output_sizes#0, 128], strides: [%output_strides#0, 1]
+        : memref<?x128xf32, strided<[?, 1]>> to memref<?x128xf32, strided<[?, 1], offset: 0>>
+    nv_tensor_ir.store %tile, %access_view_1 tile_indices [%c0, %c1], alignment 4
+        : tensor<16x32xf32>, memref<?x128xf32, strided<[?, 1], offset: 0>>
     return
   }
   }
@@ -121,71 +100,59 @@ module @dynamic_module {
 
 module @broadcast_view_module {
   gpu.module @kernels {
-  func.func @broadcast_view(
-      %input: memref<16xf32, #ptr.generic_space>,
-      %output: memref<16xf32, #ptr.generic_space>) attributes {gpu.kernel} {
-    %c0 = arith.constant 0 : index
-    %c1 = arith.constant 1 : index
-    %input_ptr = ptr.to_ptr %input : memref<16xf32, #ptr.generic_space>
-        -> !ptr.ptr<#ptr.generic_space>
-    %tile = nv_tensor_ir.load %input_ptr[%c1, %c1]
-        view offset: [0], sizes: [16, 8], strides: [1, 0], alignment: 4
-        : !ptr.ptr<#ptr.generic_space> to tensor<16x8xf32>
-    %output_ptr = ptr.to_ptr %output : memref<16xf32, #ptr.generic_space>
-        -> !ptr.ptr<#ptr.generic_space>
-    nv_tensor_ir.store %tile, %output_ptr[%c1, %c1]
-        view offset: [0], sizes: [16, 8], strides: [1, 0], alignment: 4
-        : tensor<16x8xf32>, !ptr.ptr<#ptr.generic_space>
-    return
-  }
+    func.func @broadcast_view(%input: memref<16xf32>,
+        %output: memref<16xf32>) attributes {gpu.kernel} {
+      %input_view = memref.reinterpret_cast %input to offset: [0], sizes: [16, 1], strides: [1, 2]
+          : memref<16xf32> to memref<16x1xf32, strided<[1, 2]>>
+      %loaded = nv_tensor_ir.load %input_view tile_indices [1, 0], alignment 4
+          : memref<16x1xf32, strided<[1, 2]>> to tensor<16x1xf32>
+      %tile = nv_tensor_ir.broadcast %loaded : tensor<16x1xf32> -> tensor<16x8xf32>
+      %slice = nv_tensor_ir.slice %tile starts = [0, 0] limits = [16, 1] strides = [1, 1]
+          : tensor<16x8xf32> -> tensor<16x1xf32>
+      %output_view = memref.reinterpret_cast %output to offset: [0], sizes: [16, 1], strides: [1, 2]
+          : memref<16xf32> to memref<16x1xf32, strided<[1, 2]>>
+      nv_tensor_ir.store %slice, %output_view tile_indices [1, 0], alignment 4
+          : tensor<16x1xf32>, memref<16x1xf32, strided<[1, 2]>>
+      return
+    }
   }
 }
 
-// CHECK-LABEL: cuda_tile.module @cuda_tile_broadcast_view_module {
-// CHECK: entry @broadcast_view
-// CHECK: %[[ONE:.*]] = constant <i32: 1> : tile<i32>
+// CHECK-LABEL: cuda_tile.module @cuda_tile_broadcast_view_module
 // CHECK: %[[INPUT_VIEW:.*]] = make_tensor_view %{{.*}}, shape = [16, 1], strides = [1, 2]
 // CHECK: %[[INPUT_PARTITION:.*]] = make_partition_view %[[INPUT_VIEW]]
-// CHECK: %[[LOAD_ZERO:.*]] = constant <i32: 0> : tile<i32>
-// CHECK: %[[LOADED:.*]], %{{.*}} = load_view_tko weak %[[INPUT_PARTITION]][%[[ONE]], %[[LOAD_ZERO]]]
+// CHECK: %[[LOADED:.*]], %{{.*}} = load_view_tko weak %[[INPUT_PARTITION]]
 // CHECK-SAME: -> tile<16x1xf32>
 // CHECK: %[[BROADCAST:.*]] = broadcast %[[LOADED]] : tile<16x1xf32> -> tile<16x8xf32>
+// CHECK: %[[EXTRACTED:.*]] = extract %[[BROADCAST]]{{.*}} : tile<16x8xf32> -> tile<16x1xf32>
 // CHECK: %[[OUTPUT_VIEW:.*]] = make_tensor_view %{{.*}}, shape = [16, 1], strides = [1, 2]
 // CHECK: %[[OUTPUT_PARTITION:.*]] = make_partition_view %[[OUTPUT_VIEW]]
-// CHECK: %[[STORE_ZERO:.*]] = constant <i32: 0> : tile<i32>
-// CHECK: %[[EXTRACTED:.*]] = extract %[[BROADCAST]][%[[STORE_ZERO]], %[[STORE_ZERO]]] : tile<16x8xf32> -> tile<16x1xf32>
-// CHECK: store_view_tko weak %[[EXTRACTED]], %[[OUTPUT_PARTITION]][%[[ONE]], %[[STORE_ZERO]]]
+// CHECK: store_view_tko weak %[[EXTRACTED]], %[[OUTPUT_PARTITION]]
 
 // -----
 
-// F4 view accesses require exactly one unit stride to identify the packing
-// dimension. Collapsing two broadcast dimensions must therefore preserve the
-// first dimension as the only unit-stride dimension for both load and store.
+// F4 accesses require exactly one unit stride to identify the packing dimension. Unit broadcast dimensions use stride 2 for both load and store.
 module @f4_broadcast_view_module {
   gpu.module @kernels {
-  func.func @f4_broadcast_view(
-      %input: memref<16xf4E2M1FN, #ptr.generic_space>,
-      %output: memref<16xf4E2M1FN, #ptr.generic_space>) attributes {gpu.kernel} {
-    %c0 = arith.constant 0 : index
-    %c1 = arith.constant 1 : index
-    %input_ptr = ptr.to_ptr %input
-        : memref<16xf4E2M1FN, #ptr.generic_space>
-          -> !ptr.ptr<#ptr.generic_space>
-    %tile = nv_tensor_ir.load %input_ptr[%c1, %c1, %c1]
-        view offset: [0], sizes: [16, 8, 4], strides: [1, 0, 0], alignment: 16
-        : !ptr.ptr<#ptr.generic_space> to tensor<16x8x4xf4E2M1FN>
-    %output_ptr = ptr.to_ptr %output
-        : memref<16xf4E2M1FN, #ptr.generic_space>
-          -> !ptr.ptr<#ptr.generic_space>
-    nv_tensor_ir.store %tile, %output_ptr[%c1, %c1, %c1]
-        view offset: [0], sizes: [16, 8, 4], strides: [1, 0, 0], alignment: 16
-        : tensor<16x8x4xf4E2M1FN>, !ptr.ptr<#ptr.generic_space>
-    return
-  }
+    func.func @f4_broadcast_view(%input: memref<16xf4E2M1FN>,
+        %output: memref<16xf4E2M1FN>) attributes {gpu.kernel} {
+      %input_view = memref.reinterpret_cast %input to offset: [0], sizes: [16, 1, 1], strides: [1, 2, 2]
+          : memref<16xf4E2M1FN> to memref<16x1x1xf4E2M1FN, strided<[1, 2, 2]>>
+      %loaded = nv_tensor_ir.load %input_view tile_indices [1, 0, 0], alignment 16
+          : memref<16x1x1xf4E2M1FN, strided<[1, 2, 2]>> to tensor<16x1x1xf4E2M1FN>
+      %tile = nv_tensor_ir.broadcast %loaded : tensor<16x1x1xf4E2M1FN> -> tensor<16x8x4xf4E2M1FN>
+      %slice = nv_tensor_ir.slice %tile starts = [0, 0, 0] limits = [16, 1, 1] strides = [1, 1, 1]
+          : tensor<16x8x4xf4E2M1FN> -> tensor<16x1x1xf4E2M1FN>
+      %output_view = memref.reinterpret_cast %output to offset: [0], sizes: [16, 1, 1], strides: [1, 2, 2]
+          : memref<16xf4E2M1FN> to memref<16x1x1xf4E2M1FN, strided<[1, 2, 2]>>
+      nv_tensor_ir.store %slice, %output_view tile_indices [1, 0, 0], alignment 16
+          : tensor<16x1x1xf4E2M1FN>, memref<16x1x1xf4E2M1FN, strided<[1, 2, 2]>>
+      return
+    }
   }
 }
 
-// CHECK-LABEL: cuda_tile.module @cuda_tile_f4_broadcast_view_module {
+// CHECK-LABEL: cuda_tile.module @cuda_tile_f4_broadcast_view_module
 // CHECK: entry @f4_broadcast_view(%[[INPUT:.*]]: tile<ptr<f4E2M1FN>>, %[[OUTPUT:.*]]: tile<ptr<f4E2M1FN>>)
 // CHECK: %[[INPUT_ALIGNED:.*]] = assume div_by<16>, %[[INPUT]] : tile<ptr<f4E2M1FN>>
 // CHECK: %[[INPUT_VIEW:.*]] = make_tensor_view %[[INPUT_ALIGNED]], shape = [16, 1, 1], strides = [1, 2, 2]
@@ -193,43 +160,32 @@ module @f4_broadcast_view_module {
 // CHECK: %[[LOADED:.*]], %{{.*}} = load_view_tko weak %[[INPUT_PARTITION]]
 // CHECK-SAME: -> tile<16x1x1xf4E2M1FN>
 // CHECK: %[[BROADCAST:.*]] = broadcast %[[LOADED]] : tile<16x1x1xf4E2M1FN> -> tile<16x8x4xf4E2M1FN>
+// CHECK: %[[EXTRACTED:.*]] = extract %[[BROADCAST]]{{.*}} : tile<16x8x4xf4E2M1FN> -> tile<16x1x1xf4E2M1FN>
 // CHECK: %[[OUTPUT_ALIGNED:.*]] = assume div_by<16>, %[[OUTPUT]] : tile<ptr<f4E2M1FN>>
 // CHECK: %[[OUTPUT_VIEW:.*]] = make_tensor_view %[[OUTPUT_ALIGNED]], shape = [16, 1, 1], strides = [1, 2, 2]
 // CHECK: %[[OUTPUT_PARTITION:.*]] = make_partition_view %[[OUTPUT_VIEW]]
-// CHECK: %[[EXTRACTED:.*]] = extract %[[BROADCAST]]{{.*}} : tile<16x8x4xf4E2M1FN> -> tile<16x1x1xf4E2M1FN>
 // CHECK: store_view_tko weak %[[EXTRACTED]], %[[OUTPUT_PARTITION]]
 
 // -----
 
 module @dynamic_broadcast_view_module {
   gpu.module @kernels {
-  func.func @dynamic_broadcast_view(
-      %input: memref<?x16xf32, strided<[16, 1]>, #ptr.generic_space>,
-      %output: memref<4x16xf32, #ptr.generic_space>) attributes {gpu.kernel} {
-    %c0 = arith.constant 0 : index
-    %input_base, %input_offset, %input_sizes:2, %input_strides:2 =
-        memref.extract_strided_metadata %input
-        : memref<?x16xf32, strided<[16, 1]>, #ptr.generic_space>
-          -> memref<f32, #ptr.generic_space>, index, index, index, index, index
-    %input_ptr = ptr.to_ptr %input
-        : memref<?x16xf32, strided<[16, 1]>, #ptr.generic_space>
-          -> !ptr.ptr<#ptr.generic_space>
-    %tile = nv_tensor_ir.load %input_ptr[%c0, %c0]
-        view offset: [0], sizes: [%input_sizes#0, 16], strides: [0, 1], alignment: 4
-        : !ptr.ptr<#ptr.generic_space> to tensor<4x16xf32>
-    %output_ptr = ptr.to_ptr %output
-        : memref<4x16xf32, #ptr.generic_space> -> !ptr.ptr<#ptr.generic_space>
-    nv_tensor_ir.store %tile, %output_ptr[%c0, %c0]
-        view offset: [0], sizes: [4, 16], strides: [16, 1], alignment: 4
-        : tensor<4x16xf32>, !ptr.ptr<#ptr.generic_space>
-    return
-  }
+    func.func @dynamic_broadcast_view(%input: memref<?x16xf32, strided<[16, 1]>>,
+        %output: memref<4x16xf32>) attributes {gpu.kernel} {
+      %view = memref.reinterpret_cast %input to offset: [0], sizes: [1, 16], strides: [2, 1]
+          : memref<?x16xf32, strided<[16, 1]>> to memref<1x16xf32, strided<[2, 1]>>
+      %loaded = nv_tensor_ir.load %view tile_indices [0, 0], alignment 4
+          : memref<1x16xf32, strided<[2, 1]>> to tensor<1x16xf32>
+      %tile = nv_tensor_ir.broadcast %loaded : tensor<1x16xf32> -> tensor<4x16xf32>
+      nv_tensor_ir.store %tile, %output tile_indices [0, 0], alignment 4
+          : tensor<4x16xf32>, memref<4x16xf32>
+      return
+    }
   }
 }
 
-// CHECK-LABEL: cuda_tile.module @cuda_tile_dynamic_broadcast_view_module {
-// CHECK: entry @dynamic_broadcast_view
-// CHECK: %[[INPUT_VIEW:.*]] = make_tensor_view %{{.*}}, shape = [1, 16], strides = [2, 1] : tensor_view<1x16xf32, strides=[2,1]>
+// CHECK-LABEL: cuda_tile.module @cuda_tile_dynamic_broadcast_view_module
+// CHECK: %[[INPUT_VIEW:.*]] = make_tensor_view %{{.*}}, shape = [1, 16], strides = [2, 1]
 // CHECK: %[[INPUT_PARTITION:.*]] = make_partition_view %[[INPUT_VIEW]]
 // CHECK: %[[INPUT_TILE:.*]], %{{.*}} = load_view_tko weak %[[INPUT_PARTITION]]
 // CHECK-SAME: -> tile<1x16xf32>

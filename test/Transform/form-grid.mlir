@@ -1,17 +1,17 @@
-// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,tile-selection),tir-bufferize,func.func(tir-form-grid))' --split-input-file | FileCheck %s --implicit-check-not='layout =' --implicit-check-not='iteration_space' --implicit-check-not='tile_size' --implicit-check-not='result_views' --implicit-check-not='result_layouts' --implicit-check-not='nv_tensor_ir.iter_space' --implicit-check-not='bufferization.'
+// RUN: tensor_ir-opt %s --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,tile-selection),tir-bufferize,func.func(tir-form-grid))' --split-input-file | FileCheck %s --implicit-check-not='layout =' --implicit-check-not='iteration_space' --implicit-check-not='tile_size' --implicit-check-not='result_views' --implicit-check-not='result_layouts' --implicit-check-not='nv_tensor_ir.iter_space' --implicit-check-not='bufferization.' --implicit-check-not='ptr.to_ptr'
 
 // CHECK-LABEL: func.func @pointwise_dispatch(
-//  CHECK-SAME: %[[LHS:[^:]+]]: memref<32x64xf32, strided<[64, 1]>, #ptr.generic_space>
-//  CHECK-SAME: %[[RHS:[^:]+]]: memref<32x64xf32, strided<[64, 1]>, #ptr.generic_space>
-//  CHECK-SAME: %[[OUT:[^:]+]]: memref<32x64xf32, strided<[64, 1]>, #ptr.generic_space>
-//       CHECK: %[[LPTR:.*]] = ptr.to_ptr %[[LHS]]
-//       CHECK: %[[RPTR:.*]] = ptr.to_ptr %[[RHS]]
-//       CHECK: %[[OPTR:.*]] = ptr.to_ptr %[[OUT]]
+//  CHECK-SAME: %[[LHS:[^:]+]]: memref<32x64xf32, strided<[64, 1]>>
+//  CHECK-SAME: %[[RHS:[^:]+]]: memref<32x64xf32, strided<[64, 1]>>
+//  CHECK-SAME: %[[OUT:[^:]+]]: memref<32x64xf32, strided<[64, 1]>>
 //       CHECK: scf.forall (%[[LINEAR:.*]]) in (32)
-//       CHECK: %[[LTILE:.*]] = nv_tensor_ir.load %[[LPTR]][%[[LINEAR]]] view offset: [0], sizes: [2048], strides: [1], alignment: 4
-//       CHECK: %[[RTILE:.*]] = nv_tensor_ir.load %[[RPTR]][%[[LINEAR]]] view offset: [0], sizes: [2048], strides: [1], alignment: 4
+//       CHECK: %[[VIEW0:.*]] = memref.reinterpret_cast %[[LHS]] to offset: [0], sizes: [2048], strides: [1]
+//       CHECK: %[[LTILE:.*]] = nv_tensor_ir.load %[[VIEW0]] tile_indices [%[[LINEAR]]], alignment 4
+//       CHECK: %[[VIEW1:.*]] = memref.reinterpret_cast %[[RHS]] to offset: [0], sizes: [2048], strides: [1]
+//       CHECK: %[[RTILE:.*]] = nv_tensor_ir.load %[[VIEW1]] tile_indices [%[[LINEAR]]], alignment 4
 //       CHECK: %[[SUM:.*]] = nv_tensor_ir.add %[[LTILE]], %[[RTILE]] : tensor<64xf32>
-//       CHECK: nv_tensor_ir.store %[[SUM]], %[[OPTR]][%[[LINEAR]]] view offset: [0], sizes: [2048], strides: [1], alignment: 4
+//       CHECK: %[[VIEW2:.*]] = memref.reinterpret_cast %[[OUT]] to offset: [0], sizes: [2048], strides: [1]
+//       CHECK: nv_tensor_ir.store %[[SUM]], %[[VIEW2]] tile_indices [%[[LINEAR]]], alignment 4
 //       CHECK: } {mapping = [#gpu.block<x>]}
 nv_tensor_ir.graph @pointwise(
     %lhs: tensor<32x64xf32>, %rhs: tensor<32x64xf32>)
@@ -29,8 +29,8 @@ nv_tensor_ir.graph @pointwise(
 //       CHECK: %[[ZERO:.*]] = arith.constant 0 : index
 //   CHECK-NOT: arith.remui
 //   CHECK-NOT: arith.divui
-//       CHECK: nv_tensor_ir.load {{.*}}[0, %[[LINEAR]]]
-//       CHECK: nv_tensor_ir.store {{.*}}[0, %[[LINEAR]]]
+//       CHECK: nv_tensor_ir.load {{.*}} tile_indices [0, %[[LINEAR]]]
+//       CHECK: nv_tensor_ir.store {{.*}} tile_indices [0, %[[LINEAR]]]
 nv_tensor_ir.graph @unit_outer_tile_count(
     %input: tensor<4x64xf32> {nv_tensor_ir.stride = "(128,1)"})
     -> (tensor<4x64xf32> {nv_tensor_ir.stride = "(128,1)"})
@@ -44,17 +44,15 @@ nv_tensor_ir.graph @unit_outer_tile_count(
 // Dynamic extents and explicit dynamic strides remain descriptor values in
 // the staged memref ABI. The output extent determines the runtime grid bound.
 // CHECK-LABEL: func.func @dynamic_dispatch(
-//  CHECK-SAME: %[[INPUT:[^:]+]]: memref<?x32xf32, strided<[?, 1]>, #ptr.generic_space>
-//  CHECK-SAME: %[[OUTPUT:[^:]+]]: memref<?x32xf32, strided<[?, 1]>, #ptr.generic_space>
-//       CHECK: %{{.*}}, %{{.*}}, %[[ISIZES:.*]]:2, %[[ISTRIDES:.*]]:2 = memref.extract_strided_metadata %[[INPUT]]
-//       CHECK: %[[IPTR:.*]] = ptr.to_ptr %[[INPUT]]
-//       CHECK: %{{.*}}, %{{.*}}, %[[OSIZES:.*]]:2, %[[OSTRIDES:.*]]:2 = memref.extract_strided_metadata %[[OUTPUT]]
-//       CHECK: %[[OPTR:.*]] = ptr.to_ptr %[[OUTPUT]]
-//       CHECK: arith.ceildivui %[[OSIZES]]#0
+//  CHECK-SAME: %[[INPUT:[^:]+]]: memref<?x32xf32, strided<[?, 1]>>
+//  CHECK-SAME: %[[OUTPUT:[^:]+]]: memref<?x32xf32, strided<[?, 1]>>
+//   CHECK-NOT: memref.extract_strided_metadata
+//       CHECK: %[[SIZE:.*]] = memref.dim %[[OUTPUT]]
+//       CHECK: arith.ceildivui %[[SIZE]]
 //       CHECK: scf.forall (%[[LINEAR:.*]]) in (%{{.*}})
-//       CHECK: nv_tensor_ir.load %[[IPTR]][%[[LINEAR]], 0] view offset: [0], sizes: [%[[ISIZES]]#0, 32], strides: [%[[ISTRIDES]]#0, 1], alignment: 4
+//       CHECK: nv_tensor_ir.load %[[INPUT]] tile_indices [%[[LINEAR]], 0], alignment 4
 //       CHECK: nv_tensor_ir.cos
-//       CHECK: nv_tensor_ir.store {{.*}}, %[[OPTR]][%[[LINEAR]], 0] view offset: [0], sizes: [%[[OSIZES]]#0, 32], strides: [%[[OSTRIDES]]#0, 1], alignment: 4
+//       CHECK: nv_tensor_ir.store {{.*}}, %[[OUTPUT]] tile_indices [%[[LINEAR]], 0], alignment 4
 //       CHECK: } {mapping = [#gpu.block<x>]}
 nv_tensor_ir.graph @dynamic(
     %input: tensor<?x32xf32> {nv_tensor_ir.stride = "(?,1)"})
@@ -69,10 +67,10 @@ nv_tensor_ir.graph @dynamic(
 // The layout chain is represented by the logical input view. None of the
 // layout-only TensorIR operations survive into the tiled computation.
 // CHECK-LABEL: func.func @layout_chain_dispatch(
-//  CHECK-SAME: %[[INPUT:[^:]+]]: memref<1024xf32, #ptr.generic_space>
-//       CHECK: %[[IPTR:.*]] = ptr.to_ptr %[[INPUT]]
+//  CHECK-SAME: %[[INPUT:[^:]+]]: memref<1024xf32>
 //       CHECK: scf.forall
-//       CHECK: nv_tensor_ir.load %[[IPTR]][%{{.*}}, %{{.*}}] view offset: [768], sizes: [16, 16], strides: [1, 16], alignment: 4
+//       CHECK: %[[VIEW3:.*]] = memref.reinterpret_cast %[[INPUT]] to offset: [768], sizes: [16, 16], strides: [1, 16]
+//       CHECK: nv_tensor_ir.load %[[VIEW3]] tile_indices [%{{.*}}, %{{.*}}], alignment 4
 //   CHECK-NOT: nv_tensor_ir.slice
 //   CHECK-NOT: nv_tensor_ir.reshape
 //   CHECK-NOT: nv_tensor_ir.transpose
@@ -90,9 +88,9 @@ nv_tensor_ir.graph @layout_chain(%input: tensor<1024xf32>)
 // -----
 
 // CHECK-LABEL: func.func @multi_output_dispatch(
-//  CHECK-SAME: %[[INPUT:[^:]+]]: memref<64xf32, #ptr.generic_space>
-//  CHECK-SAME: %[[SUM_OUT:[^:]+]]: memref<64xf32, #ptr.generic_space>
-//  CHECK-SAME: %[[PROD_OUT:[^:]+]]: memref<64xf32, #ptr.generic_space>
+//  CHECK-SAME: %[[INPUT:[^:]+]]: memref<64xf32>
+//  CHECK-SAME: %[[SUM_OUT:[^:]+]]: memref<64xf32>
+//  CHECK-SAME: %[[PROD_OUT:[^:]+]]: memref<64xf32>
 //       CHECK: %[[TILE:.*]] = nv_tensor_ir.load
 //       CHECK: %[[SUM:.*]] = nv_tensor_ir.add %[[TILE]], %[[TILE]]
 //       CHECK: nv_tensor_ir.store %[[SUM]]
@@ -110,8 +108,7 @@ nv_tensor_ir.graph @multi_output(%input: tensor<64xf32>)
 
 // Floating-point iotas use an unsigned integer tile until the final uitofp.
 // CHECK-LABEL: func.func @float_iota_dispatch(
-//  CHECK-SAME: %[[OUTPUT:[^:]+]]: memref<128xf32, #ptr.generic_space>
-//       CHECK: %[[OUTPUT_PTR:.*]] = ptr.to_ptr %[[OUTPUT]]
+//  CHECK-SAME: %[[OUTPUT:[^:]+]]: memref<128xf32>
 //       CHECK: scf.forall
 //       CHECK: %[[IOTA:.*]] = nv_tensor_ir.iota dimension = 0 : tensor<64xui32>
 //       CHECK: %[[OFFSET:.*]] = builtin.unrealized_conversion_cast %{{.*}} : i32 to ui32
@@ -121,7 +118,7 @@ nv_tensor_ir.graph @multi_output(%input: tensor<64xf32>)
 //  CHECK-SAME: : tensor<64xui32> to tensor<64xi32>
 //       CHECK: %[[FLOAT:.*]] = arith.uitofp %[[SIGNLESS]]
 //  CHECK-SAME: : tensor<64xi32> to tensor<64xf32>
-//       CHECK: nv_tensor_ir.store %[[FLOAT]], %[[OUTPUT_PTR]]
+//       CHECK: nv_tensor_ir.store %[[FLOAT]], %[[OUTPUT]]
 nv_tensor_ir.graph @float_iota() -> tensor<128xf32>
     attributes {tile_size = array<i32: 64>} {
   %result = iota dimension = 0 : tensor<128xf32>
@@ -162,9 +159,9 @@ nv_tensor_ir.graph @reduction_tile_cache(%input: tensor<64x128xf32>)
 // CHECK-LABEL: func.func @matmul_full_tile_coordinate_dispatch(
 //       CHECK: scf.forall (%[[BATCH:.*]]) in (2)
 //       CHECK: nv_tensor_ir.load
-//       CHECK: nv_tensor_ir.load {{.*}}[0, 0]
+//       CHECK: nv_tensor_ir.load {{.*}} tile_indices [0, 0]
 //       CHECK: nv_tensor_ir.matmul
-//       CHECK: nv_tensor_ir.store {{.*}}[%[[BATCH]], 0, 0]
+//       CHECK: nv_tensor_ir.store {{.*}} tile_indices [%[[BATCH]], 0, 0]
 nv_tensor_ir.graph @matmul_full_tile_coordinate(
     %lhs: tensor<1x8x32xf32> {nv_tensor_ir.stride = "(0,32,1)"},
     %rhs: tensor<1x32x16xf32> {nv_tensor_ir.stride = "(0,16,1)"})

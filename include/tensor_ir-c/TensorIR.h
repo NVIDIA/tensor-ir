@@ -154,15 +154,48 @@ MLIR_CAPI_EXPORTED const int32_t *mlirTensorIRCompilerInvocationGetTileSizes(
 typedef enum MlirTensorIRArgumentKind {
   /// An argument with no value.
   MlirTensorIRArgumentKindNone = 0,
-  /// A signed 64-bit integer.
-  MlirTensorIRArgumentKindInt64 = 1,
-  /// A 64-bit floating-point value.
-  MlirTensorIRArgumentKindFloat64 = 2,
   /// An opaque pointer.
-  MlirTensorIRArgumentKindPointer = 3,
+  MlirTensorIRArgumentKindPointer = 1,
   /// A strided tensor view.
-  MlirTensorIRArgumentKindTensor = 4,
+  MlirTensorIRArgumentKindTensor = 2,
+  /// A by-value scalar with an explicit element type (see
+  /// `MlirTensorIRScalarView`); the caller always declares the true element
+  /// type.
+  MlirTensorIRArgumentKindScalar = 3,
 } MlirTensorIRArgumentKind;
+
+/// Identifies the element type of a `MlirTensorIRScalarView`.
+typedef enum MlirTensorIRElementType {
+  MlirTensorIRElementTypeBool = 0,
+  MlirTensorIRElementTypeF16 = 1,
+  MlirTensorIRElementTypeBF16 = 2,
+  MlirTensorIRElementTypeF32 = 3,
+  MlirTensorIRElementTypeF64 = 4,
+  MlirTensorIRElementTypeSI8 = 5,
+  MlirTensorIRElementTypeSI16 = 6,
+  MlirTensorIRElementTypeSI32 = 7,
+  MlirTensorIRElementTypeSI64 = 8,
+  MlirTensorIRElementTypeUI8 = 9,
+  MlirTensorIRElementTypeUI16 = 10,
+  MlirTensorIRElementTypeUI32 = 11,
+  MlirTensorIRElementTypeUI64 = 12,
+  MlirTensorIRElementTypeF8E4M3FN = 13,
+  MlirTensorIRElementTypeF8E5M2 = 14,
+} MlirTensorIRElementType;
+
+/// Parses an MLIR assembly element type spelling (e.g. "f32") into a
+/// `MlirTensorIRElementType`.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRElementTypeFromSpelling(
+    MlirStringRef spelling, MlirTensorIRElementType *result,
+    MlirStringCallback errorCallback, void *errorUserData);
+
+/// A by-value scalar argument with an explicit element type. `bits` holds the
+/// raw value, left-aligned in the low-order bytes for the type's byte width;
+/// the high-order bytes are unspecified and must never be read.
+typedef struct MlirTensorIRScalarView {
+  MlirTensorIRElementType type;
+  int64_t bits;
+} MlirTensorIRScalarView;
 
 /// Describes a strided tensor passed to a TensorIR runtime kernel.
 ///
@@ -190,14 +223,12 @@ typedef struct MlirTensorIRTensorView {
 /// The active member is selected by the corresponding
 /// `MlirTensorIRArgumentKind`.
 typedef union MlirTensorIRArgumentValue {
-  /// Value for `MlirTensorIRArgumentKindInt64`.
-  int64_t int64Value;
-  /// Value for `MlirTensorIRArgumentKindFloat64`.
-  double float64Value;
   /// Value for `MlirTensorIRArgumentKindPointer`.
   void *pointerValue;
   /// Value for `MlirTensorIRArgumentKindTensor`.
   MlirTensorIRTensorView tensor;
+  /// Value for `MlirTensorIRArgumentKindScalar`.
+  MlirTensorIRScalarView scalar;
 } MlirTensorIRArgumentValue;
 
 /// Associates a runtime argument value with its kind.

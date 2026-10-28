@@ -184,8 +184,38 @@ TEST(NativeHostModuleTest, ValidatesAndPacksTensorLayouts) {
   int64_t strides[] = {1, 2};
   value.tensorView.stride = strides;
   EXPECT_FALSE(packNativeHostArgs(*metadata, {&value, 1}).ok());
-  value = Any(int64_t(1));
+  int64_t si64Value = 1;
+  value = Any::makeScalarAny(ElementType::SI64, &si64Value);
   EXPECT_FALSE(packNativeHostArgs(*metadata, {&value, 1}).ok());
+}
+
+TEST(NativeHostModuleTest, PacksScalarArguments) {
+  KernelMetadataBuilder builder;
+  builder.args.push_back(TensorArgDesc::create(ElementType::F32, {2}).value());
+  builder.args.push_back(ScalarArgDesc::create(ElementType::SI32).value());
+  builder.numInputs = 2;
+  builder.tileSizes = {1};
+  auto metadata = KernelMetadata::create(std::move(builder));
+  ASSERT_TRUE(metadata.ok());
+
+  int storage;
+  int64_t shape[] = {2};
+  int32_t si32Value = 42;
+  Any args[] = {Any(TensorView{&storage, 1, shape, nullptr}),
+                Any::makeScalarAny(ElementType::SI32, &si32Value)};
+  auto packed = packNativeHostArgs(*metadata, {args, 2});
+  ASSERT_TRUE(packed.ok());
+  EXPECT_EQ(*packed, (llvm::SmallVector<int64_t>{
+                         reinterpret_cast<intptr_t>(&storage), 2, 1, 42}));
+
+  // Wrong element type for the declared scalar slot is rejected.
+  int64_t si64Value = 42;
+  args[1] = Any::makeScalarAny(ElementType::SI64, &si64Value);
+  EXPECT_FALSE(packNativeHostArgs(*metadata, {args, 2}).ok());
+
+  // A tensor-tagged Any in a scalar slot is rejected, not silently packed.
+  args[1] = Any(TensorView{&storage, 1, shape, nullptr});
+  EXPECT_FALSE(packNativeHostArgs(*metadata, {args, 2}).ok());
 }
 
 TEST(NativeHostModuleTest, AcceptsEquivalentSingletonStrides) {

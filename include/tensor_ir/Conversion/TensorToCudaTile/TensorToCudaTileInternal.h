@@ -58,22 +58,23 @@ LogicalResult validateOutlinedMatmulLowerable(MatmulOp op);
 /// conversion pattern would have produced.
 LogicalResult validatePointwiseOpLowerable(Operation *op);
 
-/// Shared pre-rewrite legality check for `ConstantOp`. `ConstantOp` is not a
-/// `PointwiseOpInterface` op, so it is dispatched explicitly rather than via
-/// `validatePointwiseOpLowerable`. Pure predicate over the constant's result
-/// type and value attribute (a tensor-typed constant must be a splat literal);
+/// Verify that a splat input is scalar before either conversion path lowers it.
+LogicalResult validateSplatOpLowerable(SplatOp op);
+
+/// Shared pre-rewrite legality check for `ConstantOp`. Constants do not have
+/// the `Elementwise` trait and use this check directly. Pure predicate over
+/// the constant's result type and value attribute (a tensor-typed constant
+/// must be a splat literal);
 /// it does not consult the rewriter or the type converter. Shared by both
 /// conversion paths and emits the diagnostic on `op`.
 LogicalResult validateConstantOpLowerable(ConstantOp op);
 
 /// Emit the CUDA Tile implementation of a validated pointwise operation.
 /// `operands` must contain the strategy-adapted values in source operand order.
-LogicalResult
-lowerPointwiseOp(PointwiseOpInterface op, ArrayRef<Value> operands,
-                 cuda_tile::TileType resultType,
-                 ConversionPatternRewriter &rewriter,
-                 bool enableExperimentalCudaTileOps,
-                 cuda_tile::BytecodeVersion targetBytecodeVersion);
+LogicalResult lowerPointwiseOp(
+    Operation *op, ArrayRef<Value> operands, cuda_tile::TileType resultType,
+    ConversionPatternRewriter &rewriter, bool enableExperimentalCudaTileOps,
+    cuda_tile::BytecodeVersion targetBytecodeVersion);
 
 /// Shared state-free builders used by both conversion paths.
 Value buildExp(OpBuilder &rewriter, Location loc, Value tile,

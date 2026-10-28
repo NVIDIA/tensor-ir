@@ -8,9 +8,9 @@
 //       CHECK: %[[REST:.*]] = arith.divui %[[LINEAR]],
 //       CHECK: %[[N:.*]] = arith.remui %[[REST]],
 //       CHECK: %[[M:.*]] = arith.divui %[[REST]],
-//       CHECK: %[[LHS:.*]] = nv_tensor_ir.load {{.*}}[%[[M]], 0]
+//       CHECK: %[[LHS:.*]] = nv_tensor_ir.load {{.*}} tile_indices [%[[M]], 0]
 //  CHECK-SAME: to tensor<2x8xf32>
-//       CHECK: %[[RHS:.*]] = nv_tensor_ir.load {{.*}}[0, %[[N]]]
+//       CHECK: %[[RHS:.*]] = nv_tensor_ir.load {{.*}} tile_indices [0, %[[N]]]
 //  CHECK-SAME: to tensor<8x2xf32>
 //       CHECK: %[[PRODUCT:.*]] = nv_tensor_ir.matmul(%[[LHS]], %[[RHS]])
 //  CHECK-SAME: nv_tensor_ir.lhs_contracting_dimensions = array<i64: 1>
@@ -18,19 +18,19 @@
 //       CHECK: %[[RESHAPED:.*]] = nv_tensor_ir.reshape %[[PRODUCT]] : tensor<2x2xf32> -> tensor<1x2x2xf32>
 //       CHECK: %[[TRANSPOSED:.*]] = nv_tensor_ir.transpose %[[RESHAPED]] permutation = [0, 2, 1]
 //       CHECK: %[[BROADCAST:.*]] = nv_tensor_ir.broadcast %[[TRANSPOSED]] : tensor<1x2x2xf32> -> tensor<2x2x2xf32>
-//       CHECK: nv_tensor_ir.store %[[BROADCAST]], {{.*}}[%[[BATCH]], %[[N]], %[[M]]]
+//       CHECK: nv_tensor_ir.store %[[BROADCAST]], {{.*}} tile_indices [%[[BATCH]], %[[N]], %[[M]]]
 func.func @transposed_broadcast_matmul(
-    %lhs: memref<1x4x8xf32, #ptr.generic_space>,
-    %rhs: memref<1x8x6xf32, #ptr.generic_space>,
-    %output: memref<3x6x4xf32, #ptr.generic_space>)
+    %lhs: memref<1x4x8xf32>,
+    %rhs: memref<1x8x6xf32>,
+    %output: memref<3x6x4xf32>)
     attributes {
   nv_tensor_ir.bufferized_program,
   tile_size = array<i32: 2, 2, 2>
 } {
   %a = bufferization.to_tensor %lhs restrict
-      : memref<1x4x8xf32, #ptr.generic_space> to tensor<1x4x8xf32>
+      : memref<1x4x8xf32> to tensor<1x4x8xf32>
   %b = bufferization.to_tensor %rhs restrict
-      : memref<1x8x6xf32, #ptr.generic_space> to tensor<1x8x6xf32>
+      : memref<1x8x6xf32> to tensor<1x8x6xf32>
   %product = nv_tensor_ir.matmul(%a, %b)
       : (tensor<1x4x8xf32>, tensor<1x8x6xf32>) -> tensor<1x4x6xf32>
   %transposed = nv_tensor_ir.transpose %product permutation = [0, 2, 1]
@@ -38,6 +38,6 @@ func.func @transposed_broadcast_matmul(
   %result = nv_tensor_ir.broadcast %transposed
       : tensor<1x6x4xf32> -> tensor<3x6x4xf32>
   bufferization.materialize_in_destination %result in restrict writable %output
-      : (tensor<3x6x4xf32>, memref<3x6x4xf32, #ptr.generic_space>) -> ()
+      : (tensor<3x6x4xf32>, memref<3x6x4xf32>) -> ()
   return
 }

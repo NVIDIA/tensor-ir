@@ -31,7 +31,11 @@ class NodeKind(Enum):
     MATMUL = auto()
 
 
-class UnaryOp(Enum):
+class TraceOpEnum(Enum):
+    """Common base for public and internal traced operation enums."""
+
+
+class UnaryOp(TraceOpEnum):
     ABS = "abs"
     CEIL = "ceil"
     COS = "cos"
@@ -54,7 +58,7 @@ class UnaryOp(Enum):
     TANH_FWD = "tanh_fwd"
 
 
-class BinaryOp(Enum):
+class BinaryOp(TraceOpEnum):
     ADD = "add"
     ADD_SQUARE = "add_square"
     ATAN2 = "atan2"
@@ -70,31 +74,51 @@ class BinaryOp(Enum):
     SUB = "sub"
 
 
-class MovementOp(Enum):
+class MovementOp(TraceOpEnum):
     BROADCAST = "broadcast"
     RESHAPE = "reshape"
     SLICE = "slice"
     TRANSPOSE = "transpose"
 
 
-TraceOp = UnaryOp | BinaryOp | MovementOp | str
+TraceOp = TraceOpEnum | str
 
 
 def trace_op_name(op: TraceOp) -> str:
-    if isinstance(op, (UnaryOp, BinaryOp, MovementOp)):
+    if isinstance(op, TraceOpEnum):
         return op.value
     return op
 
 
 @dataclass(frozen=True)
 class TensorInfo:
+    """Tensor trace metadata, also used for backend-specific IR overrides.
+
+    Tracing records concrete integer dimensions and strides. A backend override
+    may replace individual entries with ``None`` to request dynamic MLIR values.
+    """
+
     name: str
     dtype: DataType
-    shape: tuple[int, ...]
-    stride: tuple[int, ...]
-    dynamic_shape: bool = False
+    shape: tuple[int | None, ...]
+    stride: tuple[int | None, ...]
     stride_divisibility: tuple[int | None, ...] | None = None
     alignment: int | None = None
+    # Observed DLPack data + byte_offset, for backend alignment inference only.
+    # None means metadata-only TensorSpec.
+    # This does not retain the tensor and must never be dereferenced.
+    _traced_tensor_ptr: int | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "dtype", normalize_dtype(self.dtype))
+
+
+@dataclass(frozen=True)
+class ScalarInfo:
+    """Describes a by-value (runtime, non-constant) scalar kernel argument."""
+
+    name: str
+    dtype: DataType
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dtype", normalize_dtype(self.dtype))
@@ -104,7 +128,7 @@ class TensorInfo:
 class TraceNode:
     kind: NodeKind
     op: TraceOp
-    tensor_info: TensorInfo
+    value_info: TensorInfo | ScalarInfo
     args: tuple[int, ...] = ()
     kwargs: dict[str, object] = field(default_factory=dict)
 
@@ -120,15 +144,22 @@ class TraceGraph:
         self.output_ref_ids: list[int] = []
         self.result_ids: list[int] = []
 
-    def add_input(self, tensor_info: TensorInfo) -> TracedTensor:
+    def add_input(self, value_info: TensorInfo) -> TracedTensor:
         node_id = len(self.nodes)
-        self.nodes.append(TraceNode(NodeKind.INPUT, "input", tensor_info))
+        self.nodes.append(TraceNode(NodeKind.INPUT, "input", value_info))
         self.input_ids.append(node_id)
         return TracedTensor(self, node_id)
 
-    def add_output_ref(self, tensor_info: TensorInfo) -> TracedTensor:
+    def add_scalar_input(self, dtype: DataType, name: str) -> TracedScalar:
+        """Adds a by-value (runtime, non-constant) scalar kernel argument."""
         node_id = len(self.nodes)
-        self.nodes.append(TraceNode(NodeKind.OUTPUT_REF, "output_ref", tensor_info))
+        self.nodes.append(TraceNode(NodeKind.INPUT, "input", ScalarInfo(name, dtype)))
+        self.input_ids.append(node_id)
+        return TracedScalar(self, node_id)
+
+    def add_output_ref(self, value_info: TensorInfo) -> TracedTensor:
+        node_id = len(self.nodes)
+        self.nodes.append(TraceNode(NodeKind.OUTPUT_REF, "output_ref", value_info))
         self.output_ref_ids.append(node_id)
         return TracedTensor(self, node_id)
 
@@ -137,17 +168,17 @@ class TraceGraph:
         kind: NodeKind,
         op: TraceOp,
         args: tuple[int, ...],
-        tensor_info: TensorInfo,
+        value_info: TensorInfo,
         kwargs: dict[str, object] | None = None,
     ) -> TracedTensor:
         node_id = len(self.nodes)
         op_name = trace_op_name(op)
-        tensor_info = replace(tensor_info, name=f"{op_name}_{node_id}")
+        value_info = replace(value_info, name=f"{op_name}_{node_id}")
         self.nodes.append(
             TraceNode(
                 kind,
                 op,
-                tensor_info=tensor_info,
+                value_info=value_info,
                 args=args,
                 kwargs=kwargs or {},
             )
@@ -175,14 +206,14 @@ class TraceGraph:
         node_kwargs["result_node_ids"] = result_ids
         node_kwargs["result_tensor_infos"] = tensor_infos
         self.add_node(kind, op, args, tensor_infos[0], kwargs=node_kwargs)
-        for tensor_info in tensor_infos[1:]:
+        for value_info in tensor_infos[1:]:
             node_id = len(self.nodes)
             self.nodes.append(
                 TraceNode(
                     NodeKind.RESULT,
                     "result",
-                    tensor_info=replace(
-                        tensor_info, name=f"{trace_op_name(op)}_{node_id}"
+                    value_info=replace(
+                        value_info, name=f"{trace_op_name(op)}_{node_id}"
                     ),
                     args=(first_id,),
                 )
@@ -203,7 +234,7 @@ class TraceGraph:
                 raise TypeError("Kernel must return computed tensors, not output refs")
             _check_same_tensor_type(
                 result.tensor_info,
-                self.nodes[output_ref_id].tensor_info,
+                self.nodes[output_ref_id].value_info,
                 "kernel result",
             )
         self.result_ids = [result._id for result in results]
@@ -251,7 +282,7 @@ class TracedTensor:
 
     @property
     def tensor_info(self) -> TensorInfo:
-        return self._graph.nodes[self._id].tensor_info
+        return self._graph.nodes[self._id].value_info
 
     def __add__(self, other: TracedTensor) -> TracedTensor:
         return _binary(self, other, BinaryOp.ADD)
@@ -323,7 +354,74 @@ class TracedTensor:
         return f"TracedTensor(%{self._id})"
 
 
-def _binary(lhs: TracedTensor, rhs: TracedTensor, op: BinaryOp) -> TracedTensor:
+class TracedScalar:
+    """A traced by-value (runtime) scalar kernel argument.
+
+    Distinct from TracedTensor: it has a dtype but no shape/stride, and only
+    participates in binary tensor ops as the non-tensor operand (e.g. a
+    pointwise scale), not in tensor-only ops (matmul, reduce, movement).
+    """
+
+    def __init__(self, graph: TraceGraph, node_id: int):
+        self._graph = graph
+        self._id = node_id
+
+    @property
+    def scalar_info(self) -> ScalarInfo:
+        return self._graph.nodes[self._id].value_info
+
+    @property
+    def dtype(self) -> DataType:
+        return self.scalar_info.dtype
+
+    def __bool__(self) -> bool:
+        raise TypeError(
+            "TensorIR DSL does not support scalar-valued Python control flow"
+        )
+
+    def __repr__(self) -> str:
+        return f"TracedScalar(%{self._id})"
+
+
+def _splat_to(rhs: TracedScalar, shape: tuple, stride: tuple) -> TracedTensor:
+    """Broadcast a runtime scalar into a tensor of the given shape, at the
+    scalar's own dtype.
+
+    TensorIR's pointwise ops require ranked-tensor operands (see
+    TensorIR_PointWiseOpBinary in TensorOps.td); a by-value scalar can only
+    reach them through nv_tensor_ir.splat, which takes a scalar SSA operand
+    and produces a tensor.
+    """
+    return rhs._graph.add_node(
+        NodeKind.SPLAT,
+        "splat",
+        (rhs._id,),
+        TensorInfo(name="splat", dtype=rhs.dtype, shape=shape, stride=stride),
+    )
+
+
+def _astype(x: TracedTensor, dtype: DataType) -> TracedTensor:
+    """Convert ``x`` to ``dtype``; a no-op if it is already that dtype."""
+    if x.tensor_info.dtype == dtype:
+        return x
+    return x._graph.add_node(
+        NodeKind.CONVERT, "convert", (x._id,), replace(x.tensor_info, dtype=dtype)
+    )
+
+
+def _promote_and_broadcast_to(rhs: TracedScalar, lhs: TracedTensor) -> TracedTensor:
+    """Broadcast a runtime scalar into a tensor matching ``lhs``'s shape,
+    converting the scalar's own dtype to ``lhs``'s when they differ."""
+    _check_same_graph(lhs, rhs, "splat")
+    info = lhs.tensor_info
+    return _astype(_splat_to(rhs, info.shape, info.stride), info.dtype)
+
+
+def _binary(
+    lhs: TracedTensor, rhs: TracedTensor | TracedScalar, op: BinaryOp
+) -> TracedTensor:
+    if isinstance(rhs, TracedScalar):
+        rhs = _promote_and_broadcast_to(rhs, lhs)
     if not isinstance(rhs, TracedTensor):
         return NotImplemented
     op_name = op.value
@@ -437,7 +535,9 @@ def _check_comparator_supported(dtype: DataType, comparator: str) -> None:
     raise TypeError(f"cmp does not support tensor dtype {dtype}")
 
 
-def _check_same_graph(lhs: TracedTensor, rhs: TracedTensor, op_name: str) -> None:
+def _check_same_graph(
+    lhs: TracedTensor, rhs: TracedTensor | TracedScalar, op_name: str
+) -> None:
     if lhs._graph is not rhs._graph:
         raise TypeError(f"{op_name} operands must belong to the same trace graph")
 
@@ -450,7 +550,9 @@ def _check_same_tensor_type(lhs: TensorInfo, rhs: TensorInfo, op_name: str) -> N
     _check_same_tensor_shape(lhs, rhs, op_name)
 
 
-def _check_binary_tensor_types(lhs: TensorInfo, rhs: TensorInfo, op: BinaryOp) -> None:
+def _check_binary_tensor_types(
+    lhs: TensorInfo, rhs: TensorInfo, op: TraceOpEnum
+) -> None:
     if op == BinaryOp.ATAN2 and not is_float_dtype(lhs.dtype):
         raise TypeError("tir.atan2 expects floating-point tensor operands")
     if (

@@ -8,9 +8,9 @@
 // neg(a) is consumed directly and transposed, so it is computed twice.
 // CHECK-LABEL: func.func @transpose_diamond_dispatch
 //       CHECK: scf.forall
-//       CHECK: %[[DIRECT:.*]] = nv_tensor_ir.load {{.*}} strides: [1, 8]
+//       CHECK: %[[DIRECT:.*]] = nv_tensor_ir.load {{.*}} strided<[1, 8]
 //       CHECK: %[[NEG:.*]] = nv_tensor_ir.neg %[[DIRECT]]
-//       CHECK: %[[TRANSPOSED:.*]] = nv_tensor_ir.load {{.*}} strides: [8, 1]
+//       CHECK: %[[TRANSPOSED:.*]] = nv_tensor_ir.load {{.*}} strided<[8, 1]
 //       CHECK: %[[NEG_T:.*]] = nv_tensor_ir.neg %[[TRANSPOSED]]
 //   CHECK-NOT: nv_tensor_ir.transpose
 //       CHECK: %[[ADD:.*]] = nv_tensor_ir.add %[[NEG]], %[[NEG_T]]
@@ -29,7 +29,7 @@ nv_tensor_ir.graph @transpose_diamond(
 
 // With a whole-tensor tile, the transposed request reuses the direct tile.
 // CHECK-LABEL: func.func @transpose_diamond_whole_tile_dispatch
-//       CHECK: %[[LOAD:.*]] = nv_tensor_ir.load {{.*}} strides: [1, 8]
+//       CHECK: %[[LOAD:.*]] = nv_tensor_ir.load {{.*}} strided<[1, 8]
 //   CHECK-NOT: nv_tensor_ir.load
 //       CHECK: %[[NEG:.*]] = nv_tensor_ir.neg %[[LOAD]]
 //   CHECK-NOT: nv_tensor_ir.neg
@@ -50,7 +50,7 @@ nv_tensor_ir.graph @transpose_diamond_whole_tile(
 
 // The direct and transposed loads of %a agree up to a permutation.
 // CHECK-LABEL: func.func @transposed_load_dispatch
-//       CHECK: %[[LOAD:.*]] = nv_tensor_ir.load {{.*}} strides: [1, 8]
+//       CHECK: %[[LOAD:.*]] = nv_tensor_ir.load {{.*}} strided<[1, 8]
 //   CHECK-NOT: nv_tensor_ir.load
 //       CHECK: %[[LOAD_T:.*]] = nv_tensor_ir.transpose %[[LOAD]] permutation = [1, 0]
 //       CHECK: %[[ADD:.*]] = nv_tensor_ir.add %[[LOAD]], %[[LOAD_T]]
@@ -117,11 +117,15 @@ nv_tensor_ir.graph @same_layout_multi_consumer(
 
 // Slices with different offsets specialize the shared producer per offset.
 // CHECK-LABEL: func.func @slice_diamond_dispatch
-//       CHECK: %[[A0:.*]] = nv_tensor_ir.load {{.*}} offset: [0]
-//       CHECK: %[[B0:.*]] = nv_tensor_ir.load {{.*}} offset: [0]
+// CHECK: %[[A0_VIEW:.*]] = memref.reinterpret_cast {{.*}} to offset: [0]
+//       CHECK: %[[A0:.*]] = nv_tensor_ir.load %[[A0_VIEW]]
+// CHECK: %[[B0_VIEW:.*]] = memref.reinterpret_cast {{.*}} to offset: [0]
+//       CHECK: %[[B0:.*]] = nv_tensor_ir.load %[[B0_VIEW]]
 //       CHECK: %[[ADD0:.*]] = nv_tensor_ir.add %[[A0]], %[[B0]]
-//       CHECK: %[[A1:.*]] = nv_tensor_ir.load {{.*}} offset: [32]
-//       CHECK: %[[B1:.*]] = nv_tensor_ir.load {{.*}} offset: [32]
+// CHECK: %[[A1_VIEW:.*]] = memref.reinterpret_cast {{.*}} to offset: [32]
+//       CHECK: %[[A1:.*]] = nv_tensor_ir.load %[[A1_VIEW]]
+// CHECK: %[[B1_VIEW:.*]] = memref.reinterpret_cast {{.*}} to offset: [32]
+//       CHECK: %[[B1:.*]] = nv_tensor_ir.load %[[B1_VIEW]]
 //       CHECK: %[[ADD1:.*]] = nv_tensor_ir.add %[[A1]], %[[B1]]
 //       CHECK: %[[SUB:.*]] = nv_tensor_ir.sub %[[ADD0]], %[[ADD1]]
 //       CHECK: nv_tensor_ir.store %[[SUB]]
@@ -142,11 +146,11 @@ nv_tensor_ir.graph @slice_diamond(
 // Each concatenation branch materializes the shared producer in its own layout.
 // CHECK-LABEL: func.func @concat_diamond_input_dispatch
 //       CHECK: scf.if
-//       CHECK: %[[DIRECT:.*]] = nv_tensor_ir.load {{.*}} strides: [1, 0, 32]
+//       CHECK: %[[DIRECT:.*]] = nv_tensor_ir.load {{.*}} strided<[1, 2, 32]
 //       CHECK: %[[ADD:.*]] = nv_tensor_ir.add %[[DIRECT]], %[[DIRECT]]
 //       CHECK: scf.yield %[[ADD]]
 //       CHECK: } else {
-//       CHECK: %[[TRANSPOSED:.*]] = nv_tensor_ir.load {{.*}} strides: [32, 0, 1]
+//       CHECK: %[[TRANSPOSED:.*]] = nv_tensor_ir.load {{.*}} strided<[32, 2, 1]
 //       CHECK: %[[ADD_T:.*]] = nv_tensor_ir.add %[[TRANSPOSED]], %[[TRANSPOSED]]
 //       CHECK: scf.yield %[[ADD_T]]
 nv_tensor_ir.graph @concat_diamond_input(
@@ -164,7 +168,7 @@ nv_tensor_ir.graph @concat_diamond_input(
 
 // A pruned concatenation operand is never loaded.
 // CHECK-LABEL: func.func @concat_pruned_first_operand_dispatch
-//       CHECK: %[[LOAD:.*]] = nv_tensor_ir.load {{.*}} offset: [4], sizes: [10, 1, 5], strides: [16, 0, 1]
+//       CHECK: %[[LOAD:.*]] = nv_tensor_ir.load {{.*}} memref<10x1x5x{{.*}}, strided<[16, 2, 1], offset: 4>
 //   CHECK-NOT: nv_tensor_ir.load
 //       CHECK: nv_tensor_ir.store %[[LOAD]]
 nv_tensor_ir.graph @concat_pruned_first_operand(
@@ -181,9 +185,9 @@ nv_tensor_ir.graph @concat_pruned_first_operand(
 // The reduction is consumed directly and transposed, so it is reduced once per
 // iteration space.
 // CHECK-LABEL: func.func @reduce_diamond_output_dispatch
-//       CHECK: %[[FULL:.*]] = nv_tensor_ir.load {{.*}} : !ptr.ptr<#ptr.generic_space> to tensor<32x32xf32>
+//       CHECK: %[[FULL:.*]] = nv_tensor_ir.load {{.*}} : memref<{{.*}}> to tensor<32x32xf32>
 //       CHECK: %[[REDUCE:.*]] = nv_tensor_ir.reduce(%[[FULL]])
-//       CHECK: %[[ROW:.*]] = nv_tensor_ir.load {{.*}} : !ptr.ptr<#ptr.generic_space> to tensor<1x32xf32>
+//       CHECK: %[[ROW:.*]] = nv_tensor_ir.load {{.*}} : memref<{{.*}}> to tensor<1x32xf32>
 //       CHECK: %[[REDUCE_T:.*]] = nv_tensor_ir.reduce(%[[ROW]])
 //       CHECK: %[[BROADCAST:.*]] = nv_tensor_ir.broadcast %[[REDUCE_T]]
 //       CHECK: %[[ADD:.*]] = nv_tensor_ir.add %[[REDUCE]], %[[BROADCAST]]
@@ -203,9 +207,9 @@ nv_tensor_ir.graph @reduce_diamond_output(
 
 // The matmul operands request the shared producer in two layouts.
 // CHECK-LABEL: func.func @matmul_diamond_input_dispatch
-//       CHECK: %[[LHS_LOAD:.*]] = nv_tensor_ir.load {{.*}} strides: [1, 32]
+//       CHECK: %[[LHS_LOAD:.*]] = nv_tensor_ir.load {{.*}} strided<[1, 32]
 //       CHECK: %[[LHS:.*]] = nv_tensor_ir.add %[[LHS_LOAD]], %[[LHS_LOAD]]
-//       CHECK: %[[RHS_LOAD:.*]] = nv_tensor_ir.load {{.*}} strides: [32, 1]
+//       CHECK: %[[RHS_LOAD:.*]] = nv_tensor_ir.load {{.*}} strided<[32, 1]
 //       CHECK: %[[RHS:.*]] = nv_tensor_ir.add %[[RHS_LOAD]], %[[RHS_LOAD]]
 //       CHECK: %[[MATMUL:.*]] = nv_tensor_ir.matmul(%[[LHS]], %[[RHS]])
 //       CHECK: nv_tensor_ir.store %[[MATMUL]]

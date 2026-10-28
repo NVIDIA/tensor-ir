@@ -8,6 +8,7 @@
 
 include "mlir/Pass/PassBase.td"
 
+
 def MaterializeDefaultStridesPass : Pass<"materialize-default-strides", "nv_tensor_ir::GraphOp"> {
   let summary = "Attach row-major stride attributes to graph args/results that lack them";
   let description = [{
@@ -22,6 +23,19 @@ def MaterializeDefaultStridesPass : Pass<"materialize-default-strides", "nv_tens
     code can read strides from the graph attributes without thinking about
     layout conventions, and the per-call-site row-major defaults scattered
     across the codebase become dead.
+  }];
+}
+
+def RewriteUnsupportedOpsPass : Pass<"tir-rewrite-unsupported-ops"> {
+  let summary = "Rewrite ops that CudaTile does not support into supported forms";
+  let description = [{
+    This pass is the designated place for op-level legalization of TensorIR
+    ops that CudaTile cannot represent directly. It runs before the graph is
+    converted to CudaTile, so later passes can assume that the ops it handles
+    are in a CudaTile-compatible form.
+
+    Add new unsupported-op rewrites here rather than scattering them across
+    later passes.
   }];
 }
 
@@ -120,8 +134,7 @@ def BufferizePass : Pass<"tir-bufferize", "mlir::ModuleOp"> {
     "::mlir::bufferization::BufferizationDialect",
     "::mlir::func::FuncDialect",
     "::mlir::memref::MemRefDialect",
-    "::mlir::nv_tensor_ir::TensorIRDialect",
-    "::mlir::ptr::PtrDialect"
+    "::mlir::nv_tensor_ir::TensorIRDialect"
   ];
 }
 
@@ -145,7 +158,6 @@ def FormGridPass : Pass<"tir-form-grid", "mlir::func::FuncOp"> {
     "::mlir::gpu::GPUDialect",
     "::mlir::memref::MemRefDialect",
     "::mlir::nv_tensor_ir::TensorIRDialect",
-    "::mlir::ptr::PtrDialect",
     "::mlir::scf::SCFDialect"
   ];
 }
@@ -158,17 +170,28 @@ def TileReductionsPass : Pass<"tir-tile-reductions", "mlir::func::FuncOp"> {
     coordinates on TensorIR tile loads and tensor `iter_args` carry partial
     accumulators. Contractions whose complete domain fits the selected
     reduction tile remain loop-free.
-
-    Static persistence caps each flattened `scf.forall` grid at
-    `sm-count * occupancy` blocks and adds a grid-stride `scf.for` over the
-    logical tile IDs. Runtime-shaped grids compute the cap in SSA. Dynamic
-    persistence retains the non-persistent fallback.
   }];
   let options = [
     Option<"reduction_tile_size", "reduction-tile-size", "int64_t", "128",
-           "Maximum number of contracting elements in one tile">,
-    Option<"persistence", "persistence", "std::string", "\"none\"",
-           "Persistence mode: none, static, or dynamic">,
+           "Maximum number of contracting elements in one tile">
+  ];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::nv_tensor_ir::TensorIRDialect",
+    "::mlir::scf::SCFDialect"
+  ];
+}
+
+def StaticPersistencePass : Pass<"tir-static-persistence", "mlir::func::FuncOp"> {
+  let summary = "Form static persistent TensorIR grids";
+  let description = [{
+    Caps each flattened, rank-one, destination-free `scf.forall` grid at
+    `sm-count * occupancy` blocks and adds a grid-stride `scf.for` over the
+    logical tile IDs. Runtime-shaped grids compute the cap in SSA. Grids
+    must have zero lower bounds and unit steps, as produced by tir-form-grid.
+    Static grids that fit within the cap remain unchanged.
+  }];
+  let options = [
     Option<"sm_count", "sm-count", "int64_t", "0",
            "Streaming multiprocessor count for static persistence">,
     Option<"occupancy", "occupancy", "int64_t", "1",
@@ -176,7 +199,6 @@ def TileReductionsPass : Pass<"tir-tile-reductions", "mlir::func::FuncOp"> {
   ];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
-    "::mlir::nv_tensor_ir::TensorIRDialect",
     "::mlir::scf::SCFDialect"
   ];
 }

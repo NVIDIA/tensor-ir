@@ -139,13 +139,59 @@ macro(tensor_ir_find_mlir)
   list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 endmacro()
 
-macro(tensor_ir_configure_cxx_llvm_abi_compatibility)
-  # Apply required LLVM/MLIR build configuration options within this scope. This
-  # will apply to all targets/sub-projects from this point on.
-  include(HandleLLVMOptions)
+# These settings affect C++ ABI boundaries, including non-LLVM dependencies.
+# Sanitizer instrumentation must likewise be supplied by the caller's toolchain
+# for the entire link graph, especially when using MemorySanitizer.
+macro(tensor_ir_configure_llvm_abi)
+  include(HandleLLVMStdlib)
+  if(LLVM_ENABLE_EXPENSIVE_CHECKS)
+    include(CheckCXXSourceCompiles)
+    check_cxx_source_compiles("
+      #define _GLIBCXX_DEBUG
+      #include <algorithm>
+      int main() {
+        static constexpr int data[] = {0, 1};
+        constexpr const int* min_elt = std::min_element(&data[0], &data[2]);
+        return 0;
+      }
+      " CXX_SUPPORTS_GLIBCXX_DEBUG)
+    if(CXX_SUPPORTS_GLIBCXX_DEBUG)
+      add_compile_definitions(_GLIBCXX_DEBUG)
+    endif()
+  endif()
+
+  # Installed LLVM packages can export an explicit libstdc++ ABI selection.
+  # Preserve it for all dependencies that exchange standard-library types.
+  separate_arguments(_tensor_ir_llvm_definitions NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+  foreach(_definition IN LISTS _tensor_ir_llvm_definitions)
+    if(_definition STREQUAL "-D_GLIBCXX_DEBUG")
+      add_definitions("${_definition}")
+    elseif(_definition MATCHES "^-D_GLIBCXX_USE_CXX11_ABI=([01])$" AND
+           NOT DEFINED GLIBCXX_USE_CXX11_ABI)
+      set(GLIBCXX_USE_CXX11_ABI "${CMAKE_MATCH_1}")
+    endif()
+  endforeach()
+  # Source builds may select the ABI through this cache option instead.
+  if(DEFINED GLIBCXX_USE_CXX11_ABI)
+    if(GLIBCXX_USE_CXX11_ABI)
+      add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=1)
+    else()
+      add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
+    endif()
+  endif()
+endmacro()
+
+macro(tensor_ir_configure_llvm_options)
+  # HandleLLVMOptions supplies warnings, assertions, and linker policy. RTTI/EH
+  # are applied separately by AddLLVM/AddMLIR or llvm_update_compile_flags().
   if(NOT DEFINED LLVM_DEFINITIONS)
     message(FATAL_ERROR "LLVM_DEFINITIONS is not set")
   endif()
-  separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND ${LLVM_DEFINITIONS})
+  separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+  include(HandleLLVMOptions)
+  # HandleLLVMOptions applies the ABI selected above. Do not reintroduce an
+  # imported definition that may disagree with an explicit caller override.
+  list(FILTER LLVM_DEFINITIONS_LIST EXCLUDE
+       REGEX "^-D_GLIBCXX_USE_CXX11_ABI=")
   add_definitions(${LLVM_DEFINITIONS_LIST})
 endmacro()

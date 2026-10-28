@@ -324,8 +324,7 @@ liftResultToCarrier(Value result, Value carrierAnchor,
           return;
         }
 
-        bool transparent = isa<PointwiseOpInterface>(definingOp) &&
-                           !isa<BroadcastOp>(definingOp);
+        bool transparent = definingOp->hasTrait<OpTrait::Elementwise>();
         bool transportOperands = transportCoordinates && transparent;
         for (Value operand : definingOp->getOperands()) {
           if (!isa<RankedTensorType>(operand.getType()) ||
@@ -555,7 +554,7 @@ static LogicalResult processOperation(Operation *op, LayoutMap &layouts) {
 
   // Compute the resulting layout attribute.
   LayoutSourceAttrInterface result;
-  bool combinesSources = isa<PointwiseOpInterface>(op);
+  bool combinesSources = op->hasTrait<OpTrait::Elementwise>();
   if (sources.size() > 1 && combinesSources) {
     // Handle operations that combine multiple source layouts.
     llvm::SmallSetVector<LayoutSourceAttrInterface, 4> srcSet;

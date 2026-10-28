@@ -5,6 +5,7 @@
 
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
+from math import gcd
 
 from nv_tensor_ir._mlir.dialects import nv_tensor_ir
 
@@ -17,7 +18,7 @@ from .dsl import (
     _register_backend_impl,
 )
 from .module_builder import TensorInfoOverrides
-from .tracing import MovementOp, NodeKind, TensorInfo, TraceGraph
+from .tracing import MovementOp, NodeKind, ScalarInfo, TensorInfo, TraceGraph
 
 
 _DYNAMIC_SHAPE_ALLOWED_NODE_KINDS = {
@@ -60,7 +61,14 @@ class CudaTileCompiledKernel(CompiledKernel):
     def get_bytecode(self) -> bytes:
         return self.artifact.get_bytecode()
 
-    def run(self, *inputs: object, output: object | tuple[object, ...]) -> None:
+    def run(
+        self, *inputs: object, output: object | tuple[object, ...], stream: int = 0
+    ) -> None:
+        """Launch after checking input/output alignment against the module.
+
+        Raises ValueError if a runtime data address violates a compiled
+        alignment requirement.
+        """
         if len(inputs) != self.input_count:
             raise TypeError(
                 f"Expected {self.input_count} input tensors, got {len(inputs)}"
@@ -70,27 +78,89 @@ class CudaTileCompiledKernel(CompiledKernel):
             raise TypeError(
                 f"Expected {self.output_count} output tensors, got {len(outputs)}"
             )
+        self._check_alignment(inputs, outputs)
         if self._runtime_kernel is None or self._runtime_kernel.is_destroyed:
             self._runtime_kernel = self.artifact.load()
-        self._runtime_kernel.launch(*inputs, *outputs)
+        self._runtime_kernel.launch(*inputs, *outputs, stream=stream)
+
+    def _check_alignment(
+        self, inputs: tuple[object, ...], outputs: tuple[object, ...]
+    ) -> None:
+        """Validate runtime addresses against the compiled graph's attributes."""
+        from nv_tensor_ir._mlir import ir
+        from nv_tensor_ir._mlir._mlir_libs import _tensor_ir
+
+        graph_op = next(
+            op
+            for op in self.module.body.operations
+            if op.operation.name == "nv_tensor_ir.graph"
+        )
+        for attr_name, kind, tensors in (
+            ("arg_attrs", "Input", inputs),
+            ("res_attrs", "Output", outputs),
+        ):
+            if attr_name not in graph_op.attributes:
+                continue
+            attrs = ir.ArrayAttr(graph_op.attributes[attr_name])
+            for index, tensor in enumerate(tensors):
+                tensor_attrs = ir.DictAttr(attrs[index])
+                if "nv_tensor_ir.alignment" not in tensor_attrs:
+                    continue
+                alignment = ir.IntegerAttr(tensor_attrs["nv_tensor_ir.alignment"]).value
+                if alignment <= 1:
+                    continue
+                _, _, _, pointer = _tensor_ir._tensor_metadata_from_dlpack(tensor)
+                if not pointer or pointer % alignment:
+                    raise ValueError(
+                        f"{kind} tensor {index} requires a non-null data pointer "
+                        f"aligned to {alignment} bytes; got {pointer:#x}"
+                    )
 
 
 def prepare_tensor_infos(
     graph: TraceGraph,
     *,
+    options: CompileOptions | None = None,
     dynamic_shape: bool = False,
 ) -> TensorInfoOverrides:
-    """Reject unsupported divisibility; preserve alignment for MLIR emission.
+    """Reject unsupported divisibility; prepare alignment for MLIR emission.
 
-    Static metadata is consumed directly by the shared builder, while dynamic
-    overrides retain alignment through ``dataclasses.replace``.
+    Traced DLPack tensors use observed pointers in static mode and layout rules
+    in dynamic mode. AffineMap skips inference; explicit alignment is preserved.
     """
-    if any(node.tensor_info.stride_divisibility is not None for node in graph.nodes):
+    if any("dynamic_dimensions" in node.kwargs for node in graph.nodes):
+        raise TypeError(
+            "The CUDA Tile backend does not yet support per-dimension dynamic shapes"
+        )
+    if any(
+        node.value_info.stride_divisibility is not None
+        for node in graph.nodes
+        if not isinstance(node.value_info, ScalarInfo)
+    ):
         raise TypeError("The CUDA Tile backend does not support stride_divisibility")
-    if not dynamic_shape:
-        return {}
-    _check_dynamic_shape_supported(graph)
-    return _dynamic_ir_metadata_overrides(graph)
+    overrides = {}
+    if dynamic_shape:
+        _check_dynamic_shape_supported(graph)
+        overrides = _dynamic_ir_metadata_overrides(graph)
+    options = options if options is not None else CompileOptions()
+    if options.codegen_strategy == CodegenStrategy.AffineMap:
+        return overrides
+    for node_id in graph.input_ids + graph.output_ref_ids:
+        info = overrides.get(node_id, graph.nodes[node_id].value_info)
+        if isinstance(info, ScalarInfo):
+            continue
+        pointer = info._traced_tensor_ptr
+        if info.alignment is not None or pointer is None:
+            continue
+        if dynamic_shape:
+            # Infer from the concrete trace, not the dynamic IR overrides.
+            alignment = _dynamic_tensor_alignment(graph.nodes[node_id].value_info)
+        else:
+            # Cap at 32B for 256-bit vectorization without specializing on
+            # over-aligned pointers. Null data gives no alignment guarantee.
+            alignment = min(pointer & -pointer, 32) if pointer else None
+        overrides[node_id] = replace(info, alignment=alignment)
+    return overrides
 
 
 def _check_dynamic_shape_supported(graph: TraceGraph) -> None:
@@ -114,9 +184,8 @@ def _dynamic_ir_metadata_overrides(graph: TraceGraph) -> dict[int, TensorInfo]:
     Inputs and output references seed the dynamic set. Nodes are visited once
     in trace creation order, so each producer is classified before its users;
     SSA and explicit ``like`` dependencies propagate dynamic metadata forward.
-    Overrides set the unified ``dynamic_shape`` flag; the module builder turns
-    all shape dimensions and non-unit strides into ``?``. The concrete trace
-    graph is not modified.
+    Dynamic shapes become all ``?`` and only unit strides remain static. The
+    concrete trace graph is not modified.
     """
     dynamic_node_ids = set(graph.input_ids) | set(graph.output_ref_ids)
     for node_id, node in enumerate(graph.nodes):
@@ -128,9 +197,37 @@ def _dynamic_ir_metadata_overrides(graph: TraceGraph) -> dict[int, TensorInfo]:
 
     overrides: dict[int, TensorInfo] = {}
     for node_id in dynamic_node_ids:
-        info = graph.nodes[node_id].tensor_info
-        overrides[node_id] = replace(info, dynamic_shape=True)
+        info = graph.nodes[node_id].value_info
+        if isinstance(info, ScalarInfo):
+            continue
+        overrides[node_id] = replace(
+            info,
+            shape=tuple(None for _ in info.shape),
+            stride=tuple(1 if stride == 1 else None for stride in info.stride),
+        )
     return overrides
+
+
+def _dynamic_tensor_alignment(info: TensorInfo) -> int | None:
+    """Infer byte alignment from the contiguous extent and TMA requirement.
+
+    Prefer the last non-unit extent with stride 1, falling back to the last
+    stride-1 dimension. Scalar layouts and layouts without a stride-1 dimension
+    have no inferred alignment annotation. Otherwise use the GCD of the
+    contiguous extent's bit size and the TMA alignment requirement, with a
+    minimum byte alignment of 1 for sub-byte results.
+    """
+    if all(size == 1 for size in info.shape):
+        return None
+    leading_dims = [i for i, stride in enumerate(info.stride) if stride == 1]
+    if not leading_dims:
+        return None
+    non_unit_dims = [i for i in leading_dims if info.shape[i] != 1]
+    leading_dim = (non_unit_dims or leading_dims)[-1]
+    # DataType values use MLIR scalar spellings (f32, bf16, si8, ui8, i1).
+    width = int(info.dtype.value.lstrip("bfsui"))
+    tma_alignment_bits = 128 if width >= 8 else 256
+    return max(1, gcd(info.shape[leading_dim] * width, tma_alignment_bits) // 8)
 
 
 def _calculate_cache_key(

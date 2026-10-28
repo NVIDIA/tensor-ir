@@ -12,15 +12,8 @@
 //  CHECK-SAME: %[[HISTORY:[^:]+]]: memref<2x5x8xbf16,
 //  CHECK-SAME: %[[TOTALS:[^:]+]]: memref<5x2x1xf32,
 //  CHECK-SAME: %[[FINAL:[^:]+]]: memref<2x8xf32,
-//       CHECK: %[[IPTR:.*]] = ptr.to_ptr %[[INITIAL]]
-//       CHECK: %[[VPTR:.*]] = ptr.to_ptr %[[VALUES]]
-//       CHECK: %[[SPTR:.*]] = ptr.to_ptr %[[SCALES]]
-//       CHECK: %[[HPTR:.*]] = ptr.to_ptr %[[HISTORY]]
-//       CHECK: %[[TPTR:.*]] = ptr.to_ptr %[[TOTALS]]
-//       CHECK: %[[FPTR:.*]] = ptr.to_ptr %[[FINAL]]
 //       CHECK: scf.forall (%[[ROW:.*]]) in (2) {
-//       CHECK: %[[INIT:.*]] = nv_tensor_ir.load %[[IPTR]][%[[ROW]], 0] view offset: [0], sizes: [2, 8],
-//  CHECK-SAME: strides: [8, 1]
+//       CHECK: %[[INIT:.*]] = nv_tensor_ir.load %[[INITIAL]] tile_indices [%[[ROW]], 0]
 //  CHECK-SAME: to tensor<1x8xf32>
 //       CHECK: %[[NEG:.*]] = nv_tensor_ir.neg %[[INIT]]
 //       CHECK: %[[ZERO:.*]] = arith.constant 0 : index
@@ -34,15 +27,15 @@
 //       CHECK: %[[VOFF:.*]] = arith.muli %[[STEP]], %[[STRIDE]] : index
 //       CHECK: %[[VZERO:.*]] = arith.constant 0 : index
 //       CHECK: %[[VBASE:.*]] = arith.addi %[[VZERO]], %[[VOFF]] : index
-//       CHECK: %[[VALUE:.*]] = nv_tensor_ir.load %[[VPTR]][%[[ROW]], 0] view offset: [%[[VBASE]]],
-//  CHECK-SAME: sizes: [2, 8], strides: [16, 2], alignment: 256
+//       CHECK: %[[VIEW0:.*]] = memref.reinterpret_cast %[[VALUES]] to offset: [%[[VBASE]]], sizes: [2, 8], strides: [16, 2]
+//       CHECK: %[[VALUE:.*]] = nv_tensor_ir.load %[[VIEW0]] tile_indices [%[[ROW]], 0], alignment 256
 //  CHECK-SAME: to tensor<1x8xf32>
 //       CHECK: %[[SSTRIDE:.*]] = arith.constant 1 : index
 //       CHECK: %[[SOFF:.*]] = arith.muli %[[STEP]], %[[SSTRIDE]] : index
 //       CHECK: %[[SZERO:.*]] = arith.constant 0 : index
 //       CHECK: %[[SBASE:.*]] = arith.addi %[[SZERO]], %[[SOFF]] : index
-//       CHECK: %[[SCALE:.*]] = nv_tensor_ir.load %[[SPTR]][%[[ROW]]] view offset: [%[[SBASE]]], sizes: [2],
-//  CHECK-SAME: strides: [5], alignment: 4
+//       CHECK: %[[VIEW1:.*]] = memref.reinterpret_cast %[[SCALES]] to offset: [%[[SBASE]]], sizes: [2], strides: [5]
+//       CHECK: %[[SCALE:.*]] = nv_tensor_ir.load %[[VIEW1]] tile_indices [%[[ROW]]], alignment 4
 //  CHECK-SAME: to tensor<1xf32>
 //       CHECK: %[[COLUMN:.*]] = nv_tensor_ir.reshape %[[SCALE]] : tensor<1xf32> -> tensor<1x1xf32>
 //       CHECK: %[[WIDE:.*]] = nv_tensor_ir.broadcast %[[COLUMN]] : tensor<1x1xf32> -> tensor<1x8xf32>
@@ -55,20 +48,19 @@
 //       CHECK: %[[HOFF:.*]] = arith.muli %[[STEP]], %[[HSTRIDE]] : index
 //       CHECK: %[[HZERO:.*]] = arith.constant 0 : index
 //       CHECK: %[[HBASE:.*]] = arith.addi %[[HZERO]], %[[HOFF]] : index
-//       CHECK: nv_tensor_ir.store %[[LOW]], %[[HPTR]][%[[ROW]], 0] view offset: [%[[HBASE]]], sizes: [2, 8],
-//  CHECK-SAME: strides: [40, 1]
+//       CHECK: %[[VIEW2:.*]] = memref.reinterpret_cast %[[HISTORY]] to offset: [%[[HBASE]]], sizes: [2, 8], strides: [40, 1]
+//       CHECK: nv_tensor_ir.store %[[LOW]], %[[VIEW2]] tile_indices [%[[ROW]], 0]
 //       CHECK: %[[TSTRIDE:.*]] = arith.constant 2 : index
 //       CHECK: %[[TOFF:.*]] = arith.muli %[[STEP]], %[[TSTRIDE]] : index
 //       CHECK: %[[TZERO:.*]] = arith.constant 0 : index
 //       CHECK: %[[TBASE:.*]] = arith.addi %[[TZERO]], %[[TOFF]] : index
-//       CHECK: nv_tensor_ir.store %[[TOTAL]], %[[TPTR]][%[[ROW]], 0] view offset: [%[[TBASE]]], sizes: [2, 1],
-//  CHECK-SAME: strides: [1, 1]
+//       CHECK: %[[VIEW3:.*]] = memref.reinterpret_cast %[[TOTALS]] to offset: [%[[TBASE]]], sizes: [2, 1], strides: [1, 1]
+//       CHECK: nv_tensor_ir.store %[[TOTAL]], %[[VIEW3]] tile_indices [%[[ROW]], 0]
 //  CHECK-NEXT: scf.yield %[[NEXT]] : tensor<1x8xf32>
 //  CHECK-NEXT: }
 //   CHECK-NOT: nv_tensor_ir.store
 //       CHECK: %[[OUT:.*]] = nv_tensor_ir.exp %[[LOOP]]
-//       CHECK: nv_tensor_ir.store %[[OUT]], %[[FPTR]][%[[ROW]], 0] view offset: [0], sizes: [2, 8],
-//  CHECK-SAME: strides: [8, 1]
+//       CHECK: nv_tensor_ir.store %[[OUT]], %[[FINAL]] tile_indices [%[[ROW]], 0]
 //   CHECK-NOT: nv_tensor_ir.store
 //       CHECK: return
 
@@ -104,15 +96,9 @@ nv_tensor_ir.graph @streaming_metadata(
 //  CHECK-SAME: %[[BBUF:[^:]+]]: memref<2x8xf32,
 //  CHECK-SAME: %[[VALUES:[^:]+]]: memref<5x2x8xf32,
 //  CHECK-SAME: %[[FINAL:[^:]+]]: memref<2x8xf32,
-//       CHECK: %[[APTR:.*]] = ptr.to_ptr %[[ABUF]]
-//       CHECK: %[[BPTR:.*]] = ptr.to_ptr %[[BBUF]]
-//       CHECK: %[[VPTR:.*]] = ptr.to_ptr %[[VALUES]]
-//       CHECK: %[[FPTR:.*]] = ptr.to_ptr %[[FINAL]]
 //       CHECK: scf.forall (%[[ROW:.*]]) in (2) {
-//       CHECK: %[[A:.*]] = nv_tensor_ir.load %[[APTR]][%[[ROW]], 0] view offset: [0], sizes: [2, 8],
-//  CHECK-SAME: strides: [8, 1]
-//       CHECK: %[[B:.*]] = nv_tensor_ir.load %[[BPTR]][%[[ROW]], 0] view offset: [0], sizes: [2, 8],
-//  CHECK-SAME: strides: [8, 1]
+//       CHECK: %[[A:.*]] = nv_tensor_ir.load %[[ABUF]] tile_indices [%[[ROW]], 0]
+//       CHECK: %[[B:.*]] = nv_tensor_ir.load %[[BBUF]] tile_indices [%[[ROW]], 0]
 //       CHECK: %[[INITIAL:.*]] = nv_tensor_ir.add %[[A]], %[[B]]
 //       CHECK: %[[ZERO:.*]] = arith.constant 0 : index
 //       CHECK: %[[FIVE:.*]] = arith.constant 5 : index
@@ -124,16 +110,15 @@ nv_tensor_ir.graph @streaming_metadata(
 //       CHECK: %[[OFF:.*]] = arith.muli %[[IV]], %[[STRIDE]] : index
 //       CHECK: %[[ZERO:.*]] = arith.constant 0 : index
 //       CHECK: %[[BASE:.*]] = arith.addi %[[ZERO]], %[[OFF]] : index
-//       CHECK: %[[VALUE:.*]] = nv_tensor_ir.load %[[VPTR]][%[[ROW]], 0] view offset: [%[[BASE]]], sizes: [2, 8],
-//  CHECK-SAME: strides: [8, 1]
+//       CHECK: %[[VIEW4:.*]] = memref.reinterpret_cast %[[VALUES]] to offset: [%[[BASE]]], sizes: [2, 8], strides: [8, 1]
+//       CHECK: %[[VALUE:.*]] = nv_tensor_ir.load %[[VIEW4]] tile_indices [%[[ROW]], 0]
 //  CHECK-SAME: to tensor<1x8xf32>
 //       CHECK: %[[NEXT:.*]] = nv_tensor_ir.add %[[CARRY]], %[[VALUE]]
 //  CHECK-NEXT: scf.yield %[[NEXT]] : tensor<1x8xf32>
 //  CHECK-NEXT: }
 //   CHECK-NOT: = scf.for
 //       CHECK: %[[OUT:.*]] = nv_tensor_ir.add %[[LOOP]], %[[LOOP]]
-//       CHECK: nv_tensor_ir.store %[[OUT]], %[[FPTR]][%[[ROW]], 0] view offset: [0], sizes: [2, 8],
-//  CHECK-SAME: strides: [8, 1]
+//       CHECK: nv_tensor_ir.store %[[OUT]], %[[FINAL]] tile_indices [%[[ROW]], 0]
 //   CHECK-NOT: nv_tensor_ir.store
 //       CHECK: return
 
@@ -196,15 +181,14 @@ nv_tensor_ir.graph @unit_reshape_scan_slice(%initial: tensor<2x8xf32>, %values: 
 // CHECK-LABEL: func.func @native_slice_rank_dispatch(
 //  CHECK-SAME: %[[INITIAL:[^:]+]]: memref<2x8xf32,
 //  CHECK-SAME: %[[VALUES:[^:]+]]: memref<5x2x1x8xf32,
-//       CHECK: %[[VPTR:.*]] = ptr.to_ptr %[[VALUES]]
 //       CHECK: scf.forall (%[[ROW:.*]]) in (2) {
 //       CHECK: %[[LOOP:.*]] = scf.for %[[STEP:.*]] = {{.*}} iter_args(%[[CARRY:.*]] = {{.*}}) -> (tensor<1x8xf32>) {
 //       CHECK: %[[STRIDE:.*]] = arith.constant 16 : index
 //       CHECK: %[[DELTA:.*]] = arith.muli %[[STEP]], %[[STRIDE]] : index
 //       CHECK: %[[ZERO:.*]] = arith.constant 0 : index
 //       CHECK: %[[OFFSET:.*]] = arith.addi %[[ZERO]], %[[DELTA]] : index
-//       CHECK: %[[VALUE:.*]] = nv_tensor_ir.load %[[VPTR]][%[[ROW]], 0, 0] view offset: [%[[OFFSET]]],
-//  CHECK-SAME: sizes: [2, 1, 8], strides: [8, 8, 1]
+//       CHECK: %[[VIEW5:.*]] = memref.reinterpret_cast %[[VALUES]] to offset: [%[[OFFSET]]], sizes: [2, 1, 8], strides: [8, 8, 1]
+//       CHECK: %[[VALUE:.*]] = nv_tensor_ir.load %[[VIEW5]] tile_indices [%[[ROW]], 0, 0]
 //  CHECK-SAME: to tensor<1x1x8xf32>
 //       CHECK: %[[FLAT:.*]] = nv_tensor_ir.reshape %[[VALUE]] : tensor<1x1x8xf32> -> tensor<1x8xf32>
 //   CHECK-NOT: nv_tensor_ir.reshape
@@ -230,15 +214,14 @@ nv_tensor_ir.graph @native_slice_rank(%initial: tensor<2x8xf32>, %values: tensor
 // CHECK-LABEL: func.func @native_slice_last_axis_dispatch(
 //  CHECK-SAME: %[[INITIAL:[^:]+]]: memref<2x8xf32,
 //  CHECK-SAME: %[[VALUES:[^:]+]]: memref<2x1x8x5xf32,
-//       CHECK: %[[VPTR:.*]] = ptr.to_ptr %[[VALUES]]
 //       CHECK: scf.forall (%[[ROW:.*]]) in (2) {
 //       CHECK: %[[LOOP:.*]] = scf.for %[[STEP:.*]] = {{.*}} iter_args(%[[CARRY:.*]] = {{.*}}) -> (tensor<1x8xf32>) {
 //       CHECK: %[[STRIDE:.*]] = arith.constant 1 : index
 //       CHECK: %[[DELTA:.*]] = arith.muli %[[STEP]], %[[STRIDE]] : index
 //       CHECK: %[[ZERO:.*]] = arith.constant 0 : index
 //       CHECK: %[[OFFSET:.*]] = arith.addi %[[ZERO]], %[[DELTA]] : index
-//       CHECK: %[[VALUE:.*]] = nv_tensor_ir.load %[[VPTR]][%[[ROW]], 0, 0] view offset: [%[[OFFSET]]],
-//  CHECK-SAME: sizes: [2, 1, 8], strides: [40, 40, 5]
+//       CHECK: %[[VIEW6:.*]] = memref.reinterpret_cast %[[VALUES]] to offset: [%[[OFFSET]]], sizes: [2, 1, 8], strides: [40, 40, 5]
+//       CHECK: %[[VALUE:.*]] = nv_tensor_ir.load %[[VIEW6]] tile_indices [%[[ROW]], 0, 0]
 //  CHECK-SAME: to tensor<1x1x8xf32>
 //       CHECK: %[[FLAT:.*]] = nv_tensor_ir.reshape %[[VALUE]] : tensor<1x1x8xf32> -> tensor<1x8xf32>
 //   CHECK-NOT: nv_tensor_ir.reshape

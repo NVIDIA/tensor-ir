@@ -539,6 +539,12 @@ def test_named_binary_ops_trace(kernel: KernelFunction, op_name: str) -> None:
     assert traced_ops == [op_name]
 
 
+@pytest.mark.parametrize("op", [tir.softplus, tir.swish, tir.elu])
+def test_beta_unary_checks_tensor_before_beta(op) -> None:
+    with pytest.raises(TypeError, match="expects a traced tensor"):
+        op(object(), beta=object())
+
+
 def test_extended_pointwise_ops(profiling: bool) -> None:
     a = torch.rand((8, 8), device="cuda", dtype=torch.float32) + 0.25
     b = torch.rand((8, 8), device="cuda", dtype=torch.float32) + 1.25

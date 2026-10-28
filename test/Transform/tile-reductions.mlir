@@ -8,7 +8,7 @@
 // CHECK-LABEL: func.func @large_add_dispatch
 // CHECK: %[[ZERO:.*]] = nv_tensor_ir.constant dense<0.000000e+00> : tensor<32x128xf32>
 // CHECK: %[[LOOP:.*]] = scf.for %[[K:[^ ]+]] = {{.*}} to {{.*}} step {{.*}} iter_args(%[[ACC:.*]] = %[[ZERO]]) -> (tensor<32x128xf32>) {
-// CHECK:   %[[TILE:.*]] = nv_tensor_ir.load %{{.*}}[{{.*}}, %[[K]]]
+// CHECK:   %[[TILE:.*]] = nv_tensor_ir.load %{{.*}} tile_indices [{{.*}}, %[[K]]]
 // CHECK:   %[[SUM:.*]] = nv_tensor_ir.add %[[ACC]], %[[TILE]]
 // CHECK:   scf.yield %[[SUM]]
 // CHECK: }
@@ -25,7 +25,7 @@ nv_tensor_ir.graph @large_add(%input: tensor<64x1024xf32>)
 
 // CHECK-LABEL: func.func @pointwise_prologue_dispatch
 // CHECK: scf.for %[[K:[^ ]+]] =
-// CHECK:   %[[TILE:.*]] = nv_tensor_ir.load {{.*}}[{{.*}}, %[[K]]]
+// CHECK:   %[[TILE:.*]] = nv_tensor_ir.load {{.*}} tile_indices [{{.*}}, %[[K]]]
 // CHECK:   %[[SQUARE:.*]] = nv_tensor_ir.mul %[[TILE]], %[[TILE]]
 // CHECK:   %[[SUM:.*]] = nv_tensor_ir.add {{.*}}, %[[SQUARE]]
 // CHECK:   scf.yield %[[SUM]]
@@ -60,7 +60,7 @@ nv_tensor_ir.graph @small(%input: tensor<8x64x8xf32>)
 // CHECK-LABEL: func.func @two_dimensions_dispatch
 // CHECK: %[[ZERO:.*]] = nv_tensor_ir.constant dense<0.000000e+00> : tensor<32x8x16xf32>
 // CHECK: scf.for %[[K:[^ ]+]] = {{.*}} to {{.*}} step {{.*}} iter_args(%[[ACC:.*]] = %[[ZERO]])
-// CHECK:   nv_tensor_ir.load {{.*}}[{{.*}}, {{.*}}, %[[K]]]
+// CHECK:   nv_tensor_ir.load {{.*}} tile_indices [{{.*}}, {{.*}}, %[[K]]]
 // CHECK:   %[[SUM:.*]] = nv_tensor_ir.add %[[ACC]], {{.*}}
 // CHECK:   scf.yield %[[SUM]]
 // CHECK: nv_tensor_ir.reduce{{.*}}dimensions = [1, 2]
@@ -148,12 +148,12 @@ nv_tensor_ir.graph @tail_avg(%input: tensor<64x500xf32>)
 // the producers' own contracting dimension.
 // CHECK-LABEL: func.func @strip_mined_transposed_producer_dispatch
 //       CHECK: scf.for %[[K:[^ ]+]] = {{.*}} -> (tensor<1x16x128xf32>) {
-//       CHECK:   %[[DOUT:.*]] = nv_tensor_ir.load %{{.*}}[%{{.*}}, %[[K]], 0] {{.*}} to tensor<1x128x16xf32>
-//       CHECK:   %[[Z:.*]] = nv_tensor_ir.load %{{.*}}[%{{.*}}, %[[K]], 0] {{.*}} to tensor<1x128x16xf32>
+//       CHECK:   %[[DOUT:.*]] = nv_tensor_ir.load %{{.*}} tile_indices [%{{.*}}, %[[K]], 0], {{.*}} to tensor<1x128x16xf32>
+//       CHECK:   %[[Z:.*]] = nv_tensor_ir.load %{{.*}} tile_indices [%{{.*}}, %[[K]], 0], {{.*}} to tensor<1x128x16xf32>
 //       CHECK:   %[[EXP:.*]] = nv_tensor_ir.exp %[[Z]] : tensor<1x128x16xf32>
 //       CHECK:   %[[SHARED:.*]] = nv_tensor_ir.mul %[[DOUT]], %[[EXP]] : tensor<1x128x16xf32>
 //       CHECK:   %[[TRANSPOSED:.*]] = nv_tensor_ir.transpose %[[SHARED]] permutation = [0, 2, 1] : tensor<1x128x16xf32> -> tensor<1x16x128xf32>
-//       CHECK:   %[[X:.*]] = nv_tensor_ir.load %{{.*}}[%{{.*}}, 0, %[[K]]] {{.*}} to tensor<1x16x128xf32>
+//       CHECK:   %[[X:.*]] = nv_tensor_ir.load %{{.*}} tile_indices [%{{.*}}, 0, %[[K]]], {{.*}} to tensor<1x16x128xf32>
 //       CHECK:   nv_tensor_ir.mul %[[TRANSPOSED]], %[[X]] : tensor<1x16x128xf32>
 //       CHECK: nv_tensor_ir.reduce
 nv_tensor_ir.graph @strip_mined_transposed_producer(

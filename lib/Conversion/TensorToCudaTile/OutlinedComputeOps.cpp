@@ -24,7 +24,6 @@
 
 namespace mlir::nv_tensor_ir::tensor_to_cuda_tile {
 namespace {
-
 static FailureOr<cuda_tile::TileType>
 getResultType(Operation *op, const TypeConverter &typeConverter) {
   if (op->getNumResults() != 1) {
@@ -163,15 +162,52 @@ public:
   }
 };
 
+class SplatConversion : public OpConversionPattern<SplatOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SplatOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (failed(validateSplatOpLowerable(op))) {
+      return failure();
+    }
+    FailureOr<cuda_tile::TileType> resultType =
+        getResultType(op, *typeConverter);
+    if (failed(resultType)) {
+      return op.emitError("staged splats require a static tile result");
+    }
+
+    Value input = adaptor.getInput();
+    if (auto constant = input.getDefiningOp<cuda_tile::ConstantOp>()) {
+      auto literal = cast<DenseTypedElementsAttr>(
+          constant.getValue().resizeSplat(*resultType));
+      rewriter.replaceOpWithNewOp<cuda_tile::ConstantOp>(op, *resultType,
+                                                         literal);
+      // Other splats may still retrieve this scalar through the conversion's
+      // value mapping even if it has no SSA uses. Leave dead constant cleanup
+      // to canonicalization after conversion.
+      return success();
+    }
+
+    SmallVector<int64_t> unitShape(resultType->getRank(), 1);
+    auto unitType =
+        cuda_tile::TileType::get(unitShape, resultType->getElementType());
+    Value reshaped =
+        cuda_tile::ReshapeOp::create(rewriter, op.getLoc(), unitType, input);
+    rewriter.replaceOpWithNewOp<cuda_tile::BroadcastOp>(op, *resultType,
+                                                        reshaped);
+    return success();
+  }
+};
+
 class PointwiseEmitter {
 public:
-  static LogicalResult lower(PointwiseOpInterface pointwise,
-                             ArrayRef<Value> operands,
+  static LogicalResult lower(Operation *op, ArrayRef<Value> operands,
                              cuda_tile::TileType resultType,
                              ConversionPatternRewriter &rewriter,
                              bool enableExperimentalCudaTileOps,
                              cuda_tile::BytecodeVersion targetBytecodeVersion) {
-    Operation *op = pointwise.getOperation();
     if (operands.empty()) {
       return rewriter.notifyMatchFailure(op, "expected converted operands");
     }
@@ -363,27 +399,6 @@ public:
         })
         .Case<ConvertOp>([&](ConvertOp convert) {
           return lowerConvert(convert, input, resultType, rewriter);
-        })
-        .Case<SplatOp>([&](SplatOp) {
-          if (auto constant = input.getDefiningOp<cuda_tile::ConstantOp>()) {
-            auto literal = cast<DenseTypedElementsAttr>(
-                constant.getValue().resizeSplat(resultType));
-            rewriter.replaceOpWithNewOp<cuda_tile::ConstantOp>(op, resultType,
-                                                               literal);
-            // Other splats may still retrieve this scalar through the
-            // conversion's value mapping even if it has no SSA uses. Leave
-            // dead constant cleanup to canonicalization after conversion.
-            return success();
-          }
-
-          SmallVector<int64_t> unitShape(resultType.getRank(), 1);
-          auto unitType =
-              cuda_tile::TileType::get(unitShape, resultType.getElementType());
-          Value reshaped =
-              cuda_tile::ReshapeOp::create(rewriter, loc, unitType, input);
-          rewriter.replaceOpWithNewOp<cuda_tile::BroadcastOp>(op, resultType,
-                                                              reshaped);
-          return success();
         })
         .Case<ReluFwdOp>([&](auto) {
           Value zero = createConstant(rewriter, loc, resultType, 0.0);
@@ -690,19 +705,21 @@ private:
 };
 
 class PointwiseConversion
-    : public OpInterfaceConversionPattern<PointwiseOpInterface> {
+    : public OpTraitConversionPattern<OpTrait::Elementwise> {
 public:
   PointwiseConversion(const TypeConverter &typeConverter, MLIRContext *context,
                       bool enableExperimentalCudaTileOps,
                       cuda_tile::BytecodeVersion targetBytecodeVersion)
-      : OpInterfaceConversionPattern(typeConverter, context),
+      : OpTraitConversionPattern(typeConverter, context),
         enableExperimentalCudaTileOps(enableExperimentalCudaTileOps),
         targetBytecodeVersion(targetBytecodeVersion) {}
 
   LogicalResult
-  matchAndRewrite(PointwiseOpInterface pointwise, ArrayRef<Value> operands,
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    Operation *op = pointwise.getOperation();
+    if (!isa<TensorIRDialect>(op->getDialect())) {
+      return rewriter.notifyMatchFailure(op, "expected a TensorIR operation");
+    }
     if (failed(validatePointwiseOpLowerable(op))) {
       return failure();
     }
@@ -712,7 +729,7 @@ public:
       return op->emitError(
           "staged pointwise operations require a static tile result");
     }
-    return lowerPointwiseOp(pointwise, operands, *resultType, rewriter,
+    return lowerPointwiseOp(op, operands, *resultType, rewriter,
                             enableExperimentalCudaTileOps,
                             targetBytecodeVersion);
   }
@@ -986,17 +1003,10 @@ public:
 
 static bool isSupportedStagedMatmulTypes(Type lhsType, Type rhsType,
                                          Type resultType) {
-  if (lhsType.isF16() && rhsType == lhsType) {
-    return resultType.isF16() || resultType.isF32();
-  }
-  if ((lhsType.isBF16() || lhsType.isF32()) && rhsType == lhsType) {
-    return resultType.isF32();
-  }
-  if (lhsType.isF64() && rhsType == lhsType) {
-    return resultType.isF64();
-  }
-  return lhsType.isInteger(8) && rhsType.isInteger(8) &&
-         resultType.isSignedInteger(32);
+  auto expectedResultTypes =
+      MatmulOp::deduceCudaTileStagedMatmulTypes(lhsType, rhsType);
+  return expectedResultTypes &&
+         llvm::is_contained(*expectedResultTypes, resultType);
 }
 
 class MatmulConversion : public OpConversionPattern<MatmulOp> {
@@ -1472,12 +1482,10 @@ using SelectConversion =
 
 } // namespace
 
-LogicalResult
-lowerPointwiseOp(PointwiseOpInterface op, ArrayRef<Value> operands,
-                 cuda_tile::TileType resultType,
-                 ConversionPatternRewriter &rewriter,
-                 bool enableExperimentalCudaTileOps,
-                 cuda_tile::BytecodeVersion targetBytecodeVersion) {
+LogicalResult lowerPointwiseOp(
+    Operation *op, ArrayRef<Value> operands, cuda_tile::TileType resultType,
+    ConversionPatternRewriter &rewriter, bool enableExperimentalCudaTileOps,
+    cuda_tile::BytecodeVersion targetBytecodeVersion) {
   return PointwiseEmitter::lower(op, operands, resultType, rewriter,
                                  enableExperimentalCudaTileOps,
                                  targetBytecodeVersion);
@@ -1531,11 +1539,11 @@ void registerOutlinedComputePatterns(
     bool enableExperimentalCudaTileOps,
     cuda_tile::BytecodeVersion targetBytecodeVersion) {
   MLIRContext *context = patterns.getContext();
-  patterns.add<TensorIRConstantConversion, IotaConversion, BroadcastConversion,
-               ReshapeConversion, TransposeConversion, SliceConversion,
-               ConcatenateConversion, ReductionConversion, MatmulConversion,
-               UserDefinedReductionConversion, ReductionYieldConversion>(
-      typeConverter, context);
+  patterns.add<TensorIRConstantConversion, SplatConversion, IotaConversion,
+               BroadcastConversion, ReshapeConversion, TransposeConversion,
+               SliceConversion, ConcatenateConversion, ReductionConversion,
+               MatmulConversion, UserDefinedReductionConversion,
+               ReductionYieldConversion>(typeConverter, context);
   patterns.add<PointwiseConversion>(typeConverter, context,
                                     enableExperimentalCudaTileOps,
                                     targetBytecodeVersion);

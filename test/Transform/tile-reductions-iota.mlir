@@ -9,7 +9,7 @@
 // This is a small counterpart of Mamba's chunked causal-mask producer.
 // CHECK-LABEL: func.func @contracting_iota_dispatch
 // CHECK: %[[LOOP:.*]] = scf.for %[[K:[^ ]+]] = {{.*}} iter_args(%[[ACC:[^ ]+]] = {{.*}})
-// CHECK: %[[LOAD:.*]] = nv_tensor_ir.load {{.*}}[0, %[[K]]]
+// CHECK: %[[LOAD:.*]] = nv_tensor_ir.load {{.*}} tile_indices [0, %[[K]]]
 // CHECK: %[[LOCAL:.*]] = nv_tensor_ir.iota dimension = 1 : tensor<4x64xsi32>
 // CHECK: %[[EXTENT:.*]] = arith.constant 64 : index
 // CHECK: %[[OFFSET:.*]] = arith.muli %[[K]], %[[EXTENT]] : index
@@ -38,7 +38,7 @@ nv_tensor_ir.graph @contracting_iota(%input: tensor<4x256xf32>)
 // The MMA operand cloner must advance K indices as well as load addresses.
 // CHECK-LABEL: func.func @matmul_iota_dispatch
 // CHECK: %[[LOOP:.*]] = scf.for %[[K:[^ ]+]] = {{.*}} iter_args(%[[ACC:[^ ]+]] = {{.*}})
-// CHECK: %[[LHS:.*]] = nv_tensor_ir.load {{.*}}[0, %[[K]]]
+// CHECK: %[[LHS:.*]] = nv_tensor_ir.load {{.*}} tile_indices [0, %[[K]]]
 // CHECK: %[[LOCAL:.*]] = nv_tensor_ir.iota dimension = 1 : tensor<8x64xui32>
 // CHECK: %[[EXTENT:.*]] = arith.constant 64 : index
 // CHECK: %[[OFFSET:.*]] = arith.muli %[[K]], %[[EXTENT]] : index
@@ -49,7 +49,7 @@ nv_tensor_ir.graph @contracting_iota(%input: tensor<4x256xf32>)
 // CHECK: %[[GLOBAL:.*]] = nv_tensor_ir.add %[[SHIFTED]], {{.*}}
 // CHECK: %[[FACTOR:.*]] = nv_tensor_ir.convert %[[GLOBAL]]
 // CHECK: %[[WEIGHTED:.*]] = nv_tensor_ir.mul %[[LHS]], %[[FACTOR]]
-// CHECK: %[[RHS:.*]] = nv_tensor_ir.load {{.*}}[%[[K]], 0]
+// CHECK: %[[RHS:.*]] = nv_tensor_ir.load {{.*}} tile_indices [%[[K]], 0]
 // CHECK: %[[PARTIAL:.*]] = nv_tensor_ir.matmul(%[[WEIGHTED]], %[[RHS]]) accum(%[[ACC]]
 // CHECK: scf.yield %[[PARTIAL]]
 // CHECK: nv_tensor_ir.store %[[LOOP]]
@@ -68,7 +68,7 @@ nv_tensor_ir.graph @matmul_iota(%lhs: tensor<8x256xbf16>, %rhs: tensor<256x8xbf1
 // An iota along a parallel dimension must not acquire the K-loop offset.
 // CHECK-LABEL: func.func @parallel_iota_dispatch
 // CHECK: %[[LOOP:.*]] = scf.for %[[K:[^ ]+]] = {{.*}} iter_args(%[[ACC:[^ ]+]] = {{.*}})
-// CHECK: %[[LOAD:.*]] = nv_tensor_ir.load {{.*}}[%{{.*}}, %[[K]]]
+// CHECK: %[[LOAD:.*]] = nv_tensor_ir.load {{.*}} tile_indices [%{{.*}}, %[[K]]]
 // CHECK: %[[LOCAL:.*]] = nv_tensor_ir.iota dimension = 0 : tensor<4x64xsi32>
 // CHECK-NOT: arith.muli %[[K]]
 // CHECK: %[[ORIGIN:.*]] = nv_tensor_ir.splat %{{.*}} : tensor<4x64xsi32>

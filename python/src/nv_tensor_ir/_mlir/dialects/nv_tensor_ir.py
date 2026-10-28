@@ -236,15 +236,7 @@ class TensorIRTensorDescriptor:
             self.overwrite_dtype(overwrite_dtype)
 
     def overwrite_strides(self, overwrite_strides):
-        if self.dlpack_capsule is None:
-            raise RuntimeError("DLPack capsule is not set")
-        managed_tensor = self._get_managed_tensor(self.dlpack_capsule)
-        if managed_tensor.dl_tensor.ndim != len(overwrite_strides):
-            raise RuntimeError(
-                f"Number of dimensions mismatch: {managed_tensor.dl_tensor.ndim} != {len(overwrite_strides)}"
-            )
-        for dim in range(managed_tensor.dl_tensor.ndim):
-            managed_tensor.dl_tensor.strides[dim] = overwrite_strides[dim]
+        self._overwrite_dimensions("strides", overwrite_strides)
 
     def overwrite_shape(self, overwrite_shape):
         """Overwrite the shape field in the DLPack tensor descriptor.
@@ -254,15 +246,19 @@ class TensorIRTensorDescriptor:
         element count.  The kernel uses the shape to infer problem dimensions
         (M, N, K), so the logical element counts must be provided here.
         """
+        self._overwrite_dimensions("shape", overwrite_shape)
+
+    def _overwrite_dimensions(self, field, values):
         if self.dlpack_capsule is None:
             raise RuntimeError("DLPack capsule is not set")
-        managed_tensor = self._get_managed_tensor(self.dlpack_capsule)
-        if managed_tensor.dl_tensor.ndim != len(overwrite_shape):
+        tensor = self._get_managed_tensor(self.dlpack_capsule).dl_tensor
+        if tensor.ndim != len(values):
             raise RuntimeError(
-                f"Number of dimensions mismatch: {managed_tensor.dl_tensor.ndim} != {len(overwrite_shape)}"
+                f"Number of dimensions mismatch: {tensor.ndim} != {len(values)}"
             )
-        for dim in range(managed_tensor.dl_tensor.ndim):
-            managed_tensor.dl_tensor.shape[dim] = overwrite_shape[dim]
+        dimensions = getattr(tensor, field)
+        for dim in range(tensor.ndim):
+            dimensions[dim] = values[dim]
 
     def overwrite_dtype(self, overwrite_dtype):
         """Override the logical element type recorded in the DLPack capsule.
@@ -293,75 +289,17 @@ class TensorIRTensorDescriptor:
         managed_tensor.dl_tensor.dtype.lanes = 1
 
     def _create_fp8_dlpack_workaround(self, tensor):
-        """
-        Creates a DLPack workaround for FP8 tensors by converting to uint8 and patching metadata.
-
-        This method orchestrates the complete FP8 workaround process:
-        1. Creates a uint8 view of the FP8 tensor (preserving raw bytes)
-        2. Generates a DLPack capsule from the uint8 tensor
-        3. Patches the DLPack dtype metadata to reflect the original FP8 type
-
-        Args:
-            tensor: A PyTorch tensor with FP8 dtype (float8_e4m3fn or float8_e5m2)
-
-        Returns:
-            DLPack capsule with corrected FP8 dtype metadata
-
-        Raises:
-            RuntimeError: If tensor is not FP8 or if DLPack creation fails
-
-        Note:
-            TODO: Remove this method when PyTorch natively supports FP8 in DLPack.
-            This is a high-level orchestration method that calls _patch_dlpack_dtype_for_fp8
-            to perform the actual low-level dtype patching.
-        """
+        """Export an FP8 tensor through a uint8 view and restore its dtype code."""
         import torch
 
-        if tensor.dtype not in [torch.float8_e4m3fn, torch.float8_e5m2]:
+        dtype_codes = {torch.float8_e4m3fn: 10, torch.float8_e5m2: 12}
+        if tensor.dtype not in dtype_codes:
             raise RuntimeError(f"Expected FP8 tensor, got {tensor.dtype}")
 
         uint8_tensor = tensor.view(torch.uint8)
         dlpack_capsule = torch.utils.dlpack.to_dlpack(uint8_tensor)
-        return self._patch_dlpack_dtype_for_fp8(dlpack_capsule, tensor.dtype)
-
-    def _patch_dlpack_dtype_for_fp8(self, dlpack_capsule, original_dtype):
-        """
-        Performs low-level patching of DLPack dtype metadata for FP8 tensors.
-
-        This method directly manipulates the DLPack tensor structure in memory to correct
-        the dtype code from uint8 to the appropriate FP8 type. It uses ctypes to:
-        1. Extract the DLTensor pointer from the DLPack capsule
-        2. Access the low-level DLDataType structure
-        3. Modify the dtype code field to match the original FP8 format
-
-        Args:
-            dlpack_capsule: DLPack capsule containing a uint8 tensor
-            original_dtype: Original PyTorch FP8 dtype (torch.float8_e4m3fn or torch.float8_e5m2)
-
-        Returns:
-            Modified DLPack capsule with corrected FP8 dtype metadata
-
-        Raises:
-            RuntimeError: If capsule access fails or dtype patching fails
-
-        Note:
-            TODO: Remove this method when PyTorch natively supports FP8 in DLPack.
-            This is a low-level implementation method called by _create_fp8_dlpack_workaround.
-            It performs the actual memory manipulation while the caller handles orchestration.
-        """
-
-        import torch
-
         managed_tensor = self._get_managed_tensor(dlpack_capsule)
-
-        # Modify the dtype code
-        if original_dtype == torch.float8_e4m3fn:
-            new_dtype_code = 10  # kDLFloat8_e4m3fn
-        elif original_dtype == torch.float8_e5m2:
-            new_dtype_code = 12  # kDLFloat8_e5m2
-        else:
-            raise RuntimeError(f"Unsupported FP8 dtype: {original_dtype}")
-        managed_tensor.dl_tensor.dtype.code = new_dtype_code
+        managed_tensor.dl_tensor.dtype.code = dtype_codes[tensor.dtype]
         return dlpack_capsule
 
     def _get_managed_tensor(self, dlpack_capsule):

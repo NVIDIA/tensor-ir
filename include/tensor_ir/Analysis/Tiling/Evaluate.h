@@ -40,7 +40,7 @@
 /// - The register and shared memory storage, as the peak over the iteration
 ///   spaces. The register storage assumes that every live value of a tile is
 ///   kept in registers.
-/// - The number of memory accesses and accessed cache lines (loads and stores),
+/// - The number of memory accesses and accessed sectors (loads and stores),
 ///   the number of loop iterations over the reduction tiles, and the number of
 ///   tensor core operations per MMA generation.
 ///
@@ -104,7 +104,7 @@ struct TilingEvaluation {
   /// Number of memory accesses (loads/stores).
   int64_t memoryAccessCount = 0;
 
-  /// Estimate cost of memory accesses (~number of cache lines).
+  /// Estimate cost of memory accesses (~number of sectors).
   int64_t memoryAccessCost = 0;
 
   /// Number of loop iterations.

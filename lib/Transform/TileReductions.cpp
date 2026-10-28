@@ -6,8 +6,7 @@
 // This pass makes those contracting domains explicit and executable on GPU
 // hardware.
 //
-// Key responsibilities:
-// 1. Contraction strip-mining:
+// Contraction strip-mining:
 //    - Evaluates the reduction/contraction shape against `reduction_tile_size`
 //      (default 128 elements).
 //    - When the contracting domain exceeds the tile size, creates an scf.for
@@ -24,13 +23,8 @@
 //      (sqrt for norm2, division for avg).
 //    - Lifts user-defined reduction bodies (arithmetic on scalars) to elementwise
 //      operations on tiles.
-// 2. Static persistence:
-//    - Caps the hardware launch grid at `sm_count * occupancy` blocks.
-//    - Serializes remaining logical tiles by wrapping the per-tile computation
-//      in a grid-stride scf.for loop inside each persistent block.
 
 #include "tensor_ir/Dialect/TensorIR.h"
-#include "tensor_ir/Options/OptionsEnums.h"
 #include "tensor_ir/Transform/Passes.h" // IWYU pragma: keep
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -147,16 +141,40 @@ static Value createSplat(OpBuilder &builder, Location loc,
 ///
 /// If true, out-of-bounds elements can be padded directly at the memory
 /// boundary via TilePaddingAttr on LoadOp, avoiding expensive explicit
-/// masking. Layout operations have already folded into access descriptors,
-/// so only tile transposes and floating-point type conversions (ConvertOp) can
-/// safely preserve neutrality.
-static bool isLoadPaddingNeutral(Value value) {
+/// masking. Transposes, broadcasts of parallel dimensions, and
+/// floating-point conversions preserve neutrality. Broadcasting a contracting
+/// dimension requires an explicit mask because the load cannot pad that axis.
+static bool isLoadPaddingNeutral(Value value,
+                                 ArrayRef<int64_t> contractingDimensions) {
+  SmallVector<int64_t> dimensions(
+      cast<RankedTensorType>(value.getType()).getRank(), -1);
+  for (int64_t dimension : contractingDimensions) {
+    dimensions[dimension] = dimension;
+  }
   while (Operation *op = value.getDefiningOp()) {
     if (isa<LoadOp>(op)) {
       return true;
     }
     if (auto transpose = dyn_cast<TransposeOp>(op)) {
+      SmallVector<int64_t> inputDimensions(dimensions.size());
+      for (auto [resultDimension, inputDimension] :
+           llvm::enumerate(transpose.getPermutation())) {
+        inputDimensions[inputDimension] = dimensions[resultDimension];
+      }
+      dimensions = std::move(inputDimensions);
       value = transpose.getInput();
+      continue;
+    }
+    if (auto broadcast = dyn_cast<BroadcastOp>(op)) {
+      auto inputShape = broadcast.getInput().getType().getShape();
+      auto outputShape = broadcast.getOutput().getType().getShape();
+      for (auto [dimension, inputExtent, outputExtent] :
+           llvm::zip_equal(dimensions, inputShape, outputShape)) {
+        if (dimension >= 0 && inputExtent != outputExtent) {
+          return false;
+        }
+      }
+      value = broadcast.getInput();
       continue;
     }
     auto convert = dyn_cast<ConvertOp>(op);
@@ -177,7 +195,9 @@ static bool isLoadPaddingNeutral(Value value) {
 static TilePaddingAttr getReductionLoadPadding(OpBuilder &builder,
                                                ReduceOp reduce,
                                                Attribute identity) {
-  if (!isLoadPaddingNeutral(reduce.getInput())) {
+  SmallVector<int64_t> dimensions(reduce.getDimensions().begin(),
+                                  reduce.getDimensions().end());
+  if (!isLoadPaddingNeutral(reduce.getInput(), dimensions)) {
     return {};
   }
   switch (reduce.getReductionMode()) {
@@ -279,9 +299,12 @@ static TilePaddingAttr getReductionLoadPadding(OpBuilder &builder,
     return {};
   }
 
+  SmallVector<int64_t> dimensions(reduce.getDimensions().begin(),
+                                  reduce.getDimensions().end());
   for (auto [operand, operandIdentity] :
        llvm::zip_equal(reduce.getInputs(), reduce.getIdentity())) {
-    if (operandIdentity != identity || !isLoadPaddingNeutral(operand)) {
+    if (operandIdentity != identity ||
+        !isLoadPaddingNeutral(operand, dimensions)) {
       return {};
     }
   }
@@ -339,9 +362,12 @@ static Value updateContractionMask(OpBuilder &builder, Location loc,
     mask = ReshapeOp::create(
         builder, loc, RankedTensorType::get(expandedShape, builder.getI1Type()),
         mask);
-    mask = BroadcastOp::create(
-        builder, loc,
-        RankedTensorType::get(contractionTileShape, builder.getI1Type()), mask);
+    if (expandedShape != contractionTileShape) {
+      mask = BroadcastOp::create(
+          builder, loc,
+          RankedTensorType::get(contractionTileShape, builder.getI1Type()),
+          mask);
+    }
   }
   return combined ? LogicalAndOp::create(builder, loc, combined, mask) : mask;
 }
@@ -640,8 +666,8 @@ namespace {
 ///
 /// Replaces LoadOps with smaller tiled loads indexed by contracting loop
 /// induction variables, re-splats constants, and recursively clones
-/// pointwise, iota, and transpose operations. Cloned values are memoized to
-/// preserve reconvergent DAG structure.
+/// pointwise, iota, transpose, and broadcast operations. Cloned values are
+/// memoized to preserve reconvergent DAG structure.
 class ProducerCloner {
 public:
   ProducerCloner(ArrayRef<int64_t> tileShape,
@@ -658,8 +684,8 @@ public:
 
 private:
   /// Clone `value`, whose dimension i is dimension `dimensions[i]` of the
-  /// contraction operand. Transposes between the operand and a producer
-  /// permute the strip-mined tile shape and contracting coordinates.
+  /// contraction operand, or -1 for a broadcast dimension. Layout operations
+  /// map the strip-mined tile shape and contracting coordinates to producers.
   FailureOr<Value> clone(Value value, ArrayRef<int64_t> dimensions) {
     if (!isa<RankedTensorType>(value.getType())) {
       return value;
@@ -674,20 +700,25 @@ private:
       return emitError(value.getLoc())
              << "strip-mined producer unexpectedly captures a block argument";
     }
-    if (dimensions.size() != tileShape.size()) {
+    auto valueType = cast<RankedTensorType>(value.getType());
+    if (dimensions.size() != static_cast<size_t>(valueType.getRank())) {
       return op->emitError(
           "strip-mined producer rank does not match the contraction tile");
     }
-    SmallVector<int64_t> shape = llvm::map_to_vector(
-        dimensions, [&](int64_t dimension) { return tileShape[dimension]; });
+    SmallVector<int64_t> shape =
+        llvm::map_to_vector(dimensions, [&](int64_t dimension) {
+          return dimension < 0 ? 1 : tileShape[dimension];
+        });
 
     if (auto load = dyn_cast<LoadOp>(op)) {
       SmallVector<OpFoldResult> indices = load.getMixedIndices();
       for (auto [dimension, coordinate] : contractingCoordinates) {
         auto position = llvm::find(dimensions, dimension);
-        if (position == dimensions.end() ||
-            static_cast<size_t>(position - dimensions.begin()) >=
-                indices.size()) {
+        if (position == dimensions.end()) {
+          continue;
+        }
+        if (static_cast<size_t>(position - dimensions.begin()) >=
+            indices.size()) {
           return load.emitError(
               "contracting dimension is outside the tile-access rank");
         }
@@ -697,9 +728,37 @@ private:
           builder, load.getLoc(),
           RankedTensorType::get(
               shape, cast<RankedTensorType>(load.getType()).getElementType()),
-          load.getBase(), load.getMixedOffset(), load.getMixedSizes(),
-          load.getMixedStrides(), indices, load.getAlignmentAttr(), loadPadding,
+          load.getView(), indices, load.getAlignmentAttr(), loadPadding,
           load.getAllowTma());
+      cache[key] = result;
+      return result;
+    }
+
+    if (auto splat = dyn_cast<SplatOp>(op)) {
+      auto type = RankedTensorType::get(shape, valueType.getElementType());
+      Value result = SplatOp::create(builder, splat.getLoc(), type,
+                                     splat.getInput(), ValueRange{});
+      cache[key] = result;
+      return result;
+    }
+
+    if (auto broadcast = dyn_cast<BroadcastOp>(op)) {
+      SmallVector<int64_t> inputDimensions(dimensions);
+      auto inputShape = broadcast.getInput().getType().getShape();
+      for (auto [index, extent] : llvm::enumerate(inputShape)) {
+        if (extent != valueType.getDimSize(index)) {
+          inputDimensions[index] = -1;
+        }
+      }
+      FailureOr<Value> input = clone(broadcast.getInput(), inputDimensions);
+      if (failed(input)) {
+        return failure();
+      }
+      auto type = RankedTensorType::get(shape, valueType.getElementType());
+      Value result = *input;
+      if (input->getType() != type) {
+        result = BroadcastOp::create(builder, broadcast.getLoc(), type, *input);
+      }
       cache[key] = result;
       return result;
     }
@@ -781,7 +840,7 @@ private:
       return result;
     }
 
-    if (!isa<PointwiseOpInterface>(op) || op->getNumRegions() != 0) {
+    if (!op->hasTrait<OpTrait::Elementwise>() || op->getNumRegions() != 0) {
       return op->emitError(
           "strip mining cannot clone this contraction producer");
     }
@@ -1382,12 +1441,12 @@ static LogicalResult stripMineMatmul(RewriterBase &builder, MatmulOp matmul,
   builder.setInsertionPoint(matmul);
   Location loc = matmul.getLoc();
   TilePaddingAttr lhsLoadPadding;
-  if (isLoadPaddingNeutral(lhsSource)) {
+  if (isLoadPaddingNeutral(lhsSource, lhsContractingDims)) {
     lhsLoadPadding =
         TilePaddingAttr::get(builder.getContext(), TilePadding::Zero);
   }
   TilePaddingAttr rhsLoadPadding;
-  if (isLoadPaddingNeutral(rhsSource)) {
+  if (isLoadPaddingNeutral(rhsSource, rhsContractingDims)) {
     rhsLoadPadding =
         TilePaddingAttr::get(builder.getContext(), TilePadding::Zero);
   }
@@ -1506,91 +1565,6 @@ static LogicalResult stripMineMatmul(RewriterBase &builder, MatmulOp matmul,
   return success();
 }
 
-/// Limit the hardware grid and let each block visit the remaining flattened
-/// tile IDs serially.
-///
-/// Static persistence caps the launch grid at `sm_count * occupancy` blocks.
-/// If the total number of tiles exceeds this limit, the scf.forall upper bound
-/// is clamped to the persistent limit, and the entire per-tile computation in the
-/// forall body is wrapped in a serial grid-stride loop:
-///   scf.for %tileId = %blockId to %totalTiles step %gridSize
-/// Uses of the original block ID induction variable inside the body are rewired
-/// to the serial loop's induction variable.
-///
-/// Dynamic persistence intentionally remains on the legacy no-op path; static
-/// persistence is useful even when the logical grid extent is only known at
-/// runtime.
-static LogicalResult formStaticPersistence(RewriterBase &builder,
-                                           func::FuncOp function,
-                                           int64_t smCount, int64_t occupancy) {
-  // 1. Verify static persistent grid limit does not overflow 32-bit index.
-  int64_t persistentGridLimit;
-  constexpr int64_t maxI32 = std::numeric_limits<int32_t>::max();
-  if (llvm::MulOverflow(smCount, occupancy, persistentGridLimit) ||
-      persistentGridLimit > maxI32) {
-    return function.emitError(
-        "static persistent grid size overflows 32-bit index range");
-  }
-
-  // 2. For each rank-one destination-free scf.forall, clamp the grid bound.
-  SmallVector<scf::ForallOp> foralls;
-  function.walk([&](scf::ForallOp forallOp) { foralls.push_back(forallOp); });
-  for (scf::ForallOp forallOp : foralls) {
-    if (forallOp.getRank() != 1 || !forallOp.getOutputs().empty()) {
-      return forallOp.emitError(
-          "static persistence requires a rank-one destination-free forall");
-    }
-
-    builder.setInsertionPoint(forallOp);
-    Location loc = forallOp.getLoc();
-    OpFoldResult mixedTotalTiles = forallOp.getMixedUpperBound().front();
-    Value totalTiles;
-    Value gridSize;
-    if (auto staticTotal = mixedTotalTiles.dyn_cast<Attribute>()) {
-      int64_t total = cast<IntegerAttr>(staticTotal).getInt();
-      if (total <= persistentGridLimit) {
-        continue;
-      }
-      int64_t grid = std::max<int64_t>(1, persistentGridLimit);
-      totalTiles =
-          arith::ConstantIndexOp::create(builder, loc, total).getResult();
-      gridSize = arith::ConstantIndexOp::create(builder, loc, grid).getResult();
-      builder.modifyOpInPlace(forallOp,
-                              [&] { forallOp.setStaticUpperBound({grid}); });
-    } else {
-      totalTiles = mixedTotalTiles.dyn_cast<Value>();
-      Value limit =
-          arith::ConstantIndexOp::create(builder, loc, persistentGridLimit);
-      Value one = arith::ConstantIndexOp::create(builder, loc, 1);
-      Value bounded = arith::MinUIOp::create(builder, loc, totalTiles, limit);
-      gridSize = arith::MaxUIOp::create(builder, loc, bounded, one);
-      builder.modifyOpInPlace(forallOp, [&] {
-        forallOp.getDynamicUpperBoundMutable().assign(gridSize);
-      });
-    }
-
-    // 3. Wrap the per-tile computation in a grid-stride scf.for loop.
-    Block *body = forallOp.getBody();
-    SmallVector<Operation *> bodyOps;
-    for (Operation &op : body->without_terminator()) {
-      bodyOps.push_back(&op);
-    }
-    builder.setInsertionPointToStart(body);
-    auto serialLoop = scf::ForOp::create(
-        builder, loc, forallOp.getInductionVar(0), totalTiles, gridSize);
-    Operation *serialTerminator = serialLoop.getBody()->getTerminator();
-    for (Operation *op : bodyOps) {
-      builder.moveOpBefore(op, serialTerminator);
-    }
-    builder.replaceUsesWithIf(
-        forallOp.getInductionVar(0), serialLoop.getInductionVar(),
-        [&](OpOperand &use) {
-          return serialLoop->isProperAncestor(use.getOwner());
-        });
-  }
-  return success();
-}
-
 namespace {
 struct TileReductionsPass
     : public nv_tensor_ir::impl::TileReductionsPassBase<TileReductionsPass> {
@@ -1603,23 +1577,6 @@ struct TileReductionsPass
       getOperation().emitError()
           << "reduction-tile-size must be a positive power of two, got "
           << static_cast<int64_t>(reduction_tile_size);
-      signalPassFailure();
-      return;
-    }
-
-    std::optional<PersistenceMode> persitenceMode =
-        symbolizePersistenceMode(::llvm::StringRef(persistence));
-    if (!persitenceMode) {
-      getOperation().emitError()
-          << "invalid persistence mode '" << persistence << "'";
-      signalPassFailure();
-      return;
-    }
-
-    if (occupancy < 1 ||
-        (*persitenceMode == PersistenceMode::Static && sm_count < 1)) {
-      getOperation().emitError(
-          "static persistence requires sm-count >= 1 and occupancy >= 1");
       signalPassFailure();
       return;
     }
@@ -1650,13 +1607,6 @@ struct TileReductionsPass
         signalPassFailure();
         return;
       }
-    }
-
-    // 3. Apply static persistence to limit the launch grid and serialize tiles.
-    if (*persitenceMode == PersistenceMode::Static &&
-        failed(formStaticPersistence(rewriter, getOperation(), sm_count,
-                                     occupancy))) {
-      signalPassFailure();
     }
   }
 };

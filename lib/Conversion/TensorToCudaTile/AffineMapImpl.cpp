@@ -1389,11 +1389,10 @@ void StaticPersistenceStrategy::createReturnOp(OpBuilder &builder, Location loc,
 /// Convert function argument types. Tensors are expanded into non-aggregated
 /// descriptor arguments: pointer, dimension sizes and strides.
 /// @param numDynamicStrides Number of dynamic strides from stride attribute.
-///                          If nullopt, uses shape dynamicness as fallback.
 LogicalResult functionArgumentConverter(Type argType,
                                         const TypeConverter &typeConverter,
                                         SmallVectorImpl<Type> &result,
-                                        std::optional<int> numDynamicStrides) {
+                                        int numDynamicStrides) {
 
   // Convert input type to CUDA Tile type.
   auto converted =
@@ -1420,19 +1419,16 @@ LogicalResult functionArgumentConverter(Type argType,
 
   int numSizeArgs = countDynamicDimensions(tensorTy.getShape());
 
-  int strideCount =
-      numDynamicStrides.has_value() ? *numDynamicStrides : numSizeArgs;
-
   // Convert dimensions and strides.
   auto sizeAndStrideTy = cuda_tile::TileType::get(
       /*shape=*/llvm::ArrayRef<int64_t>{}, IntegerType::get(ctx, 32));
-  result.append(numSizeArgs + strideCount, sizeAndStrideTy);
+  result.append(numSizeArgs + numDynamicStrides, sizeAndStrideTy);
 
   LLVM_DEBUG({
     llvm::dbgs() << "DEBUG: functionArgumentConverter for tensor type: "
                  << tensorTy << "\n";
     llvm::dbgs() << "DEBUG: numSizeArgs: " << numSizeArgs << "\n";
-    llvm::dbgs() << "DEBUG: numStrideArgs: " << strideCount << "\n";
+    llvm::dbgs() << "DEBUG: numStrideArgs: " << numDynamicStrides << "\n";
     llvm::dbgs() << "DEBUG: Total converted arguments: " << result.size()
                  << "\n";
   });
@@ -1514,14 +1510,13 @@ Type convertGraphOpSignature(FunctionType funcTy,
 /// - coord[n-2] = (linear_id / blocks[n-1]) % blocks[n-2]
 /// - etc.
 ///
-/// For dimensions that have been tiled within the kernel, the tiler loop's
-/// induction variable is used accordingly.
-static SmallVector<Value> unwrapLinearCoordinates(
-    Location loc, ConversionPatternRewriter &builder, Value linearProgramId,
-    ArrayRef<Value> blocksPerDimension, ArrayRef<Value> inductionVars) {
+/// Tiler-loop induction variables are combined with these grid coordinates by
+/// calculateBlockIndices, not decoded from the linear program ID.
+static SmallVector<Value>
+unwrapLinearCoordinates(Location loc, ConversionPatternRewriter &builder,
+                        Value linearProgramId,
+                        ArrayRef<Value> blocksPerDimension) {
   size_t numDimensions = blocksPerDimension.size();
-  assert(inductionVars.size() == numDimensions &&
-         "Induction vars size must match blocks per dimension size");
 
   // Guard against empty rank (would cause UB in loop below)
   // Empty result is valid for scalar tensors (rank 0) - no indexing needed
@@ -1542,17 +1537,9 @@ static SmallVector<Value> unwrapLinearCoordinates(
        dimensionIndex >= 0; --dimensionIndex) {
     Value blocksInThisDimension = blocksPerDimension[dimensionIndex];
 
-    // If this dimension has a loop induction variable, use it directly.
-    // The induction variable iterates over the tiles that each block should
-    // compute within the kernel.
-    if (inductionVars[dimensionIndex]) {
-      blockCoordinates[dimensionIndex] = inductionVars[dimensionIndex];
-    } else {
-      // Extract coordinate for this dimension: remainingId %
-      // blocksInThisDimension
-      blockCoordinates[dimensionIndex] = cuda_tile::RemIOp::create(
-          builder, loc, remainingId, blocksInThisDimension, unsignedAttr);
-    }
+    // Extract coordinate for this dimension: remainingId % blocksInThisDimension.
+    blockCoordinates[dimensionIndex] = cuda_tile::RemIOp::create(
+        builder, loc, remainingId, blocksInThisDimension, unsignedAttr);
 
     // Prepare for next iteration: remainingId = remainingId /
     // blocksInThisDimension
@@ -1567,14 +1554,13 @@ static SmallVector<Value> unwrapLinearCoordinates(
 
 /// Calculate block indices from program ID and tiler loop's induction variable
 /// using layout-agnostic coordinate mapping.
-FailureOr<SmallVector<Value>>
+/// The caller must validate the program ID before calculating coordinates.
+static SmallVector<Value>
 calculateBlockIndices(Location loc, ConversionPatternRewriter &builder,
                       Value pid, Value partitionView,
                       const CudaTileTensorDescriptor &tensorDescr,
                       TensorToCudaTileConversionState &conversionState) {
-  if (!pid) {
-    return emitError(loc) << "Invalid program ID for coordinate calculation";
-  }
+  assert(pid && "Coordinate calculation requires a valid program ID");
 
   AffineMap iterSpaceMap = tensorDescr.getIterSpaceMap();
   const auto &kernelInfo = conversionState.kernelInfo;
@@ -1602,9 +1588,8 @@ calculateBlockIndices(Location loc, ConversionPatternRewriter &builder,
       }
     }
 
-    SmallVector<Value> gridInductionVars(gridDimNumTiles.size());
-    SmallVector<Value> gridCoordinates = unwrapLinearCoordinates(
-        loc, builder, pid, gridDimNumTiles, gridInductionVars);
+    SmallVector<Value> gridCoordinates =
+        unwrapLinearCoordinates(loc, builder, pid, gridDimNumTiles);
 
     // Step 2: Construct full iteration space coordinates by combining
     // grid coordinates and tiler loop induction variables.
@@ -1637,9 +1622,8 @@ calculateBlockIndices(Location loc, ConversionPatternRewriter &builder,
     SmallVector<Value> numTilesPerTensorDim(
         indexSpaceShapeOp->getResults().begin(),
         indexSpaceShapeOp->getResults().end());
-    SmallVector<Value> emptyInductionVars(numTilesPerTensorDim.size());
-    blockCoordinates = unwrapLinearCoordinates(
-        loc, builder, pid, numTilesPerTensorDim, emptyInductionVars);
+    blockCoordinates =
+        unwrapLinearCoordinates(loc, builder, pid, numTilesPerTensorDim);
   }
   LLVM_DEBUG({
     llvm::dbgs() << "Block coordinate calculation successful:\n";
@@ -1679,6 +1663,7 @@ buildPartitionView(ConversionPatternRewriter &rewriter,
 /// Compute row-major dynamic strides from sizes.
 /// For row-major: stride[last] = 1, stride[i] = product(size[i+1..last]).
 /// @param staticStrides Static strides with kDynamic markers
+///                      Must contain at least one dynamic stride.
 /// @param staticSizes Static sizes with kDynamic markers
 /// @param dynamicSizes Dynamic size values in order
 /// @return Dynamic stride values for each kDynamic in staticStrides,
@@ -1686,11 +1671,9 @@ buildPartitionView(ConversionPatternRewriter &rewriter,
 static SmallVector<Value> computeRowMajorDynamicStrides(
     Location loc, OpBuilder &builder, ArrayRef<int64_t> staticStrides,
     ArrayRef<int64_t> staticSizes, ArrayRef<Value> dynamicSizes) {
-  // Early return if no dynamic strides to compute - avoids generating unused
-  // ops
-  if (countDynamicDimensions(staticStrides) == 0 || staticStrides.empty()) {
-    return {};
-  }
+  // The caller's shouldComputeStridesFromSizes() check guarantees work to do.
+  assert(countDynamicDimensions(staticStrides) > 0 &&
+         "Row-major stride computation requires a dynamic stride");
 
   // Build a mapping from dimension index to its Value (static or dynamic).
   SmallVector<Value> sizeValues;
@@ -2159,29 +2142,8 @@ static LogicalResult computeAddressAndTileSizesForLoadOrStore(
     return failure();
   }
 
-  auto coordsResult = calculateBlockIndices(
-      loc, rewriter, tileIndex, partViewOp, tensorDescr, conversionState);
-  if (failed(coordsResult)) {
-    // Fallback to direct block indexing - get block IDs from conversionState
-    auto blockIds = conversionState.getGetTileBlockIdOp()->getResults();
-    LLVM_DEBUG({
-      llvm::dbgs() << "WARNING: Block coordinate calculation failed, "
-                      "falling back to direct block indexing\n";
-      llvm::dbgs() << "  Tensor rank: " << tensorRank << "\n";
-      llvm::dbgs() << "  Available block IDs: " << blockIds.size() << "\n";
-    });
-
-    if (blockIds.size() < tensorRank) {
-      LLVM_DEBUG(llvm::dbgs()
-                 << "ERROR: Insufficient block IDs for naive fallback\n");
-      return failure();
-    }
-
-    auto indexing = blockIds.take_front(tensorRank);
-    coords = SmallVector<Value>(indexing.begin(), indexing.end());
-  } else {
-    coords = std::move(*coordsResult);
-  }
+  coords = calculateBlockIndices(loc, rewriter, tileIndex, partViewOp,
+                                 tensorDescr, conversionState);
 
   // Clamp coordinates to the tensor's actual index space bounds.
   // This is critical for broadcast/smaller tensors where the iteration space
@@ -2836,7 +2798,7 @@ createLoadsForInputTensors(ConversionPatternRewriter &rewriter,
   return success();
 }
 
-static LogicalResult
+static void
 generateTilerLoopsForIterSpace(ConversionPatternRewriter &rewriter,
                                TensorToCudaTileConversionState &conversionState,
                                int32_t iterSpaceId, Location loc) {
@@ -2930,8 +2892,6 @@ generateTilerLoopsForIterSpace(ConversionPatternRewriter &rewriter,
     conversionState.setInsertPointForIterSpaceDim(iterSpaceId, dimIdx,
                                                   currentInsertPoint);
   }
-
-  return success();
 }
 
 /// Tile and fuse operations within the CudaTile FuncOp.
@@ -2973,12 +2933,7 @@ static LogicalResult generateTileAndFuseSkeleton(
                    << iterSpaceId << "\n";
     });
 
-    if (failed(generateTilerLoopsForIterSpace(rewriter, conversionState,
-                                              iterSpaceId, loc))) {
-      return entryOp.emitError("Failed to generate tiler loop nest for "
-                               "iteration space ")
-             << iterSpaceId;
-    }
+    generateTilerLoopsForIterSpace(rewriter, conversionState, iterSpaceId, loc);
   }
 
   if (failed(createLoadsForInputTensors(rewriter, conversionState, entryOp))) {

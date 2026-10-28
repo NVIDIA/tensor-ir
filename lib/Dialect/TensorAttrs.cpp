@@ -1331,10 +1331,19 @@ ReductionSourceAttr::reshape(ArrayRef<int64_t> newShape) const {
   SmallVector<int64_t> shape(newShape.begin(), newShape.end());
   shape.push_back(getReductionSize());
   auto newAttr = dyn_cast_or_null<TensorSourceAttr>(viewAttr.reshape(shape));
-  return newAttr ? ReductionSourceAttr::get(getContext(),
-                                            newAttr.getCuteLayout().toString(),
-                                            getSource())
-                 : nullptr;
+  if (!newAttr) {
+    return nullptr;
+  }
+  // Only the result is reshaped. Preserve the contracting dimensions so later
+  // source rebuilding does not merge noncontiguous reduction axes.
+  auto reshaped = newAttr.getCuteLayout();
+  std::vector<tcg::Layout> parts;
+  for (size_t i = 0; i + 1 < tcg::rank(reshaped); ++i) {
+    parts.push_back(tcg::get(reshaped, i));
+  }
+  parts.push_back(tcg::get(view, tcg::rank(view) - 1));
+  return ReductionSourceAttr::get(
+      getContext(), tcg::make_layout(parts).toString(), getSource());
 }
 
 LayoutSourceAttrInterface

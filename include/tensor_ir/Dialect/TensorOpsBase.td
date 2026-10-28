@@ -31,11 +31,11 @@ class TensorIR_Op<string mnemonic, list<Trait> traits = []>
 defvar TensorIR_SymbolTraits = !if(!exists<Trait>("SymbolName"),
     [!cast<Trait>("SymbolName"), !cast<Trait>("SymbolVisibility")], []<Trait>);
 
-class TensorIR_PointWiseOpBase<string mnemonic, list<Trait> traits = []>
+class TensorIR_PureTensorOpBase<string mnemonic, list<Trait> traits = []>
     : TensorIR_Op<
           mnemonic,
           !listconcat([IterationSpaceInfoInterface, Pure, OpAsmOpInterface,
-                       PointwiseOpInterface, LayoutPropInterface], traits)> {
+                       LayoutPropInterface], traits)> {
   let results = (outs TensorIR_TensorType:$output);
   let extraClassDeclaration = [{
     /// Uses operation name as the base for SSA result value names in the
@@ -45,6 +45,10 @@ class TensorIR_PointWiseOpBase<string mnemonic, list<Trait> traits = []>
     }
   }];
 }
+
+// Elementwise operations on ranked tensor operands and results.
+class TensorIR_PointWiseOpBase<string mnemonic, list<Trait> traits = []>
+    : TensorIR_PureTensorOpBase<mnemonic, !listconcat([Elementwise], traits)>;
 
 class TensorIR_PointWiseOpUnary<string mnemonic, list<Trait> traits = []>
     : TensorIR_PointWiseOpBase<

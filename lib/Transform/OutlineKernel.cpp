@@ -107,6 +107,21 @@ static LogicalResult verifyForall(func::FuncOp wrapper,
   if (!wrapper.getBody().hasOneBlock()) {
     return wrapper.emitError("expected a single-block dispatch wrapper");
   }
+  for (Type type : wrapper.getArgumentTypes()) {
+    if (!isa<BaseMemRefType>(type)) {
+      continue;
+    }
+    auto memref = dyn_cast<MemRefType>(type);
+    SmallVector<int64_t> strides;
+    int64_t offset;
+    if (!memref || failed(memref.getStridesAndOffset(strides, offset)) ||
+        offset != 0) {
+      return wrapper.emitError()
+             << "kernel memref arguments must be strided with a statically "
+                "zero offset, but got "
+             << type;
+    }
+  }
   if (forallOp->getParentOp() != wrapper) {
     return forallOp.emitError(
         "expected the mapped forall directly in the dispatch wrapper");

@@ -153,18 +153,18 @@ module {
 // The multiplications by the constant 1 may or may not be folded away depending
 // on the build, so the strides are captured at their use rather than their def.
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[SR:.*]] = muli %{{.*}}, %[[NR]]
 // CHECK: %[[COUNT0:.*]] = divi %[[MR]], %[[C8]] unsigned rounding<positive_inf>
 // CHECK: %[[COUNT1:.*]] = divi %[[NR]], %[[C8]] unsigned rounding<positive_inf>
-// CHECK: %[[S0:.*]] = muli %{{.*}}, %[[N0]]
 // CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[COUNT0]] unsigned
 // CHECK: %[[IDX1:.*]] = remi %[[TEMP]], %[[COUNT1]] unsigned
 // CHECK: %[[IDX2:.*]] = divi %[[TEMP]], %[[COUNT1]] unsigned
+// CHECK: %[[S0:.*]] = muli %{{.*}}, %[[N0]]
 // CHECK: %[[TVIEW0:.*]] = make_tensor_view %[[ARG0]], shape = [%[[M0]], %[[N0]], %[[K0]]], strides = [%[[S0]], %[[INNER0:.*]], 1]
 // CHECK: %[[PVIEW0:.*]] = make_partition_view %[[TVIEW0]]
 // CHECK: %[[IN_TILE:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]
 // CHECK: %[[COS:.*]] = cos %[[IN_TILE]]
+// CHECK: %[[SR:.*]] = muli %{{.*}}, %[[NR]]
 // CHECK: %[[TVIEW_OUT:.*]] = make_tensor_view %[[OUT]], shape = [%[[MR]], %[[NR]], %[[KR]]], strides = [%[[SR]], %[[INNERR:.*]], 1]
 // CHECK: %[[PVIEW_OUT:.*]] = make_partition_view %[[TVIEW_OUT]]
 // CHECK: store_view_tko weak %[[COS]], %[[PVIEW_OUT]][%[[IDX0]], %[[IDX1]], %[[IDX2]]]

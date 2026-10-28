@@ -1,5 +1,33 @@
 // RUN: tensor_ir-opt %s --outline-tensor-ir-kernel --split-input-file --verify-diagnostics
 
+// Every forwarded memref must have a static zero offset, even when unused.
+// expected-error @below {{kernel memref arguments must be strided with a statically zero offset}}
+func.func @static_offset(%input: memref<16xf32, strided<[1], offset: 3>>) {
+  scf.forall (%x) in (1) {
+  } {mapping = [#gpu.block<x>]}
+  return
+}
+
+// -----
+
+// expected-error @below {{kernel memref arguments must be strided with a statically zero offset}}
+func.func @dynamic_offset(%input: memref<16xf32, strided<[1], offset: ?>>) {
+  scf.forall (%x) in (1) {
+  } {mapping = [#gpu.block<x>]}
+  return
+}
+
+// -----
+
+// expected-error @below {{kernel memref arguments must be strided with a statically zero offset}}
+func.func @unranked_memref(%input: memref<*xf32>) {
+  scf.forall (%x) in (1) {
+  } {mapping = [#gpu.block<x>]}
+  return
+}
+
+// -----
+
 func.func @wrong_rank() {
   // expected-error @below {{expected a rank-one flattened grid}}
   scf.forall (%x, %y) in (2, 2) {

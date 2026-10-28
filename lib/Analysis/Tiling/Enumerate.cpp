@@ -93,6 +93,11 @@ class DimensionLayoutIterator : public LayoutIterator {
 public:
   explicit DimensionLayoutIterator(size_t rank);
 
+  LogicalResult start(LayoutSourceAttrInterface layout, bool writes) {
+    this->writes = writes;
+    return dispatch(layout);
+  }
+
   LogicalResult processTensor(TensorSourceAttr tensor) override;
   LogicalResult processConcat(ConcatSourceAttr concat) override;
   LogicalResult processReduction(ReductionSourceAttr reduction) override;
@@ -104,12 +109,13 @@ public:
 private:
   SmallVector<DimensionInfo> dimensions;
   SmallVector<DimensionInfo *> pointers;
+  bool writes = false;
 };
 
 DimensionLayoutIterator::DimensionLayoutIterator(size_t rank) {
   dimensions.reserve(rank);
   for (size_t i = 0; i < rank; ++i) {
-    dimensions.push_back({.index = static_cast<int>(i)});
+    dimensions.push_back({static_cast<int>(i)});
     pointers.push_back(&dimensions.back());
   }
 }
@@ -118,9 +124,10 @@ LogicalResult DimensionLayoutIterator::processTensor(TensorSourceAttr tensor) {
   // Mark vectorizable and broadcasted tensor dimensions.
   auto cuteLayout = tensor.getCuteLayout();
   for (auto [idx, stride] : llvm::enumerate(cuteLayout.stride().getValues())) {
-    if (stride.isStatic()) {
+    if (stride.isLeaf() && stride.isStatic()) {
       if (stride.as_int() == 1) {
-        pointers[idx]->vectorizableCount++;
+        // Increased weights for write operations (read-modify-write).
+        pointers[idx]->vectorizableCount += writes ? 2 : 1;
       } else if (stride.as_int() == 0) {
         pointers[idx]->broadcastedCount++;
       }
@@ -146,7 +153,7 @@ DimensionLayoutIterator::processReduction(ReductionSourceAttr reduction) {
       newPointers.push_back(pointers[idx]);
     }
   }
-  DimensionInfo reductionDim{.index = -1};
+  DimensionInfo reductionDim{-1};
   newPointers.resize(newPointers.size() + reduction.getReductionShape().size(),
                      &reductionDim);
 
@@ -159,7 +166,7 @@ DimensionLayoutIterator::processReduction(ReductionSourceAttr reduction) {
 
 LogicalResult DimensionLayoutIterator::processMatmul(MatmulSourceAttr matmul) {
   size_t rank = pointers.size();
-  DimensionInfo reductionDim{.index = -1};
+  DimensionInfo reductionDim{-1};
   SmallVector<DimensionInfo *> iterSpace = pointers;
 
   // Process LHS input.
@@ -372,6 +379,9 @@ generateCombinationsWithinRange(int minBits, int maxBits, ArrayRef<int> limits,
 /// Generates the combinations of bits assigned to slots within the budget. If
 /// the search space is too large, it is first reduced by lowering the limits of
 /// the least important dimensions, so that the budget covers the rest evenly.
+/// The lowering stops once the search space fits the budget, or once the limits
+/// sum to at most `maxBits`: lowering them further would make even the largest
+/// combination smaller than the upper bound.
 ///
 /// The generator assigns the bits depth-first, starting from the largest values
 /// of the first slots. When the search space exceeds the budget, the output is
@@ -384,14 +394,18 @@ generateCombinationsBalanced(int minBits, int maxBits, ArrayRef<int> limits,
                              ArrayRef<DimensionInfo> dimensions) {
   // If the number of combinations is within the budget, then generate all
   // combinations (fast path).
-  if (countCombinations(minBits, maxBits, limits) <= maxResults) {
+  auto fitsBudget = [&](ArrayRef<int> limits) {
+    return llvm::sum_of(limits) <= maxBits ||
+           countCombinations(minBits, maxBits, limits) <= maxResults;
+  };
+  if (fitsBudget(limits)) {
     return generateCombinationsWithinRange(minBits, maxBits, limits, maxResults,
                                            descending);
   }
 
   // Conservative upper bound for the tile size of the vectorizable dimensions,
   // assuming small element size (one byte).
-  int vectorizableCap = llvm::Log2_64(kCacheLineSize);
+  int vectorizableCap = llvm::Log2_64(kMemorySectorSize);
 
   // Try reducing the search space by reducing the limits starting from the
   // less important dimensions. Reduce the limit on vectorizable dimensions and
@@ -401,7 +415,7 @@ generateCombinationsBalanced(int minBits, int maxBits, ArrayRef<int> limits,
     int cap = dimensions[dim].vectorizableCount > 0 ? vectorizableCap : 0;
     if (limits[dim] > cap) {
       newLimits[dim] = cap;
-      if (countCombinations(minBits, maxBits, newLimits) <= maxResults) {
+      if (fitsBudget(newLimits)) {
         return generateCombinationsWithinRange(minBits, maxBits, newLimits,
                                                maxResults, descending);
       }
@@ -409,15 +423,16 @@ generateCombinationsBalanced(int minBits, int maxBits, ArrayRef<int> limits,
   }
 
   // The search space is still too large, so lower the cap on all slots by up
-  // to kReductionFactor bits (halving the tile size each step). As above, stop
-  // at the first cap that fits the budget. If no cap fits, the lowest one is
-  // used and the output is truncated.
-  constexpr int kReductionFactor = 2;
-  for (int i = 1; i <= kReductionFactor; ++i) {
+  // to kReductionExponentFactorMax bits (halving the tile size each step).
+  // As above, stop at the first cap that fits the budget or brings the limits
+  // within `maxBits`. Otherwise, the lowest cap is used and the output is
+  // truncated.
+  constexpr int kReductionExponentFactorMax = 2;
+  for (int i = 1; i <= kReductionExponentFactorMax; ++i) {
     for (int &limit : newLimits) {
       limit = std::min(limit, vectorizableCap - i);
     }
-    if (countCombinations(minBits, maxBits, newLimits) <= maxResults) {
+    if (fitsBudget(newLimits)) {
       break;
     }
   }
@@ -478,6 +493,32 @@ SmallVector<int> getMaxSizeBits(ArrayRef<DimensionInfo> dimensions,
                               : kMaxDynamicTileSizeBits);
     if (markNonTileable && dim.nonTileable) {
       result.back() = 0;
+    }
+  }
+  return result;
+}
+
+// Calculates the maximum number of tile size bits in each dimension, taking
+// into account the estimated storage size needed for the tile.
+SmallVector<int> getMaxSizeBits(ArrayRef<DimensionInfo> dimensions,
+                                ArrayRef<int> limits, int reductionTileSizeBits,
+                                TilingEvaluator &evaluator) {
+  SmallVector<int> result(limits);
+  for (auto [idx, dim] : llvm::enumerate(dimensions)) {
+    if (limits[idx] > 0) {
+      // Run the evaluator to estimate the storage size needed for the maximum
+      // tile size with the given reduction tile size.
+      SmallVector<int32_t> tileShape(limits.size(), 1);
+      tileShape[dim.index] = 1 << kMaxTileSizeBits;
+      auto evalResult = evaluator.evaluate(
+          *TilingConfig::get(tileShape, 1 << reductionTileSizeBits));
+      if (succeeded(evalResult)) {
+        // Proportionally lower the limit to avoid spilling.
+        int64_t ratio = 1 + evalResult->registerStorageBytes /
+                                (kMaxRegistersPerSM * kRegisterSize);
+        int newLimit = kMaxTileSizeBits - llvm::Log2_64_Ceil(ratio);
+        result[idx] = std::min(limits[idx], std::max(newLimit, 0));
+      }
     }
   }
   return result;
@@ -552,45 +593,55 @@ generateReductionConfigs(TilingEvaluator &evaluator,
         llvm::divideCeil(maxResults - result.size(),
                          reductionTileSizeBits - minReductionTileSizeBits + 1);
 
-    // Set the lower and upper bounds for the tile size.
-    int upperBound =
-        std::min(globalUpperBound, kMaxTileSizeBits - reductionTileSizeBits);
-    int lowerBound = std::min(kMinTileSizeBits, upperBound);
+    // Set the lower bound to the smallest tile for which the grid still runs
+    // in a single wave (reductions only), or the default (32).
+    // The register storage of a unit main tile estimates how many blocks can
+    // be resident on one SM (capped by the hardware limit). The single wave
+    // bound assumes one block per SM; if N blocks fit on each SM, the grid can
+    // have N times more blocks, so the tile can be N times smaller and still
+    // run in a single wave.
+    int lowerBound = kMinTileSizeBits;
+    if (reductionTileSizeBits > 0) {
+      auto evalResult = evaluator.evaluate(
+          *TilingConfig::get(SmallVector<int32_t>(dimensions.size(), 1),
+                             1 << reductionTileSizeBits));
+      if (succeeded(evalResult)) {
+        int occupancy = std::clamp<int>((kMaxRegistersPerSM * kRegisterSize) /
+                                            evalResult->registerStorageBytes,
+                                        1, archInfo.maxBlocksPerSM);
+        int bitsRemaining =
+            bitsPerProcessorSingleWave - llvm::Log2_32_Ceil(occupancy);
+        lowerBound = std::min(lowerBound, std::max(bitsRemaining, 0));
+      }
+    }
 
-    LLVM_DEBUG(llvm::dbgs()
-               << "Reduction tile size: " << (1 << reductionTileSizeBits)
-               << ", tile size range: [" << (1 << lowerBound) << ".."
-               << (1 << upperBound) << "], limit: " << maxResultsWeighted
-               << "\n");
+    // Lower the per-dimension limits so that a tile with this reduction tile
+    // size fits into the register file. The tile cannot be larger than all
+    // dimensions at their limits, nor than the maximum tile size.
+    SmallVector<int> limits = getMaxSizeBits(dimensions, maxTileSizeBits,
+                                             reductionTileSizeBits, evaluator);
+    int upperBound = std::min(kMaxTileSizeBits, llvm::sum_of(limits));
+
+    // Set the bounds for the tile size.
+    upperBound = std::min(upperBound, globalUpperBound);
+    lowerBound = std::min(lowerBound, upperBound);
+
+    LLVM_DEBUG({
+      llvm::dbgs() << "Reduction tile size: " << (1 << reductionTileSizeBits)
+                   << ", tile size range: " << (1 << lowerBound) << ".."
+                   << (1 << upperBound) << ", bits: [";
+      llvm::interleave(limits, llvm::dbgs(), ",");
+      llvm::dbgs() << "], limit: " << maxResultsWeighted << "\n";
+    });
 
     // Build the tiling configuration.
     SmallVector<int32_t> tileShape(dimensions.size(), 1);
     int32_t reductionTileSize = 1 << reductionTileSizeBits;
 
-    // Run the evaluator to estimate the storage size needed for this tiling
-    // configuration. The values that are too big are likely to compile and
-    // run slowly due to register spilling. Adjust the upper bound.
-    while (upperBound > lowerBound) {
-      tileShape[dimensions[0].index] = 1 << upperBound;
-      auto evalResult =
-          evaluator.evaluate(*TilingConfig::get(tileShape, reductionTileSize));
-      bool isLikelyToSpill =
-          succeeded(evalResult) &&
-          evalResult->registerStorageBytes > kMaxRegistersPerSM * kRegisterSize;
-      if (!isLikelyToSpill) {
-        break;
-      }
-      LLVM_DEBUG(llvm::dbgs()
-                 << "Tile size too big (estimated storage: "
-                 << evalResult->registerStorageBytes
-                 << "), reducing upper bound: " << (1 << upperBound) << "\n");
-      --upperBound;
-    }
-
-    // Generate combinations and add them to the result.
     auto combinations = generateCombinationsBalanced(
-        lowerBound, upperBound, maxTileSizeBits, maxResultsWeighted,
+        lowerBound, upperBound, limits, maxResultsWeighted,
         /*descending=*/true, dimensions);
+
     for (const auto &combination : combinations) {
       for (auto [bits, dim] : llvm::zip_equal(combination, dimensions)) {
         tileShape[dim.index] = 1 << bits;
@@ -824,9 +875,9 @@ SmallVector<TilingConfig> enumerateTilings(TilingEvaluator &evaluator,
 
   // Collect the dimensions of the main iteration space.
   DimensionLayoutIterator iter(shape.size());
-  auto inputResult = iter.dispatch(evaluator.getInputLayout());
+  auto inputResult = iter.start(evaluator.getInputLayout(), /*writes=*/false);
   (void)inputResult;
-  auto outputResult = iter.dispatch(evaluator.getOutputLayout());
+  auto outputResult = iter.start(evaluator.getOutputLayout(), /*writes=*/true);
   (void)outputResult;
 
   // Order the dimensions using the importance heuristic.

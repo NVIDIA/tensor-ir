@@ -184,19 +184,17 @@ nv_tensor_ir.graph @concat_in_composite(%a: tensor<256x512xf32> {nv_tensor_ir.st
 // -----
 
 //===----------------------------------------------------------------------===//
-// Fallback: iteration space with non-power-of-2 dims so the byte-weighted /
-// smem tracks can't synthesize any valid candidate. TileAnalyzerPass must
-// still produce a single conservative candidate (PowerOf2Floor per dim,
-// clamped to 128).
+// Iteration space with non-power-of-2 dims: tile sizes may round each dim up
+// to the next power of 2, so the generator tracks produce valid candidates.
 //===----------------------------------------------------------------------===//
 
-// CANDIDATES-LABEL: nv_tensor_ir.graph @fallback_reshape_npow2
-// CANDIDATES-SAME: {tile_candidates = [array<i32: 2, 4, 4>]}
+// CANDIDATES-LABEL: nv_tensor_ir.graph @reshape_npow2
+// CANDIDATES-SAME: {tile_candidates = [array<i32: 4, 1, 8>, array<i32: 2, 2, 8>, array<i32: 1, 4, 8>, array<i32: 4, 2, 4>, array<i32: 4, 4, 2>, array<i32: 4, 4, 1>]}
 
-// DEFAULT-LABEL: nv_tensor_ir.graph @fallback_reshape_npow2
-// DEFAULT-SAME: {tile_candidates = [array<i32: 2, 4, 4>]}
+// DEFAULT-LABEL: nv_tensor_ir.graph @reshape_npow2
+// DEFAULT-SAME: {tile_candidates = [array<i32: 4, 1, 8>]}
 
-nv_tensor_ir.graph @fallback_reshape_npow2(
+nv_tensor_ir.graph @reshape_npow2(
     %in: tensor<3x4x5xf32> {nv_tensor_ir.alignment = 16 : i64, nv_tensor_ir.stride = "(1,3,12)"}
 ) -> (tensor<6x10xf32> {nv_tensor_ir.alignment = 16 : i64, nv_tensor_ir.stride = "(10,1)"}) {
     %0 = reshape %in : tensor<3x4x5xf32> -> tensor<6x10xf32>

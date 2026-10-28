@@ -33,8 +33,8 @@ nv_tensor_ir.graph @small_matmul(
 // CHECK-LABEL: func.func @large_matmul_dispatch
 // CHECK: %[[INIT:.*]] = nv_tensor_ir.constant dense<0.000000e+00> : tensor<32x16xf32>
 // CHECK: %[[LOOP:.*]] = scf.for %[[K:.*]] = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[ACC:.*]] = %[[INIT]])
-// CHECK: %[[LHS:.*]] = nv_tensor_ir.load {{.*}}[%{{.*}}, %[[K]]] {{.*}} to tensor<32x128xf32>
-// CHECK: %[[RHS:.*]] = nv_tensor_ir.load {{.*}}[%[[K]], %{{.*}}] {{.*}} to tensor<128x16xf32>
+// CHECK: %[[LHS:.*]] = nv_tensor_ir.load {{.*}} tile_indices [%{{.*}}, %[[K]]], {{.*}} to tensor<32x128xf32>
+// CHECK: %[[RHS:.*]] = nv_tensor_ir.load {{.*}} tile_indices [%[[K]], %{{.*}}], {{.*}} to tensor<128x16xf32>
 // CHECK: %[[PARTIAL:.*]] = nv_tensor_ir.matmul(%[[LHS]], %[[RHS]]) accum(%[[ACC]] : tensor<32x16xf32>)
 // CHECK: scf.yield %[[PARTIAL]] : tensor<32x16xf32>
 // CHECK: nv_tensor_ir.store %[[LOOP]]
@@ -56,8 +56,8 @@ nv_tensor_ir.graph @large_matmul(
 // CHECK-LABEL: func.func @fragmented_matmul_dispatch
 // CHECK: %[[OUTER:.*]] = scf.for %[[K0:.*]] = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[OUT_ACC:.*]] = %{{.*}})
 // CHECK: %[[INNER:.*]] = scf.for %[[K1:.*]] = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[IN_ACC:.*]] = %[[OUT_ACC]])
-// CHECK: %[[LHS_TILE:.*]] = nv_tensor_ir.load {{.*}}[%{{.*}}, %[[K0]], %[[K1]]] {{.*}} to tensor<32x16x8xf32>
-// CHECK: %[[RHS_TILE:.*]] = nv_tensor_ir.load {{.*}}[%[[K0]], %[[K1]], %{{.*}}] {{.*}} to tensor<16x8x16xf32>
+// CHECK: %[[LHS_TILE:.*]] = nv_tensor_ir.load {{.*}} tile_indices [%{{.*}}, %[[K0]], %[[K1]]], {{.*}} to tensor<32x16x8xf32>
+// CHECK: %[[RHS_TILE:.*]] = nv_tensor_ir.load {{.*}} tile_indices [%[[K0]], %[[K1]], %{{.*}}], {{.*}} to tensor<16x8x16xf32>
 // CHECK: %[[LHS:.*]] = nv_tensor_ir.reshape %[[LHS_TILE]] : tensor<32x16x8xf32> -> tensor<32x128xf32>
 // CHECK: %[[RHS:.*]] = nv_tensor_ir.reshape %[[RHS_TILE]] : tensor<16x8x16xf32> -> tensor<128x16xf32>
 // CHECK: %[[PARTIAL:.*]] = nv_tensor_ir.matmul(%[[LHS]], %[[RHS]]) accum(%[[IN_ACC]] : tensor<32x16xf32>)

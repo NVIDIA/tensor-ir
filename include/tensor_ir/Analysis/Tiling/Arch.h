@@ -12,8 +12,8 @@ namespace tiling_analysis {
 /// Common parameters for all GPU architectures.
 /// Number of threads per warp.
 constexpr int kWarpSize = 32;
-/// Size of a cache line in bytes.
-constexpr int kCacheLineSize = 128;
+/// Size of a memory sector in bytes.
+constexpr int kMemorySectorSize = 32;
 /// Maximum number of registers per thread.
 constexpr int kMaxRegistersPerThread = 255;
 /// Maximum number of registers per SM.

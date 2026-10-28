@@ -12,7 +12,7 @@ if(LLVM_TARGET_IS_CROSSCOMPILE_HOST)
   return()
 endif()
 
-project(TensorIRCompiler VERSION 0.1.6 LANGUAGES C CXX)
+project(TensorIRCompiler VERSION 0.1.7 LANGUAGES C CXX)
 
 # ==============================================================================
 # Project Options
@@ -46,19 +46,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
-set(CMAKE_CXX_VISIBILITY_PRESET hidden)
-set(CMAKE_VISIBILITY_INLINES_HIDDEN 1)
-
-# Disable GCC analyses which produce lots of false positives in
-# LLVM ADT headers.
-if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-  if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15.0)
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-uninitialized>)
-  else()
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-maybe-uninitialized>)
-  endif()
-endif()
 
 # ==============================================================================
 # CUDA Toolkit
@@ -98,7 +85,7 @@ include(AddLLVM)
 include(AddMLIR)
 
 tensor_ir_configure_llvm_cmake_compatibility_policies()
-tensor_ir_configure_cxx_llvm_abi_compatibility()
+tensor_ir_configure_llvm_abi()
 
 # ==============================================================================
 # CUDA Tile IR
@@ -171,9 +158,6 @@ endfunction()
 set(LLVM_RUNTIME_OUTPUT_INTDIR "${CMAKE_BINARY_DIR}/bin")
 set(LLVM_LIBRARY_OUTPUT_INTDIR "${CMAKE_BINARY_DIR}/lib")
 
-include_directories(${LLVM_INCLUDE_DIRS})
-include_directories(${MLIR_INCLUDE_DIRS})
-
 set(TENSOR_IR_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(TENSOR_IR_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 set(TENSOR_IR_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/include")
@@ -186,16 +170,39 @@ endif()
 message(STATUS "TensorIR source directory: ${TENSOR_IR_SOURCE_DIR}")
 message(STATUS "TensorIR binary directory: ${TENSOR_IR_BINARY_DIR}")
 
-include_directories(
-  "${TENSOR_IR_SOURCE_DIR}/include" "${TENSOR_IR_BINARY_DIR}/include"
-  "${CUDA_TILE_SOURCE_DIR}/include" "${CUDA_TILE_BINARY_DIR}/include")
+# Configure dependencies before LLVM options so their subdirectories retain
+# their own compiler and linker settings. Artifact reuses these targets.
+include(cmake/TensorIRFetchFlatBuffers.cmake)
+tensor_ir_fetch_flatbuffers()
 
 set(TENSOR_IR_TOOLS_DIR "${LLVM_RUNTIME_OUTPUT_INTDIR}")
 set(TENSOR_IR_LIBRARY_DIR "${LLVM_LIBRARY_OUTPUT_INTDIR}")
 
+# Apply LLVM options only after dependency subdirectories are configured.
+tensor_ir_configure_llvm_options()
+
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN 1)
+
+# Disable GCC analyses which produce lots of false positives in
+# LLVM ADT headers.
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+  if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15.0)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-uninitialized>)
+  else()
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-maybe-uninitialized>)
+  endif()
+endif()
+
+include_directories(${LLVM_INCLUDE_DIRS} ${MLIR_INCLUDE_DIRS})
+include_directories(
+  "${TENSOR_IR_SOURCE_DIR}/include" "${TENSOR_IR_BINARY_DIR}/include"
+  "${CUDA_TILE_SOURCE_DIR}/include" "${CUDA_TILE_BINARY_DIR}/include")
+
 add_subdirectory(tools/tensor_ir-tblgen)
 add_subdirectory(include/tensor_ir)
 add_subdirectory(lib)
+
 if(TENSOR_IR_INCLUDE_TESTS)
   add_subdirectory(test/lib)
 endif()

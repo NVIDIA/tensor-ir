@@ -435,8 +435,9 @@ nv_tensor_ir.graph @test_reduce_min_i64(
 // ============================================================================
 
 // CHECK-LABEL: @test_reduce_avg_i8
-// CHECK: %[[ZERO:.*]] = constant <i8: 0> : tile<32x1xi8>
-// CHECK: %[[OUTPUT:.*]] = reshape %[[ZERO]] : tile<32x1xi8> -> tile<32xi8>
+// With ReshapeOp::fold, reshape(constant) becomes a constant of the result
+// type; the public cuda-tile used by the OSS build leaves the reshape.
+// CHECK: %[[OUTPUT:.*]] = {{(constant <i8: 0> : tile<32xi8>|reshape .* -> tile<32xi8>)}}
 // CHECK: store_view_tko weak %[[OUTPUT]]
 
 nv_tensor_ir.graph @test_reduce_avg_i8(
@@ -451,8 +452,9 @@ nv_tensor_ir.graph @test_reduce_avg_i8(
 // -----
 
 // CHECK-LABEL: @test_reduce_avg_i16
-// CHECK: %[[ZERO:.*]] = constant <i16: 0> : tile<32x1xi16>
-// CHECK: %[[OUTPUT:.*]] = reshape %[[ZERO]] : tile<32x1xi16> -> tile<32xi16>
+// With ReshapeOp::fold, reshape(constant) becomes a constant of the result
+// type; the public cuda-tile used by the OSS build leaves the reshape.
+// CHECK: %[[OUTPUT:.*]] = {{(constant <i16: 0> : tile<32xi16>|reshape .* -> tile<32xi16>)}}
 // CHECK: store_view_tko weak %[[OUTPUT]]
 
 nv_tensor_ir.graph @test_reduce_avg_i16(

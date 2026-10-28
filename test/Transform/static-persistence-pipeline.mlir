@@ -1,5 +1,5 @@
 // RUN: tensor_ir-opt %s --split-input-file \
-// RUN:   --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,tile-selection),tir-bufferize,func.func(tir-form-grid,tir-tile-reductions{persistence=static sm-count=2 occupancy=1}))' \
+// RUN:   --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,tile-selection),tir-bufferize,func.func(tir-form-grid,tir-tile-reductions,tir-static-persistence{sm-count=2 occupancy=1}))' \
 // RUN:   | FileCheck %s
 // RUN: tensor_ir-opt %s --split-input-file --layout-propagation-pipeline="sm-count=2 occupancy=1 persistence=static" \
 // RUN:   | FileCheck %s --check-prefix=LOWERED
@@ -7,18 +7,16 @@
 // Static persistence caps the physical grid and visits logical tile IDs with
 // a grid-stride loop.
 // CHECK-LABEL: func.func @persistent_dispatch(
-//  CHECK-SAME:     %[[INPUT:[^:]+]]: memref<64xf32, #ptr.generic_space>
-//  CHECK-SAME:     %[[OUTPUT:[^:]+]]: memref<64xf32, #ptr.generic_space>
-//       CHECK:   %[[IPTR:.*]] = ptr.to_ptr %[[INPUT]]
-//       CHECK:   %[[OPTR:.*]] = ptr.to_ptr %[[OUTPUT]]
+//  CHECK-SAME:     %[[INPUT:[^:]+]]: memref<64xf32>
+//  CHECK-SAME:     %[[OUTPUT:[^:]+]]: memref<64xf32>
 //   CHECK-DAG:   %[[TOTAL:.*]] = arith.constant 4 : index
 //   CHECK-DAG:   %[[GRID:.*]] = arith.constant 2 : index
 //       CHECK:   scf.forall (%[[BLOCK:.*]]) in (2) {
 //       CHECK:     scf.for %[[TILE:.*]] = %[[BLOCK]] to %[[TOTAL]] step %[[GRID]] {
-//       CHECK:       %[[LOADED:.*]] = nv_tensor_ir.load %[[IPTR]][%[[TILE]]] view offset: [0], sizes: [64], strides: [1], alignment: 4
+//       CHECK:       %[[LOADED:.*]] = nv_tensor_ir.load %[[INPUT]] tile_indices [%[[TILE]]], alignment 4
 //  CHECK-SAME:         to tensor<16xf32>
 //       CHECK:       %[[COS:.*]] = nv_tensor_ir.cos %[[LOADED]] : tensor<16xf32>
-//       CHECK:       nv_tensor_ir.store %[[COS]], %[[OPTR]][%[[TILE]]] view offset: [0], sizes: [64], strides: [1], alignment: 4
+//       CHECK:       nv_tensor_ir.store %[[COS]], %[[OUTPUT]] tile_indices [%[[TILE]]], alignment 4
 //  CHECK-NEXT:     }
 //  CHECK-NEXT:   } {mapping = [#gpu.block<x>]}
 
@@ -48,16 +46,14 @@ nv_tensor_ir.graph @persistent(%input: tensor<64xf32>)
 // When every logical tile already has a resident block, persistence is a
 // no-op and no serial loop is introduced.
 // CHECK-LABEL: func.func @fits_grid_dispatch(
-//  CHECK-SAME:     %[[INPUT:[^:]+]]: memref<32xf32, #ptr.generic_space>
-//  CHECK-SAME:     %[[OUTPUT:[^:]+]]: memref<32xf32, #ptr.generic_space>
-//       CHECK:   %[[IPTR:.*]] = ptr.to_ptr %[[INPUT]]
-//       CHECK:   %[[OPTR:.*]] = ptr.to_ptr %[[OUTPUT]]
+//  CHECK-SAME:     %[[INPUT:[^:]+]]: memref<32xf32>
+//  CHECK-SAME:     %[[OUTPUT:[^:]+]]: memref<32xf32>
 //       CHECK:   scf.forall (%[[BLOCK:.*]]) in (2) {
 //   CHECK-NOT:     scf.for
-//       CHECK:     %[[LOADED:.*]] = nv_tensor_ir.load %[[IPTR]][%[[BLOCK]]] view offset: [0], sizes: [32], strides: [1], alignment: 4
+//       CHECK:     %[[LOADED:.*]] = nv_tensor_ir.load %[[INPUT]] tile_indices [%[[BLOCK]]], alignment 4
 //  CHECK-SAME:       to tensor<16xf32>
 //       CHECK:     %[[COS:.*]] = nv_tensor_ir.cos %[[LOADED]] : tensor<16xf32>
-//       CHECK:     nv_tensor_ir.store %[[COS]], %[[OPTR]][%[[BLOCK]]] view offset: [0], sizes: [32], strides: [1], alignment: 4
+//       CHECK:     nv_tensor_ir.store %[[COS]], %[[OUTPUT]] tile_indices [%[[BLOCK]]], alignment 4
 //  CHECK-NEXT:   } {mapping = [#gpu.block<x>]}
 
 // LOWERED-LABEL: entry @fits_grid(
@@ -86,14 +82,12 @@ nv_tensor_ir.graph @fits_grid(%input: tensor<32xf32>)
 // total is ceildiv(rows, 4) row tiles times one column tile; the logical tile
 // ID is delinearized with the row-tile count.
 // CHECK-LABEL: func.func @dynamic_grid_dispatch(
-//  CHECK-SAME:     %[[INPUT:[^:]+]]: memref<?x32xf32, strided<[?, 1]>, #ptr.generic_space>
-//  CHECK-SAME:     %[[OUTPUT:[^:]+]]: memref<?x32xf32, strided<[?, 1]>, #ptr.generic_space>
-//       CHECK:   %{{[^,]+}}, %{{[^,]+}}, %[[ISIZES:[^:]+]]:2, %[[ISTRIDES:[^:]+]]:2 = memref.extract_strided_metadata %[[INPUT]]
-//       CHECK:   %[[IPTR:.*]] = ptr.to_ptr %[[INPUT]]
-//       CHECK:   %{{[^,]+}}, %{{[^,]+}}, %[[OSIZES:[^:]+]]:2, %[[OSTRIDES:[^:]+]]:2 = memref.extract_strided_metadata %[[OUTPUT]]
-//       CHECK:   %[[OPTR:.*]] = ptr.to_ptr %[[OUTPUT]]
+//  CHECK-SAME:     %[[INPUT:[^:]+]]: memref<?x32xf32, strided<[?, 1]>>
+//  CHECK-SAME:     %[[OUTPUT:[^:]+]]: memref<?x32xf32, strided<[?, 1]>>
+//   CHECK-NOT: memref.extract_strided_metadata
+//       CHECK:   %[[SIZE:.*]] = memref.dim %[[OUTPUT]]
 //       CHECK:   %[[C4:.*]] = arith.constant 4 : index
-//       CHECK:   %[[ROW_TILES:.*]] = arith.ceildivui %[[OSIZES]]#0, %[[C4]] : index
+//       CHECK:   %[[ROW_TILES:.*]] = arith.ceildivui %[[SIZE]], %[[C4]] : index
 //       CHECK:   %[[C1:.*]] = arith.constant 1 : index
 //       CHECK:   %[[PARTIAL:.*]] = arith.muli %[[C1]], %[[ROW_TILES]] : index
 //       CHECK:   %[[COLUMN_TILES:.*]] = arith.constant 1 : index
@@ -104,10 +98,10 @@ nv_tensor_ir.graph @fits_grid(%input: tensor<32xf32>)
 //       CHECK:   %[[GRID:.*]] = arith.maxui %[[MIN]], %[[ONE]] : index
 //       CHECK:   scf.forall (%[[BLOCK:.*]]) in (%[[GRID]]) {
 //       CHECK:     scf.for %[[TILE:.*]] = %[[BLOCK]] to %[[TOTAL]] step %[[GRID]] {
-//       CHECK:       %[[LOADED:.*]] = nv_tensor_ir.load %[[IPTR]][%[[TILE]], 0] view offset: [0], sizes: [%[[ISIZES]]#0, 32], strides: [%[[ISTRIDES]]#0, 1], alignment: 4
+//       CHECK:       %[[LOADED:.*]] = nv_tensor_ir.load %[[INPUT]] tile_indices [%[[TILE]], 0], alignment 4
 //  CHECK-SAME:         to tensor<4x32xf32>
 //       CHECK:       %[[COS:.*]] = nv_tensor_ir.cos %[[LOADED]] : tensor<4x32xf32>
-//       CHECK:       nv_tensor_ir.store %[[COS]], %[[OPTR]][%[[TILE]], 0] view offset: [0], sizes: [%[[OSIZES]]#0, 32], strides: [%[[OSTRIDES]]#0, 1], alignment: 4
+//       CHECK:       nv_tensor_ir.store %[[COS]], %[[OUTPUT]] tile_indices [%[[TILE]], 0], alignment 4
 //  CHECK-NEXT:     }
 //  CHECK-NEXT:   } {mapping = [#gpu.block<x>]}
 
