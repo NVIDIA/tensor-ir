@@ -17,7 +17,7 @@
 namespace mlir {
 namespace nv_tensor_ir {
 
-/// @brief Generates multiple tile shape candidates using a unified
+/// Generates multiple tile shape candidates using a unified
 /// constraint-based algorithm.
 ///
 /// The algorithm:
@@ -35,23 +35,26 @@ public:
   /// Internal candidate representation with score and rationale.
   struct Candidate {
     llvm::SmallVector<int32_t> tileShape;
-    float score = 0.0f;    ///< Higher is better. 0.0 = unscored.
-    std::string rationale; ///< Human-readable generation rationale.
+    /// Higher is better. 0.0 = unscored.
+    float score = 0.0f;
+    /// Human-readable generation rationale.
+    std::string rationale;
   };
 
-  /// @brief Construct a new TileCandidateGenerator
-  /// @param gpu GPU architecture parameters (warpSize, l1CacheLineSize, numSMs)
-  /// @param maxCandidates Maximum number of candidates to return
+  /// Construct a new TileCandidateGenerator
+  ///
+  /// \param gpu GPU architecture parameters (warpSize, l1CacheLineSize, numSMs)
   TileCandidateGenerator(const GpuArchitecture &gpu, int maxCandidates);
 
-  /// @brief Generate tile candidates with per-operand stride information.
+  /// Generate tile candidates with per-operand stride information.
   ///
-  /// @param shape Iteration space shape (shared by all operands)
-  /// @param allStrides Per-operand strides (one per input/output tensor)
-  /// @param allElementSizeBytes Per-operand element sizes in bytes
-  /// @param constraints Op-specific constraints: {dim_index →
+  /// \param shape Iteration space shape (shared by all operands)
+  /// \param allStrides Per-operand strides (one per input/output tensor)
+  /// \param allElementSizeBytes Per-operand element sizes in bytes
+  /// \param constraints Op-specific constraints: {dim_index →
   /// required_tile_value}.
-  /// @return Candidates sorted by score (highest first = best). At most
+  ///
+  /// \returns Candidates sorted by score (highest first = best). At most
   ///         maxCandidates returned.
   llvm::SmallVector<Candidate>
   generateCandidates(llvm::ArrayRef<DimSize> shape,
@@ -59,38 +62,35 @@ public:
                      llvm::ArrayRef<DimSize> allElementSizeBytes,
                      const llvm::DenseMap<size_t, DimSize> &constraints);
 
-  /// @brief Convenience overload: single stride array (backward compatible).
+  /// Convenience overload: single stride array (backward compatible).
   llvm::SmallVector<Candidate>
   generateCandidates(llvm::ArrayRef<DimSize> shape,
                      llvm::ArrayRef<DimSize> strides, DimSize elementSizeBytes,
                      const llvm::DenseMap<size_t, DimSize> &constraints);
 
-  /// @brief Overload without constraints (uses empty constraints map).
+  /// Overload without constraints (uses empty constraints map).
   llvm::SmallVector<Candidate>
   generateCandidates(llvm::ArrayRef<DimSize> shape,
                      llvm::ArrayRef<DimSize> strides, DimSize elementSizeBytes);
 
-  /// @brief Multi-stride overload without constraints.
+  /// Multi-stride overload without constraints.
   llvm::SmallVector<Candidate>
   generateCandidates(llvm::ArrayRef<DimSize> shape,
                      llvm::ArrayRef<llvm::SmallVector<DimSize>> allStrides,
                      llvm::ArrayRef<DimSize> allElementSizeBytes);
 
-  /// @brief Score a single tile candidate using per-operand coalescing.
+  /// Score a single tile candidate using per-operand coalescing.
   ///
-  /// @param tileShape The tile shape to score
-  /// @param tensorShape The full tensor shape
-  /// @param fastestDim Index of the fastest-varying dimension
-  /// @param allStrides Per-operand strides
-  /// @param allElementSizeBytes Per-operand element sizes
-  /// @return Score (higher = better)
+  /// \param fastestDim Index of the fastest-varying dimension
+  ///
+  /// \returns Score (higher = better)
   virtual float scoreTile(llvm::ArrayRef<int32_t> tileShape,
                           llvm::ArrayRef<DimSize> tensorShape,
                           size_t fastestDim,
                           llvm::ArrayRef<llvm::SmallVector<DimSize>> allStrides,
                           llvm::ArrayRef<DimSize> allElementSizeBytes);
 
-  /// @brief Backward-compatible single-operand scoring.
+  /// Backward-compatible single-operand scoring.
   virtual float scoreTile(llvm::ArrayRef<int32_t> tileShape,
                           llvm::ArrayRef<DimSize> tensorShape,
                           size_t fastestDim, DimSize elementSizeBytes);

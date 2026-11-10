@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// This file contains preprocessor utilities shared across multiple TensorIR libraries.
-// that may be used in exported header files. To lessen the liklihood of name colissions downstream,
-// each macro is prefixed with TIR_.
+/// This file contains preprocessor utilities shared across multiple TensorIR libraries.
+/// that may be used in exported header files. To lessen the liklihood of name colissions downstream,
+/// each macro is prefixed with TIR_.
 
 #ifndef TENSOR_IR_SUPPORT_MACROS_H
 #define TENSOR_IR_SUPPORT_MACROS_H

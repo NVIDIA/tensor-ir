@@ -15,8 +15,14 @@
 using namespace mlir;
 using namespace mlir::nv_tensor_ir;
 
+/// Whether `lhs == rhs` is proven in their context.
 static bool equals(PolyExpr lhs, PolyExpr rhs) {
-  return lhs && rhs && lhs.getContext().areEqual(lhs, rhs).value_or(false);
+  return lhs && rhs && lhs.getContext().areEqual(lhs, rhs) == true;
+}
+
+/// Whether `extent == 1` is proven in its context.
+static bool isUnitExtent(PolyExpr extent) {
+  return extent && extent.getContext().isOne(extent) == true;
 }
 
 static PolyExpr product(PolyExprContext &context,
@@ -28,8 +34,8 @@ static PolyExpr product(PolyExprContext &context,
   return result;
 }
 
-// Shape symbols denote positive extents here. Reject zero and expressions whose
-// positivity cannot be established under that precondition.
+/// Shape symbols denote positive extents here. Reject zero and expressions whose
+/// positivity cannot be established under that precondition.
 static bool isPositiveExtent(PolyExprContext &context, PolyExpr expr) {
   expr = context.normalize(expr);
   return expr && !expr.isZero() && llvm::all_of(expr, [](PolyExpr::Term term) {
@@ -109,7 +115,7 @@ bool LayoutLeaf::operator==(const LayoutLeaf &other) const {
   return equals(size, other.size) && equals(stride, other.stride);
 }
 
-bool LayoutDim::isUnit() const { return getSize().isOne(); }
+bool LayoutDim::isUnit() const { return isUnitExtent(getSize()); }
 
 LayoutDim LayoutDim::getGroup(llvm::ArrayRef<LayoutLeaf> leaves) {
   LayoutDim dim;
@@ -239,7 +245,7 @@ SymbolicLayout SymbolicLayout::coalesce() const {
   // Process dimensions from fastest to slowest. A dimension absorbs its adjacent
   // faster neighbor when its stride exactly equals the full span of that neighbor.
   for (size_t index = leaves.size() - 1; index > 0; --index) {
-    if (leaves[index - 1].size.normalize().isOne()) {
+    if (isUnitExtent(leaves[index - 1].size)) {
       leaves.erase(leaves.begin() + index - 1);
       continue;
     }
@@ -257,13 +263,13 @@ SymbolicLayout SymbolicLayout::coalesce() const {
   }
 
   if (llvm::all_of(leaves, [](const LayoutLeaf &leaf) {
-        return leaf.size.normalize().isOne();
+        return isUnitExtent(leaf.size);
       })) {
     return SymbolicLayout(*context, llvm::ArrayRef<LayoutDim>{LayoutDim(
                                         PolyExpr::getConstant(*context, 1),
                                         PolyExpr::getConstant(*context, 0))});
   }
-  if (leaves.back().size.normalize().isOne()) {
+  if (isUnitExtent(leaves.back().size)) {
     leaves.pop_back();
   }
 
@@ -323,7 +329,7 @@ SymbolicLayout::compose(llvm::ArrayRef<PolyExpr> targetShape) const {
     if (PolyExpr rest = targetSize / sourceSize) {
       group.push_back(*sourcePart);
       sourcePart = std::nullopt;
-      targetPart = rest.isOne() ? nullptr : rest;
+      targetPart = isUnitExtent(rest) ? nullptr : rest;
       continue;
     }
 
@@ -331,7 +337,7 @@ SymbolicLayout::compose(llvm::ArrayRef<PolyExpr> targetShape) const {
     // the residue for slower dimensions.
     if (PolyExpr rest = sourceSize / targetSize) {
       PolyExpr stride = sourcePart->stride;
-      group.emplace_back(targetSize, targetSize.normalize().isOne()
+      group.emplace_back(targetSize, isUnitExtent(targetSize)
                                          ? PolyExpr::getConstant(*context, 0)
                                          : stride);
       sourcePart = LayoutLeaf(rest, stride * targetSize);
@@ -353,7 +359,7 @@ SymbolicLayout::compose(llvm::ArrayRef<PolyExpr> targetShape) const {
   bool targetHasLeading = false;
   int64_t leadingUnits = 0;
   while (targetRemaining > 0) {
-    bool isUnit = targetShape[--targetRemaining].normalize().isOne();
+    bool isUnit = isUnitExtent(targetShape[--targetRemaining]);
     targetHasLeading |= !isUnit;
     leadingUnits += isUnit;
   }
@@ -388,7 +394,7 @@ SymbolicLayout::broadcastTo(llvm::ArrayRef<PolyExpr> newShape) const {
       resultDims.push_back(dim);
       continue;
     }
-    if (!size.isOne()) {
+    if (!isUnitExtent(size)) {
       return Status::InvalidArgument("cannot broadcast a non-unit dimension");
     }
     resultDims.emplace_back(newSize, PolyExpr::getConstant(*context, 0));
@@ -659,7 +665,7 @@ nv_tensor_ir::getCommonIterationSpace(
       if (!quotient) {
         return std::nullopt;
       }
-      if (quotient.isOne()) {
+      if (isUnitExtent(quotient)) {
         shape.pop_back();
       } else {
         shape.back() = quotient;
@@ -671,7 +677,7 @@ nv_tensor_ir::getCommonIterationSpace(
   size_t unitDims = 0;
   for (const auto &shape : shapes) {
     PolyExpr size = product(*context, shape);
-    if (!size || !size.isOne()) {
+    if (!isUnitExtent(size)) {
       return std::nullopt;
     }
     unitDims = std::max(unitDims, shape.size());

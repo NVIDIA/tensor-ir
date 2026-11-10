@@ -20,7 +20,7 @@ namespace mlir::nv_tensor_ir::reference {
 
 class TensorMemory;
 
-// Supported data types (simplified version)
+/// Supported data types (simplified version)
 enum class DataType {
   BOOL,
   FLOAT32,
@@ -47,18 +47,21 @@ bool isFloatDataType(DataType dtype);
 
 const char *getEnumName(DataType dtype);
 
-// Tensor descriptor
+/// Tensor descriptor
 struct TensorDesc {
-  std::vector<int64_t> dims{};    // Dimensions
-  std::vector<int64_t> strides{}; // Strides
+  /// Dimensions
+  std::vector<int64_t> dims{};
+  /// Strides
+  std::vector<int64_t> strides{};
   DataType dtype{DataType::FLOAT32};
-  // Initialization sets this to the shape product. The empty product is one
-  // for an initialized rank-zero tensor; zero marks an uninitialized object.
+  /// Initialization sets this to the shape product. The empty product is one
+  /// for an initialized rank-zero tensor; zero marks an uninitialized object.
   int64_t totalElements{0};
 
   TensorDesc() = default;
 
-  void computeStrides(); // Automatically compute strides
+  /// Automatically compute strides
+  void computeStrides();
 
   /// Return the byte size of the complete strided storage footprint, or
   /// std::nullopt when the descriptor is invalid or the size overflows.
@@ -71,28 +74,26 @@ struct TensorDesc {
   void print() const;
 };
 
-// Utility functions
+/// Utility functions
 size_t getDataTypeSize(DataType dtype);
 
-/**
- * @brief SimplifiedTensor - Tensor representation with metadata and memory
- * management
- *
- * This class manages tensor metadata (shape, strides, data type) and delegates
- * memory management to the TensorMemory class through a smart pointer.
- *
- * Memory lifecycle:
- * 1. init() - Initialize tensor descriptor
- * 2. allocate() - Create TensorMemory and allocate actual memory
- * 3. Use memory pointers for computation
- * 4. Automatic cleanup when SimplifiedTensor is destroyed
- */
+/// SimplifiedTensor - Tensor representation with metadata and memory
+/// management
+///
+/// This class manages tensor metadata (shape, strides, data type) and delegates
+/// memory management to the TensorMemory class through a smart pointer.
+///
+/// Memory lifecycle:
+/// 1. init() - Initialize tensor descriptor
+/// 2. allocate() - Create TensorMemory and allocate actual memory
+/// 3. Use memory pointers for computation
+/// 4. Automatic cleanup when SimplifiedTensor is destroyed
 class SimplifiedTensor {
 public:
   SimplifiedTensor();
   ~SimplifiedTensor();
 
-  // Disable copy, enable move
+  /// Disable copy, enable move
   SimplifiedTensor(const SimplifiedTensor &) = delete;
   SimplifiedTensor &operator=(const SimplifiedTensor &) = delete;
   SimplifiedTensor(SimplifiedTensor &&) noexcept;
@@ -107,15 +108,11 @@ public:
             llvm::ArrayRef<int64_t> strides, DataType dtype);
 
   // === Memory Management ===
-  /**
-   * @brief Allocate memory for this tensor
-   * Creates TensorMemory object and allocates all required memory buffers
-   */
+  /// Allocate memory for this tensor
+  /// Creates TensorMemory object and allocates all required memory buffers
   bool allocate();
 
-  /**
-   * @brief Check if memory has been allocated
-   */
+  /// Check if memory has been allocated
   bool isAllocated() const;
 
   /// Validate metadata and memory required by reference-node computations.
@@ -187,7 +184,8 @@ public:
   std::optional<size_t> getSizeInBytes() const { return desc.getSizeInBytes(); }
 
   // === Utility Methods ===
-  void print() const; // Print tensor information
+  /// Print tensor information
+  void print() const;
 
   /// Compare integer and boolean elements exactly, and floating-point elements
   /// using \p rtol and \p atol.
@@ -195,11 +193,11 @@ public:
                        double atol = 1e-8, bool verbose = false) const;
 
 private:
-  // Tensor metadata
+  /// Tensor metadata
   std::string name;
   TensorDesc desc;
 
-  // Memory management (delegated to TensorMemory via smart pointer)
+  /// Memory management (delegated to TensorMemory via smart pointer)
   std::unique_ptr<TensorMemory> memory;
 };
 

@@ -13,6 +13,7 @@ AutoGdcInsertion = _tensor_ir_module.AutoGdcInsertion
 CodegenStrategy = _tensor_ir_module.CodegenStrategy
 BytecodeVersion = _tensor_ir_module.BytecodeVersion
 CudaTileArtifactKind = _tensor_ir_module.CudaTileArtifactKind
+RemarkCategory = _tensor_ir_module.RemarkCategory
 HostTarget = _tensor_ir_module.HostTarget
 HostArch = _tensor_ir_module.HostArch
 HostOS = _tensor_ir_module.HostOS
@@ -26,6 +27,7 @@ __all__ = [
     "Artifact",
     "RuntimeKernel",
     "CudaTileArtifactKind",
+    "RemarkCategory",
     "analyze_module",
     "HostTarget",
     "HostArch",
@@ -109,8 +111,12 @@ class Artifact(_OwnedObject):
         """Return the original TileIR bytecode or cubin device binary."""
         return self._require_native().get_bytecode()
 
+    def get_remarks(self) -> str:
+        """Return captured LLVM remark YAML, or empty if no records were emitted."""
+        return self._require_native().get_remarks()
+
     def serialize(self) -> bytes:
-        """Serialize the device binary and launch metadata."""
+        """Serialize the device binary, launch metadata, and optimization remarks."""
         return self._require_native().serialize()
 
     @staticmethod
@@ -155,6 +161,14 @@ class RuntimeKernel(_OwnedObject):
         native.launch(args, workspace, stream)
 
 
+_REMARK_OPTION_NAMES = (
+    "remarks",
+    "remarks_passed",
+    "remarks_missed",
+    "remarks_failed",
+    "remarks_analysis",
+)
+
 _COMPILE_OPTION_NAMES = frozenset(
     {
         "compute_capability",
@@ -175,10 +189,18 @@ _COMPILE_OPTION_NAMES = frozenset(
         "enable_timing",
         "bytecode_version",
         "artifact_kind",
+        "cuda_toolkit_path",
+        "tileiras_path",
+        *_REMARK_OPTION_NAMES,
+        "remarks_output_file",
     }
 )
 
-_HOST_OPTIONS_BY_NAME = {
+_ENUM_OPTIONS_BY_NAME = {
+    **dict.fromkeys(
+        _REMARK_OPTION_NAMES,
+        {category.name.lower(): category for category in RemarkCategory},
+    ),
     "host_target": {
         "auto": HostTarget.Auto,
         "native": HostTarget.Native,
@@ -201,7 +223,7 @@ _CUDA_TILE_ARTIFACT_KIND_BY_VALUE = {
 }
 
 
-def _enum_by_value(name: str, values: dict[int, object], value: int):
+def _enum_option(name, values, value):
     try:
         return values[value]
     except KeyError as exc:
@@ -227,18 +249,13 @@ def _make_compile_options(options=None, **kwargs) -> CompileOptions:
         if name == "compute_capability":
             value = value or _detect_compute_capability()
         elif name == "arch_portability" and isinstance(value, int):
-            value = _enum_by_value(name, _ARCH_PORTABILITY_BY_VALUE, value)
+            value = _enum_option(name, _ARCH_PORTABILITY_BY_VALUE, value)
         elif name == "codegen_strategy" and isinstance(value, int):
-            value = _enum_by_value(name, _CODEGEN_STRATEGY_BY_VALUE, value)
+            value = _enum_option(name, _CODEGEN_STRATEGY_BY_VALUE, value)
         elif name == "artifact_kind" and isinstance(value, int):
-            value = _enum_by_value(name, _CUDA_TILE_ARTIFACT_KIND_BY_VALUE, value)
-        elif name in _HOST_OPTIONS_BY_NAME and isinstance(value, str):
-            try:
-                value = _HOST_OPTIONS_BY_NAME[name][value]
-            except KeyError as exc:
-                raise ValueError(
-                    f"Unknown TensorIR compile option {name}: {value}"
-                ) from exc
+            value = _enum_option(name, _CUDA_TILE_ARTIFACT_KIND_BY_VALUE, value)
+        elif name in _ENUM_OPTIONS_BY_NAME and isinstance(value, str):
+            value = _enum_option(name, _ENUM_OPTIONS_BY_NAME[name], value)
         elif name == "tile_sizes":
             value = list(value)
         setattr(options, name, value)

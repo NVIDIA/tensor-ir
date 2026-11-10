@@ -195,7 +195,7 @@ Attribute ReductionEmissionHelper::getIdentity(OpBuilder &rewriter) {
   }
 }
 
-// Build the prologue for a reduction operation.
+/// Build the prologue for a reduction operation.
 Value ReductionEmissionHelper::buildPrologue(OpBuilder &rewriter,
                                              Value inputTile) {
   Location loc = inputTile.getLoc();
@@ -248,7 +248,7 @@ Value ReductionEmissionHelper::buildPrologue(OpBuilder &rewriter,
   }
 }
 
-// Accumulate values for a reduction operation.
+/// Accumulate values for a reduction operation.
 Value ReductionEmissionHelper::buildReduction(OpBuilder &rewriter,
                                               Value accumulator, Value tile) {
   Location loc = tile.getLoc();
@@ -302,7 +302,7 @@ Value ReductionEmissionHelper::buildReduction(OpBuilder &rewriter,
   }
 }
 
-// Build the epilogue for a reduction operation.
+/// Build the epilogue for a reduction operation.
 Value ReductionEmissionHelper::buildEpilogue(OpBuilder &rewriter,
                                              Value outputTile,
                                              int64_t reductionSize) {

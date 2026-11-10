@@ -724,3 +724,58 @@ nv_tensor_ir.graph @transpose_dynamic_and_static_mixed(
     %out = transpose %in permutation = [5, 4, 3, 2, 1, 0] : tensor<2x?x4x?x8x?xf32> -> tensor<?x8x?x4x?x2xf32>
     results %out : tensor<?x8x?x4x?x2xf32>
 }
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// SliceOp on reduction and matmul results
+//===----------------------------------------------------------------------===//
+
+// The slice of the surviving dimension (uniform stride, whole source dimension)
+// is pushed down to the reduced source: extent 8 -> 3, stride doubles, and the
+// start moves the source offset by 1 * 16.
+// CHECK-LABEL: @slice_reduce_spatial
+// CHECK: nv_tensor_ir.slice: #nv_tensor_ir.reduction_source<"(4,3,(16)):(48,16,(1))", #nv_tensor_ir.tensor_source<0, 16, "(4,3,16):(128,32,1)">>
+nv_tensor_ir.graph @slice_reduce_spatial(%in: tensor<4x8x16xf32>) -> (tensor<4x3xf32>) {
+    %r = reduce(%in)<dimensions = [2], reduction_mode = <add>> : tensor<4x8x16xf32> -> tensor<4x8xf32>
+    %out = slice %r starts = [0, 1] limits = [4, 7] strides = [1, 2] : tensor<4x8xf32> -> tensor<4x3xf32>
+    results %out : tensor<4x3xf32>
+}
+
+// -----
+
+// Slicing the LHS non-contracting dimension M slices only the LHS source and
+// shrinks M (and the view strides above it) from 32 to 16.
+// CHECK-LABEL: @slice_matmul_m
+// CHECK: nv_tensor_ir.slice: #nv_tensor_ir.matmul_source<"(2,16,48,64):(49152,3072,64,1)", 2, 16, 48, 64, #nv_tensor_ir.tensor_source<0, 512, "(2,16,64):(2048,64,1)">, #nv_tensor_ir.tensor_source<1, 0, "(2,64,48):(3072,48,1)">>
+nv_tensor_ir.graph @slice_matmul_m(%a: tensor<2x32x64xbf16>, %b: tensor<2x64x48xbf16>) -> (tensor<2x16x48xf32>) {
+    %m = matmul(%a, %b) : (tensor<2x32x64xbf16>, tensor<2x64x48xbf16>) -> tensor<2x32x48xf32>
+    %out = slice %m starts = [0, 8, 0] limits = [2, 24, 48] strides = [1, 1, 1] : tensor<2x32x48xf32> -> tensor<2x16x48xf32>
+    results %out : tensor<2x16x48xf32>
+}
+
+// -----
+
+// Slicing the batch dimension slices both operands; slicing N slices the RHS.
+// The batch dimension becomes a unit dimension, which gets zero stride.
+// CHECK-LABEL: @slice_matmul_batch_n
+// CHECK: nv_tensor_ir.slice: #nv_tensor_ir.matmul_source<"(1,32,16,64):(0,1024,64,1)", 1, 32, 16, 64, #nv_tensor_ir.tensor_source<0, 2048, "(1,32,64):(0,64,1)">, #nv_tensor_ir.tensor_source<1, 3072, "(1,64,16):(0,48,3)">>
+nv_tensor_ir.graph @slice_matmul_batch_n(%a: tensor<2x32x64xbf16>, %b: tensor<2x64x48xbf16>) -> (tensor<1x32x16xf32>) {
+    %m = matmul(%a, %b) : (tensor<2x32x64xbf16>, tensor<2x64x48xbf16>) -> tensor<2x32x48xf32>
+    %out = slice %m starts = [1, 0, 0] limits = [2, 32, 48] strides = [1, 1, 3] : tensor<2x32x48xf32> -> tensor<1x32x16xf32>
+    results %out : tensor<1x32x16xf32>
+}
+
+// -----
+
+// Slicing the batch dimension down to size 1 zeroes its view stride. A
+// following slice of M must still resolve the LHS/RHS dimensions, even though
+// the unit batch dimension no longer has a leaf with its expected stride.
+// CHECK-LABEL: @slice_matmul_m_after_unit_batch
+// CHECK: nv_tensor_ir.slice: #nv_tensor_ir.matmul_source<"(1,16,16,64):(0,1024,64,1)", 1, 16, 16, 64, #nv_tensor_ir.tensor_source<{{.*}}>, #nv_tensor_ir.tensor_source<{{.*}}>>
+nv_tensor_ir.graph @slice_matmul_m_after_unit_batch(%a: tensor<2x32x64xbf16>, %b: tensor<2x64x48xbf16>) -> (tensor<1x16x16xf32>) {
+    %m = matmul(%a, %b) : (tensor<2x32x64xbf16>, tensor<2x64x48xbf16>) -> tensor<2x32x48xf32>
+    %s1 = slice %m starts = [1, 0, 0] limits = [2, 32, 48] strides = [1, 1, 3] : tensor<2x32x48xf32> -> tensor<1x32x16xf32>
+    %out = slice %s1 starts = [0, 0, 0] limits = [1, 32, 16] strides = [1, 2, 1] : tensor<1x32x16xf32> -> tensor<1x16x16xf32>
+    results %out : tensor<1x16x16xf32>
+}

@@ -97,13 +97,13 @@ nv_tensor_ir.graph @test_matmul_3d_simple_2(
 // CHECK-SAME: (%[[IN0:.*]]: tile<ptr<f32>>, %[[IN1:.*]]: tile<ptr<f32>>, %[[OUT:.*]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST3:.*]] = constant <i32: 3> : tile<i32>
-// CHECK-DAG: %[[CST4:.*]] = constant <i32: 4> : tile<i32>
+// CHECK-DAG: %[[CST2:.*]] = constant <i32: 2> : tile<i32>
 // CHECK-DAG: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : tile<2x32x16xf32>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[IDX_B:.*]] = remi %[[BLOCK]], %[[CST4]]
-// CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[CST4]]
+// CHECK: %[[IDX_M:.*]] = remi %[[BLOCK]], %[[CST2]]
+// CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[CST2]]
 // CHECK: %[[IDX_N:.*]] = remi %[[TEMP]], %[[CST3]]
-// CHECK: %[[IDX_M:.*]] = divi %[[TEMP]], %[[CST3]]
+// CHECK: %[[IDX_B:.*]] = divi %[[TEMP]], %[[CST3]]
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [8, 64, 128], strides = [8192, 128, 1]
 // CHECK: %[[LHS_PVIEW:.*]] = make_partition_view %[[LHS_VIEW]]
 // CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[LHS_PVIEW]][%[[IDX_B]], %[[IDX_M]], %[[ZERO]]] : {{.*}} -> tile<2x32x128xf32>
@@ -137,14 +137,14 @@ nv_tensor_ir.graph @test_matmul_small_transpose(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST1:.*]] = constant <i32: 1> : tile<i32>
 // CHECK-DAG: %[[CST2:.*]] = constant <i32: 2> : tile<i32>
-// CHECK-DAG: %[[CST4:.*]] = constant <i32: 4> : tile<i32>
+// CHECK-DAG: %[[CST3:.*]] = constant <i32: 3> : tile<i32>
 // CHECK-DAG: %[[CST8:.*]] = constant <i32: 8> : tile<i32>
 // CHECK-DAG: %[[INIT:.*]] = constant <f32: 0.000000e+00> : tile<2x32x16xf32>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[IDX_B:.*]] = remi %[[BLOCK]], %[[CST4]]
-// CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[CST4]]
+// CHECK: %[[IDX_N:.*]] = remi %[[BLOCK]], %[[CST3]]
+// CHECK: %[[TEMP:.*]] = divi %[[BLOCK]], %[[CST3]]
 // CHECK: %[[IDX_M:.*]] = remi %[[TEMP]], %[[CST2]]
-// CHECK: %[[IDX_N:.*]] = divi %[[TEMP]], %[[CST2]]
+// CHECK: %[[IDX_B:.*]] = divi %[[TEMP]], %[[CST2]]
 // CHECK: %[[RESULT:.*]] = for %[[IDX_K:.*]] in (%[[ZERO]] to %[[CST8]], step %[[CST1]])
 // CHECK-SAME: iter_values(%[[ACCUM:.*]] = %[[INIT]])
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [8, 64, 1024], strides = [65536, 1024, 1]
@@ -179,11 +179,12 @@ nv_tensor_ir.graph @test_matmul_large_one_loop(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[CST1:.*]] = constant <i32: 1> : tile<i32>
 // CHECK-DAG: %[[CST2:.*]] = constant <i32: 2> : tile<i32>
+// CHECK-DAG: %[[CST3:.*]] = constant <i32: 3> : tile<i32>
 // CHECK-DAG: %[[CST4:.*]] = constant <i32: 4> : tile<i32>
 // CHECK-DAG: %[[INIT:.*]] = constant <f32: 0.000000e+00> : tile<32x16xf32>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[IDX_M:.*]] = remi %[[BLOCK]], %[[CST2]]
-// CHECK: %[[IDX_N:.*]] = divi %[[BLOCK]], %[[CST2]]
+// CHECK: %[[IDX_N:.*]] = remi %[[BLOCK]], %[[CST3]]
+// CHECK: %[[IDX_M:.*]] = divi %[[BLOCK]], %[[CST3]]
 // CHECK: %[[RESULT:.*]] = for %[[IVAR1:.*]] in (%[[ZERO]] to %[[CST2]], step %[[CST1]])
 // CHECK-SAME: iter_values(%[[IARG1:.*]] = %[[INIT]])
 // CHECK: %[[INNER:.*]] = for %[[IVAR2:.*]] in (%[[ZERO]] to %[[CST4]], step %[[CST1]])

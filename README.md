@@ -190,6 +190,74 @@ not consulted by the compiler libraries or APIs.
 - `--dynamic-dims=<d0,d1,...>` - Runtime values for `?` dimensions
 - `--dynamic-strides=<s0,s1,...>` - Runtime values for `?` strides
 
+### CUDA Tile Optimization Remarks
+
+Enable CUDA Tile optimization remarks to inspect backend instruction selection,
+missed optimization opportunities, and analysis results. TensorIR collects these
+remarks from `tileiras` as LLVM remark YAML:
+
+```bash
+build/bin/tensor_ir-compiler \
+  test/Integration/Compiler/matmul_8x8x8.mlir \
+  --remarks=all --remarks-output-file=remarks.yaml
+```
+
+Remark collection requires a `tileiras` executable that supports the remark
+options and the selected bytecode version. Set `--tileiras-path=/path/to/tileiras`
+to use a specific executable; an invalid explicit path fails without falling
+back to another assembler. Otherwise, TensorIR checks `bin/tileiras` under the
+CUDA toolkit selected by `--cuda-toolkit-path` or, when unset, `CUDA_ROOT`, then
+searches `PATH`.
+
+#### Filters and Output
+
+`--remarks` selects a category: `none` (default), `all`, `memory`, or `tensorcore`.
+Choose a category for an individual remark kind with `--remarks-passed`,
+`--remarks-missed`, `--remarks-failed`, or `--remarks-analysis`. Each defaults to
+`inherit`, which uses the global category; an explicit `none` disables that kind.
+For example:
+
+- `--remarks=all --remarks-passed=none` collects every kind except passed remarks.
+- `--remarks-missed=memory` collects only missed memory remarks with the global
+  default of `none`.
+
+Remarks go to stderr by default. Use `--remarks-output-file=<path>` to write a
+file or `--remarks-output-file=-` for stdout. Setting a destination alone does
+not enable remarks. TensorIR forwards the backend YAML unchanged, including
+backend diagnostic records; backend warnings and errors remain on stderr.
+
+Collecting remarks runs the assembler once, even for a TileIR artifact, and
+preserves the requested artifact kind. Missing or incompatible assemblers,
+assembly failures, and output errors fail compilation.
+
+#### Library APIs
+
+For a parsed MLIR `module`, configure Python compilation with `CompileOptions`:
+
+```python
+from nv_tensor_ir import runtime as rt
+
+options = rt.CompileOptions()
+options.remarks = rt.RemarkCategory.ALL
+options.remarks_output_file = "remarks.yaml"
+artifact = rt.compile(module, options=options)
+remarks_yaml = artifact.get_remarks()
+```
+
+Keyword arguments also accept lowercase category names, for example
+`rt.compile(module, remarks="memory", remarks_missed="none")`. The Python options
+`tileiras_path` and `cuda_toolkit_path` select the assembler and CUDA toolkit.
+In C++, set `CompilerInvocation::optimizationRemarks` using
+`OptimizationRemarkOptions`.
+
+`Artifact.get_remarks()` and the DSL's `CudaTileCompiledKernel.get_remarks()`
+return the captured YAML, or an empty string when no records were captured.
+Artifact copying and serialization preserve the YAML, and artifact equality
+includes it.
+
+Enabling remarks forces DSL compilation to run again, even when a matching
+artifact is cached. The resulting artifact is not added to the cache.
+
 ### Example MLIR Inputs
 
 Static-shape matmul:

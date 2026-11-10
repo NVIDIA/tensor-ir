@@ -28,9 +28,7 @@ enum TensorCoreVersion {
   kMMAv5 = 1 << 5,
 };
 
-/**
- * @brief GPU architecture information.
- */
+/// GPU architecture information.
 struct ArchInfo {
   /// Number of Streaming Multiprocessors (SMs).
   int numSMs = 0;
@@ -44,11 +42,7 @@ struct ArchInfo {
   int tensorCoreVersions;
 };
 
-/**
- * @brief Get the architecture information for a given compute capability.
- * @param cc Compute capability.
- * @param numSMs Number of Streaming Multiprocessors (SMs).
- */
+/// Get the architecture information for a given compute capability.
 ArchInfo getArchInfo(ComputeCapability cc, int numSMs);
 
 } // namespace tiling_analysis

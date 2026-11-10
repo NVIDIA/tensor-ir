@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-# RUN: %PYTHON -m pytest --capture=no -vv %s
+# RUN: %pytest %s
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
 from pathlib import Path
@@ -106,6 +107,7 @@ def test_runtime_all_exports_only_public_api() -> None:
         "Artifact",
         "RuntimeKernel",
         "CudaTileArtifactKind",
+        "RemarkCategory",
         "analyze_module",
         "HostTarget",
         "HostArch",
@@ -156,6 +158,8 @@ def test_make_compile_options_from_kwargs(monkeypatch) -> None:
         bytecode_version=tensor_ir_runtime.BytecodeVersion.compatibility(),
         tile_sizes=(2, 4, 8),
         print_ir_after_all=True,
+        cuda_toolkit_path="/custom/toolkit",
+        tileiras_path="/custom/bin/tileiras",
     )
 
     assert options.compute_capability == 120
@@ -168,6 +172,11 @@ def test_make_compile_options_from_kwargs(monkeypatch) -> None:
     assert options.bytecode_version == tensor_ir_runtime.BytecodeVersion.compatibility()
     assert options.tile_sizes == [2, 4, 8]
     assert options.print_ir_after_all is True
+    assert options.cuda_toolkit_path == "/custom/toolkit"
+    assert options.tileiras_path == "/custom/bin/tileiras"
+    parsed = tensor_ir_runtime.parse_compile_options(str(options))
+    assert parsed.cuda_toolkit_path == options.cuda_toolkit_path
+    assert parsed.tileiras_path == options.tileiras_path
 
 
 def test_make_compile_options_accepts_int_enum_values() -> None:
@@ -226,6 +235,29 @@ def test_make_compile_options_rejects_mixed_options_and_kwargs() -> None:
 
     with pytest.raises(TypeError, match="Pass either options="):
         tensor_ir_runtime._make_compile_options(options, tile_sizes=[8])
+
+
+def test_remark_category_options() -> None:
+    category = tensor_ir_runtime.RemarkCategory
+    options = tensor_ir_runtime.CompileOptions()
+    assert options.remarks == category.NONE
+    for kind in ("passed", "missed", "failed", "analysis"):
+        assert getattr(options, f"remarks_{kind}") == category.INHERIT
+
+    options = tensor_ir_runtime._make_compile_options(
+        remarks="memory", remarks_missed=category.NONE
+    )
+    assert options.remarks == category.MEMORY
+    assert options.remarks_missed == category.NONE
+    assert options.has_remarks()
+    parsed = tensor_ir_runtime.parse_compile_options(str(options))
+    assert parsed.remarks == category.MEMORY
+    assert parsed.remarks_missed == category.NONE
+    assert str(tensor_ir_runtime.CompileOptions.parse(str(parsed))) == str(parsed)
+    for value in ("typo", "MeMoRy", "ALL"):
+        with pytest.raises(ValueError, match="Unknown TensorIR compile option remarks"):
+            tensor_ir_runtime._make_compile_options(remarks=value)
+
 
 
 def test_compile_apis_accept_mlir_module_objects(monkeypatch) -> None:
@@ -289,6 +321,102 @@ module {
   }
 }
 """
+
+
+class _DLPackVersion(ctypes.Structure):
+    _fields_ = [("major", ctypes.c_uint32), ("minor", ctypes.c_uint32)]
+
+
+class _DLDevice(ctypes.Structure):
+    _fields_ = [("device_type", ctypes.c_int32), ("device_id", ctypes.c_int32)]
+
+
+class _DLDataType(ctypes.Structure):
+    _fields_ = [
+        ("code", ctypes.c_uint8),
+        ("bits", ctypes.c_uint8),
+        ("lanes", ctypes.c_uint16),
+    ]
+
+
+class _DLTensor(ctypes.Structure):
+    _fields_ = [
+        ("data", ctypes.c_void_p),
+        ("device", _DLDevice),
+        ("ndim", ctypes.c_int32),
+        ("dtype", _DLDataType),
+        ("shape", ctypes.POINTER(ctypes.c_int64)),
+        ("strides", ctypes.POINTER(ctypes.c_int64)),
+        ("byte_offset", ctypes.c_uint64),
+    ]
+
+
+class _DLManagedTensorVersioned(ctypes.Structure):
+    _fields_ = [
+        ("version", _DLPackVersion),
+        ("manager_ctx", ctypes.c_void_p),
+        ("deleter", ctypes.c_void_p),
+        ("flags", ctypes.c_uint64),
+        ("dl_tensor", _DLTensor),
+    ]
+
+
+class _PaddedFP4Workspace:
+    """Versioned DLPack FP4 producer whose synthetic pointer is never read."""
+
+    def __init__(self, device_id: int):
+        self.shape = (ctypes.c_int64 * 1)(3)
+        self.managed = _DLManagedTensorVersioned(
+            _DLPackVersion(1, 2),
+            None,
+            None,
+            1 << 2,  # DLPACK_FLAG_BITMASK_IS_SUBBYTE_TYPE_PADDED
+            _DLTensor(
+                0x1000,
+                _DLDevice(2, device_id),  # kDLCUDA
+                1,
+                _DLDataType(17, 4, 1),  # kDLFloat4_e2m1fn
+                self.shape,
+                None,
+                0,
+            ),
+        )
+
+    def __dlpack_device__(self):
+        return (2, self.managed.dl_tensor.device.device_id)
+
+    def __dlpack__(self):
+        make_capsule = ctypes.pythonapi.PyCapsule_New
+        make_capsule.restype = ctypes.py_object
+        make_capsule.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+        return make_capsule(ctypes.addressof(self.managed), b"dltensor_versioned", None)
+
+
+def test_workspace_rejects_padded_subbyte_dlpack() -> None:
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device required to load the runtime kernel")
+
+    device_id = torch.cuda.current_device()
+    properties = torch.cuda.get_device_properties(device_id)
+    compute_capability = properties.major * 10 + properties.minor
+    workspace = _PaddedFP4Workspace(device_id)
+
+    with ir.Context() as context, ir.Location.unknown(context):
+        nv_tensor_ir.register_dialect(context, load=True)
+        module = ir.Module.parse(_ARTIFACT_TEST_MODULE)
+        artifact = tensor_ir_runtime.compile(
+            module,
+            tile_sizes=[8],
+            compute_capability=compute_capability,
+            arch_portability=tensor_ir_runtime.ArchPortability.arch_conditional,
+            artifact_kind=tensor_ir_runtime.CudaTileArtifactKind.Cubin,
+        )
+        with artifact.load() as kernel:
+            with pytest.raises(
+                TypeError, match="workspace dtype must be byte-addressable"
+            ):
+                kernel.launch(workspace=workspace)
 
 
 def _install_fake_tileiras(

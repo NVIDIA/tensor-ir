@@ -32,12 +32,18 @@ mlir::nv_tensor_ir::validateBytecodeVersion(ModuleOp parentModule,
     });
     module.walk([&](Operation *op) {
       if (auto exp = dyn_cast<cuda_tile::ExpOp>(op)) {
-        /// Note: cuda_tile::RoundingMode::FULL is the default for ExpOp,
-        /// matching semantics for version <13.3. BytecodeWriter will handle
-        /// targets <13.3 as long as attribute has the default value.
+        // Note: cuda_tile::RoundingMode::FULL is the default for ExpOp,
+        // matching semantics for version <13.3. BytecodeWriter will handle
+        // targets <13.3 as long as attribute has the default value.
         if (exp.getRoundingMode() != cuda_tile::RoundingMode::FULL) {
           minimum = std::max(
               minimum, getMinCudaTileBytecodeVersion<ExpApproxRounding>());
+        }
+      }
+      if (auto neg = dyn_cast<cuda_tile::NegIOp>(op)) {
+        if (neg.getOverflow() != cuda_tile::IntegerOverflow::NONE) {
+          minimum =
+              std::max(minimum, getMinCudaTileBytecodeVersion<NegIOverflow>());
         }
       }
       for (Type type : op->getOperandTypes()) {

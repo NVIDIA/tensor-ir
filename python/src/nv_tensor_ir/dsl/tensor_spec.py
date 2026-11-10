@@ -31,11 +31,13 @@ class TensorSpec:
     alignment: int | None = None
 
     def __post_init__(self) -> None:
-        parsed_shape = _shape_tuple(self.shape)
+        parsed_shape = _int_tuple(self.shape, "shape")
+        if any(dim <= 0 for dim in parsed_shape):
+            raise TypeError("TensorSpec shape dimensions must be positive")
         parsed_stride = (
             _contiguous_stride(parsed_shape)
             if self.stride is None
-            else _stride_tuple(self.stride)
+            else _int_tuple(self.stride, "stride")
         )
         if len(parsed_shape) != len(parsed_stride):
             raise TypeError("TensorSpec shape and stride must have the same rank")
@@ -73,29 +75,15 @@ def _tensor_spec_and_pointer_from_value(
     return TensorSpec(shape, dtype=DataType(dtype), stride=stride), pointer
 
 
-def _shape_tuple(shape: object) -> tuple[int, ...]:
-    if isinstance(shape, str):
-        raise TypeError("TensorSpec shape must be an int sequence, not str")
-    if not isinstance(shape, (list, tuple)):
+def _int_tuple(values: object, field: str) -> tuple[int, ...]:
+    if isinstance(values, str):
+        raise TypeError(f"TensorSpec {field} must be an int sequence, not str")
+    if not isinstance(values, (list, tuple)):
         try:
-            shape = tuple(shape)
+            values = tuple(values)
         except TypeError as exc:
-            raise TypeError("TensorSpec shape must be iterable") from exc
-    parsed = tuple(int(dim) for dim in shape)
-    if any(dim <= 0 for dim in parsed):
-        raise TypeError("TensorSpec shape dimensions must be positive")
-    return parsed
-
-
-def _stride_tuple(stride: object) -> tuple[int, ...]:
-    if isinstance(stride, str):
-        raise TypeError("TensorSpec stride must be an int sequence, not str")
-    if not isinstance(stride, (list, tuple)):
-        try:
-            stride = tuple(stride)
-        except TypeError as exc:
-            raise TypeError("TensorSpec stride must be iterable") from exc
-    return tuple(int(dim) for dim in stride)
+            raise TypeError(f"TensorSpec {field} must be iterable") from exc
+    return tuple(int(dim) for dim in values)
 
 
 def _contiguous_stride(shape: tuple[int, ...]) -> tuple[int, ...]:

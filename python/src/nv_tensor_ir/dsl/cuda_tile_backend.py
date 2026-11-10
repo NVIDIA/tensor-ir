@@ -28,6 +28,7 @@ _DYNAMIC_SHAPE_ALLOWED_NODE_KINDS = {
     NodeKind.SPLAT,
     NodeKind.UNARY,
     NodeKind.BINARY,
+    NodeKind.TERNARY,
     NodeKind.CONVERT,
     NodeKind.CMP,
     NodeKind.MATMUL,
@@ -53,6 +54,7 @@ class CudaTileCompiledKernel(CompiledKernel):
     input_count: int
     output_count: int
     _context: object | None = field(default=None, repr=False)
+    asm: dict = field(default_factory=dict, repr=False)
 
     _runtime_kernel: nv_tensor_ir.RuntimeKernel | None = field(
         default=None, init=False, repr=False
@@ -60,6 +62,10 @@ class CudaTileCompiledKernel(CompiledKernel):
 
     def get_bytecode(self) -> bytes:
         return self.artifact.get_bytecode()
+
+    def get_remarks(self) -> str:
+        """Return the compiled artifact's LLVM remark YAML."""
+        return self.artifact.get_remarks()
 
     def run(
         self, *inputs: object, output: object | tuple[object, ...], stream: int = 0
@@ -265,6 +271,7 @@ def compile_cuda_tile(
     tile_sizes: tuple[int, ...] = (),
     dynamic_shape: bool = False,
     artifact_cache: ArtifactCache | None = None,
+    asm: dict | None = None,
 ) -> CudaTileCompiledKernel:
     """Compile a traced kernel with the CUDA Tile backend."""
     options = _resolve_compile_options(options, tile_sizes)
@@ -276,7 +283,7 @@ def compile_cuda_tile(
                 "layout propagation does not support dynamic matmul"
             )
 
-    if artifact_cache is None:
+    if artifact_cache is None or options.has_remarks():
         program = nv_tensor_ir.compile(module, options=options)
     else:
         cache_key = _calculate_cache_key(module, options=options)
@@ -285,6 +292,8 @@ def compile_cuda_tile(
             program = nv_tensor_ir.compile(module, options=options)
             artifact_cache._put(cache_key, program)
 
+    asm = {} if asm is None else asm
+    asm["ctir"] = program.get_bytecode()
     return CudaTileCompiledKernel(
         program,
         module,
@@ -292,6 +301,7 @@ def compile_cuda_tile(
         len(graph.input_ids),
         len(graph.output_ref_ids),
         context,
+        asm=asm,
     )
 
 

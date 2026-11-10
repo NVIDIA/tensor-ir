@@ -4,9 +4,9 @@
 #ifndef TENSOR_IR_SUPPORT_TCUTEGEN_H_
 #define TENSOR_IR_SUPPORT_TCUTEGEN_H_
 
-// TensorIR-owned facade over cutegen. Public TensorIR headers should include
-// this file instead of cutegen headers directly so cutegen can be replaced in
-// one place later.
+/// TensorIR-owned facade over cutegen. Public TensorIR headers should include
+/// this file instead of cutegen headers directly so cutegen can be replaced in
+/// one place later.
 
 #include "mlir/Support/LLVM.h"
 
@@ -68,42 +68,42 @@ class IndexedReference;
 template <typename T>
 using MutableIndexedIterator = SequenceIterator<T, true>;
 
-// Represents a single dimension of a shape or stride. Can be either a static
-// integer or a dynamic DimValue, with divisibility and integer width metadata.
+/// Represents a single dimension of a shape or stride. Can be either a static
+/// integer or a dynamic DimValue, with divisibility and integer width metadata.
 class DimValue {
 public:
-  // Creates a static DimValue. Value must be non-negative. Invalid input
-  // creates an error DimValue.
+  /// Creates a static DimValue. Value must be non-negative. Invalid input
+  /// creates an error DimValue.
   static DimValue getStatic(int64_t value);
 
-  // Creates a dynamic DimValue. Divisibility must be positive and width must be
-  // a cutegen-supported integer width; Invalid input creates an error DimValue.
+  /// Creates a dynamic DimValue. Divisibility must be positive and width must be
+  /// a cutegen-supported integer width; Invalid input creates an error DimValue.
   static DimValue getDynamic(int64_t divisibility, int32_t width = 32);
 
-  // Creates an error DimValue.
+  /// Creates an error DimValue.
   explicit DimValue(CgErrorT);
 
-  // This method is composable with cutegen's string representation of dim
-  // values.
+  /// This method is composable with cutegen's string representation of dim
+  /// values.
   std::string toString() const;
 
-  // This method is composable with cutegen's string representation of dim
-  // values. If the input string is invalid, std::nullopt is returned.
+  /// This method is composable with cutegen's string representation of dim
+  /// values. If the input string is invalid, std::nullopt is returned.
   static std::optional<DimValue> fromString(mlir::StringRef str);
 
-  // Returns true if the dimension is static.
+  /// Returns true if the dimension is static.
   bool isStatic() const;
 
-  // Cutegen API to ensure portability with cutegen.
-  // Returns the static dimension value. Dynamic dimensions cause a crash.
+  /// Cutegen API to ensure portability with cutegen.
+  /// Returns the static dimension value. Dynamic dimensions cause a crash.
   std::int64_t as_int() const;
 
-  // Returns divisibility metadata matching cutegen: dynamic dimensions return
-  // their encoded divisibility; static dimensions return abs(value), stored at
-  // construction time by getStatic().
+  /// Returns divisibility metadata matching cutegen: dynamic dimensions return
+  /// their encoded divisibility; static dimensions return abs(value), stored at
+  /// construction time by getStatic().
   int64_t getDivisibility() const;
 
-  // Equality operators.
+  /// Equality operators.
   friend bool operator==(const DimValue &lhs, const DimValue &rhs);
   friend bool operator!=(const DimValue &lhs, const DimValue &rhs);
   friend bool operator==(const DimValue &lhs, int64_t rhs);
@@ -121,7 +121,7 @@ private:
   bool has_error_ = false;
 };
 
-// Recursive sequence of DimValues used to represent nested shape/stride modes.
+/// Recursive sequence of DimValues used to represent nested shape/stride modes.
 class RecursiveDimValue {
 public:
   explicit RecursiveDimValue(DimValue value);
@@ -134,14 +134,14 @@ public:
   std::string toString() const;
   size_t rank() const { return isLeaf() ? 1 : values.size(); }
 
-  // Returns true if this scalar or recursive dimension value is fully static.
+  /// Returns true if this scalar or recursive dimension value is fully static.
   bool isStatic() const;
 
-  // Cutegen-like scalar APIs. Recursive values cause a crash.
+  /// Cutegen-like scalar APIs. Recursive values cause a crash.
   std::int64_t as_int() const;
   int64_t getDivisibility() const;
 
-  // Equality operators.
+  /// Equality operators.
   friend bool operator==(const RecursiveDimValue &lhs,
                          const RecursiveDimValue &rhs);
   friend bool operator!=(const RecursiveDimValue &lhs,
@@ -336,56 +336,56 @@ class Layout {
 public:
   using const_iterator = detail::IndexedIterator<Layout>;
 
-  // Creates an empty layout. Append layouts to build a non-empty layout.
+  /// Creates an empty layout. Append layouts to build a non-empty layout.
   Layout();
 
-  // Constructs a compact logical layout for \p shape. The last dimension is
-  // contiguous.
+  /// Constructs a compact logical layout for \p shape. The last dimension is
+  /// contiguous.
   Layout(Shape shape);
 
-  // Shape and stride must be congruent. Invalid or non-congruent inputs create
-  // an error layout; callers can check this with has_error().
+  /// Shape and stride must be congruent. Invalid or non-congruent inputs create
+  /// an error layout; callers can check this with has_error().
   Layout(Shape shape, Stride stride);
 
   Layout(int64_t shape, int64_t stride);
 
-  // Creates an error layout.
+  /// Creates an error layout.
   explicit Layout(CgErrorT);
 
-  // This method is composable with cutegen's string representation of layouts.
+  /// This method is composable with cutegen's string representation of layouts.
   std::string toString() const;
 
-  // This method is composable with cutegen's string representation of layouts.
-  // If the input string is invalid, std::nullopt is returned.
+  /// This method is composable with cutegen's string representation of layouts.
+  /// If the input string is invalid, std::nullopt is returned.
   static std::optional<Layout> fromString(mlir::StringRef str);
 
-  // Gets the shape of the layout.
+  /// Gets the shape of the layout.
   const Shape &shape() const { return shapeValue; }
 
-  // Gets the stride of the layout.
+  /// Gets the stride of the layout.
   const Stride &stride() const { return strideValue; }
 
-  // Computes the linear layout offset for a coordinate congruent with this
-  // layout's shape.
+  /// Computes the linear layout offset for a coordinate congruent with this
+  /// layout's shape.
   detail::DimValue operator()(const Coord &coord) const;
 
-  // Gets a sub-layout at the given index. Scalar sub-layouts remain scalar.
+  /// Gets a sub-layout at the given index. Scalar sub-layouts remain scalar.
   Layout get(size_t index) const;
 
-  // Append a nested layout mode.
+  /// Append a nested layout mode.
   void append(Layout other);
 
-  // Iterate over sub-layouts in storage order.
+  /// Iterate over sub-layouts in storage order.
   const_iterator begin() const;
   const_iterator end() const;
   const_iterator cbegin() const { return begin(); }
   const_iterator cend() const { return end(); }
 
-  // Returns true if this layout was constructed with non-congruent shape and
-  // stride inputs.
+  /// Returns true if this layout was constructed with non-congruent shape and
+  /// stride inputs.
   bool has_error() const { return has_error_; }
 
-  // Equality operators.
+  /// Equality operators.
   friend bool operator==(const Layout &lhs, const Layout &rhs);
   friend bool operator!=(const Layout &lhs, const Layout &rhs);
 
@@ -399,8 +399,8 @@ private:
   bool has_error_ = false;
 };
 
-// Custom definitions of functions to be used with Shape, Stride and Layout
-// defined above.
+/// Custom definitions of functions to be used with Shape, Stride and Layout
+/// defined above.
 size_t depth(const Layout &layout);
 size_t depth(const detail::RecursiveDimValue &value);
 int64_t get_divisibility(const detail::DimValue &dim);

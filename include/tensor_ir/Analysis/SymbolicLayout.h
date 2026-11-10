@@ -4,7 +4,6 @@
 /// `SymbolicLayout` models multidimensional affine index mappings using
 /// `PolyExpr` extents and strides, converting coordinate tuples into linear
 /// offsets:
-///
 ///     layout(c) = sum_d apply(dim_d, c_d)
 ///
 /// Dimensions adhere to a row-major convention (last axis varies fastest),

@@ -1,13 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===- Passes.td - TensorIR transformation passes --------*- tablegen -*-===//
+/// TensorIR transformation passes
 
 #ifndef TENSOR_IR_TRANSFORM_PASSES
 #define TENSOR_IR_TRANSFORM_PASSES
 
 include "mlir/Pass/PassBase.td"
 
+def EraseShapeAssumptionsPass : Pass<"tir-erase-shape-assumptions"> {
+  let summary = "Erase TensorIR shape assumptions";
+  let description = [{
+    Erases `nv_tensor_ir.assume_shape` operations after analyses have consumed
+    their promises, then removes trivially dead operations. Leaves the IR
+    unchanged when no shape assumptions are present.
+  }];
+}
 
 def MaterializeDefaultStridesPass : Pass<"materialize-default-strides", "nv_tensor_ir::GraphOp"> {
   let summary = "Attach row-major stride attributes to graph args/results that lack them";

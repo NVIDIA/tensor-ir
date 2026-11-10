@@ -1,16 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===- OutlineKernel.cpp - Outline tiled TensorIR kernels ------------------===//
-//
-// The tiled-program formation pipeline uses a mapped scf.forall as its
-// inspectable launch model. This pass separates that model into host and device
-// IR. The retained host wrapper replaces the forall with gpu.launch_func. The
-// destination-passing device entry point is nested in a gpu.module, reads its
-// launch coordinates through standard GPU operations, and contains the
-// original per-tile computation.
-//
-//===----------------------------------------------------------------------===//
+/// The tiled-program formation pipeline uses a mapped scf.forall as its
+/// inspectable launch model. This pass separates that model into host and device
+/// IR. The retained host wrapper replaces the forall with gpu.launch_func. The
+/// destination-passing device entry point is nested in a gpu.module, reads its
+/// launch coordinates through standard GPU operations, and contains the
+/// original per-tile computation.
 
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Transform/Passes.h"

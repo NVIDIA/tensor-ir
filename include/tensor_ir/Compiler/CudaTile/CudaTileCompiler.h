@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// CudaTileCompiler - Compiler backend for CudaTile
+/// CudaTileCompiler - Compiler backend for CudaTile
 
 #ifndef TENSOR_IR_COMPILER_CUDATILECOMPILER_H
 #define TENSOR_IR_COMPILER_CUDATILECOMPILER_H
@@ -32,10 +32,7 @@ struct TileCandidate {
 
 namespace mlir::nv_tensor_ir::backend::cuda_tile {
 
-//===----------------------------------------------------------------------===//
-// CudaTileCompiler - Compiles TensorIR MLIR to CudaTile artifacts
-//===----------------------------------------------------------------------===//
-
+/// CudaTileCompiler - Compiles TensorIR MLIR to CudaTile artifacts
 class CudaTileCompiler : public ICompiler {
 public:
   CudaTileCompiler() = default;
@@ -43,8 +40,8 @@ public:
   StatusOr<std::unique_ptr<::tensor_ir::rt::TensorIRArtifact>>
   compile(mlir::ModuleOp module, const CompilerInvocation &options) override;
 
-  // XLA integration contract: keep this lightweight and coordinate before
-  // changing the signature or semantics.
+  /// XLA integration contract: keep this lightweight and coordinate before
+  /// changing the signature or semantics.
   bool canCompile(mlir::ModuleOp module,
                   const CompilerInvocation &options) const override;
 

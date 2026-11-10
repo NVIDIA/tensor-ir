@@ -1,16 +1,16 @@
 # Source revisions used by the standalone TensorIR build.
 #
-# Update the CUDA Tile and LLVM revisions together. The LLVM revision must match
-# the compatibility pin for the selected CUDA Tile revision.
+# Validate the CUDA Tile and LLVM revisions together with the standalone build
+# and test suite. LLVM must provide FP8 cast expansion for CPU execution.
 
-# CUDA Tile v13.4.0 and its cmake/IncludeLLVM.cmake compatibility pin.
+# CUDA Tile and its LLVM compatibility pin.
 set(TENSOR_IR_PINNED_CUDA_TILE_COMMIT
-    "7e8e2e68fa219716103824c01f7303367cf7df8d")
+    "e11729ed4e228af005dc8cc113d7b84157e9d654")
 set(TENSOR_IR_PINNED_CUDA_TILE_ARCHIVE_SHA256
-    "2398f88dd0dbcda3732934c8527485c3941d3a6453c98b6c249461e6309ea44c")
-set(TENSOR_IR_PINNED_LLVM_COMMIT "9ebb067a8a2b4b0705f06d59c77d36dfab98333f")
+    "56c03d732ac5f23e0ae9c0c184ff65aa282c24bd30a1bde723457f8e986e855e")
+set(TENSOR_IR_PINNED_LLVM_COMMIT "80017ba18d8c8866713586fa19245f0878b4f8a2")
 set(TENSOR_IR_PINNED_LLVM_ARCHIVE_SHA256
-    "84f6624d9f6a32e180d7cb3b91d9e47b3f51da7f1f79ef216614dbff8b928145"
+    "d3d6ae9c477c47a8efaf17d76419cd80d06eb53c8bf6d65ac46054be3551aed9"
     CACHE STRING "LLVM source archive SHA256")
 
 # DLPack is independent of the CUDA Tile and LLVM compatibility pair.

@@ -4,10 +4,12 @@
 #include "tensor_ir/Runtime/CudaTile/CudaTileRuntimeKernel.h"
 
 #include "tensor_ir/Artifact/TensorIRArtifactCodec.h"
-#include "tensor_ir/Compiler/CudaTile/TileIRAssembly.h"
 #include "tensor_ir/Support/CudaApi.h"
+#include "tensor_ir/Support/TileIRAssembly.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include "NativeHostModule.h"
 #include <array>
@@ -71,9 +73,10 @@ CudaTileRuntimeKernel::create(std::unique_ptr<TensorIRArtifact> artifact) {
             return Status::NotSupported(
                 "unrecognized CUDA device compute capability");
           }
-          TIR_ASSIGN_OR_RETURN(
-              auto cubin,
-              assembleTileIRToCubin(bytecode, *deviceTarget, bytecodeVersion));
+          TIR_ASSIGN_OR_RETURN(auto cubin,
+                               assembleTileIRToCubin(bytecode, *deviceTarget,
+                                                     bytecodeVersion, {},
+                                                     llvm::nulls()));
           if (!cubin) {
             return Status::NotSupported("no compatible TileIR assembler");
           }
@@ -212,6 +215,9 @@ namespace {
 Status launchCudaKernel(CUkernel kernel, Stream stream,
                         const TensorIRLaunchConfigV1 &launch, void **params,
                         bool usesPDL) {
+  if (llvm::is_contained(launch.grid, 0)) {
+    return Status::Ok();
+  }
   CUlaunchConfig config = {};
   config.gridDimX = launch.grid[0];
   config.gridDimY = launch.grid[1];
@@ -290,6 +296,31 @@ Status CudaTileRuntimeKernel::launch(PackedArgs args, Workspace workspace,
     return Status::Ok();
   }
 
+  const auto &metadata = artifact_->getLaunchMetadata();
+  if (args.size() < 0 ||
+      static_cast<size_t>(args.size()) != metadata.args.size()) {
+    return Status::InvalidArgument("Kernel argument count mismatch");
+  }
+  for (auto [index, desc] : llvm::enumerate(metadata.args)) {
+    const auto *tensor = std::get_if<TensorArgDesc>(&desc);
+    const Any *arg = args[index];
+    if (!tensor || arg->typeIndex == TypeIndex::kPointer) {
+      continue;
+    }
+    if (arg->typeIndex != TypeIndex::kTensor) {
+      return Status::InvalidArgument("Kernel tensor argument type mismatch");
+    }
+    const TensorView &view = arg->tensorView;
+    if (view.ndim != tensor->rank() || (view.ndim && !view.shape)) {
+      return Status::InvalidArgument("Kernel tensor rank mismatch");
+    }
+    if (llvm::any_of(llvm::ArrayRef(view.shape, view.ndim),
+                     [](int64_t extent) { return extent < 0; })) {
+      return Status::InvalidArgument(
+          "Kernel tensor extents must not be negative");
+    }
+  }
+
   if (activeDeviceCode().empty()) {
     return Status::NotSupported("No device code available");
   }
@@ -298,8 +329,6 @@ Status CudaTileRuntimeKernel::launch(PackedArgs args, Workspace workspace,
     return Status::InvalidArgument(
         "CudaTileRuntimeKernel: gridComputer not set");
   }
-
-  // Wrap OSS PackedArgs in the generic accessor.
   RuntimeOperandAccessor acc{args};
 
   // Pack arguments according to the compiled signature.
@@ -310,8 +339,7 @@ Status CudaTileRuntimeKernel::launch(PackedArgs args, Workspace workspace,
     return Status::InvalidArgument("Failed to pack kernel arguments");
   }
 
-  // Compute grid via strategy.
-  ::tensor_ir::rt::GridDims grid = gridComputer_->computeGrid(acc);
+  GridDims grid = gridComputer_->computeGrid(acc);
 
   // Build the pointer-to-arg array required by cuLaunchKernelEx.
   llvm::SmallVector<void *, kMaxInlineKernelArgs> kernelParams(numArgs);

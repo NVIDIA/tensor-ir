@@ -323,7 +323,8 @@ IterationSpaceValues getIterationSpaceValues(ValueRange initial) {
     if (result.insert(current).second) {
       if (Operation *op = current.getDefiningOp()) {
         // Stop at iteration space boundary.
-        if (isa<ConcatenateOp, ReduceOp, ReduceUDOp, MatmulOp>(op)) {
+        auto domain = dyn_cast<IterationDomainOpInterface>(op);
+        if (isa<ConcatenateOp>(op) || (domain && domain.hasReductionLoops())) {
           continue;
         }
         for (auto operand : op->getOperands()) {
@@ -712,7 +713,7 @@ public:
   LogicalResult processReduction(ReductionSourceAttr reduction) override;
   LogicalResult processMatmul(MatmulSourceAttr matmul) override;
 
-  // Must be called only after processing a layout.
+  /// Must be called only after processing a layout.
   TilingEvaluation getResult() const { return evals.back(); }
 
 private:
@@ -1236,6 +1237,16 @@ FailureOr<TilingEvaluator> TilingEvaluator::create(GraphOp graph,
     }
   }
 
+  // Get the dimensions that every tile must cover (multi-output graphs).
+  MLIR_ASSIGN_OR_RETURN(
+      auto fixedTileSizes,
+      deriveResultFixedTileSizes(normalization.resultViews, graph));
+  if (!fixedTileSizes.empty() &&
+      fixedTileSizes.size() != inputLayout.getShape().size()) {
+    return graph.emitError(
+        "Result view rank does not match the iteration space rank");
+  }
+
   // Find pivots (connect layouts to operations).
   auto pivots = findPivots(graph, propagation, normalization);
   if (failed(pivots)) {
@@ -1282,7 +1293,8 @@ FailureOr<TilingEvaluator> TilingEvaluator::create(GraphOp graph,
 
   // Create the tiling evaluator.
   return TilingEvaluator(graph, archInfo, inputLayout, outputLayout,
-                         std::move(*pivots), std::move(liveSizes));
+                         std::move(fixedTileSizes), std::move(*pivots),
+                         std::move(liveSizes));
 }
 
 FailureOr<TilingEvaluation>

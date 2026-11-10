@@ -240,7 +240,8 @@ deriveResultFixedTileSizes(ArrayRef<TensorSourceAttr> views,
               << " is not yet supported for multi-output layout propagation";
           return failure();
         }
-        result[dim] = carrierShape[dim];
+        result[dim] =
+            llvm::PowerOf2Ceil(static_cast<uint64_t>(carrierShape[dim]));
       }
     }
   }

@@ -4,8 +4,8 @@
 #ifndef TENSORIR_DIALECT_CODEGENOPS_TD
 #define TENSORIR_DIALECT_CODEGENOPS_TD
 
-// This file is included from TensorOps.td after the TensorIR operation base,
-// types, and attributes are defined.
+/// This file is included from TensorOps.td after the TensorIR operation base,
+/// types, and attributes are defined.
 include "mlir/IR/CommonTypeConstraints.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
@@ -13,7 +13,7 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 // Tiled-memory operations
 //===----------------------------------------------------------------------===//
 
-// The memref describes the complete logical view, independently of tile shape.
+/// The memref describes the complete logical view, independently of tile shape.
 class TensorIR_TiledMemoryOp<string mnemonic, list<Trait> traits = []>
     : TensorIR_Op<mnemonic, traits> {
   let extraClassDeclaration = [{
@@ -51,7 +51,8 @@ def TensorIR_LoadOp : TensorIR_TiledMemoryOp<"load"> {
   let results = (outs TensorIR_TensorType:$tile);
   let assemblyFormat = [{
     $view `tile_indices` custom<DynamicIndexList>($indices, $static_indices)
-    `,` `alignment` $alignment (`,` `padding` $padding^)? attr-dict
+    `,` `alignment` $alignment (`,` `padding` $padding^)?
+    (`allow_tma` $allow_tma^)? attr-dict
     `:` type($view) `to` type($tile)
   }];
   let builders = [OpBuilder<(ins "Type":$tile, "Value":$view,
@@ -65,7 +66,7 @@ def TensorIR_StoreOp : TensorIR_TiledMemoryOp<"store"> {
     Stores a tile using the same coordinate, address, alignment, and bounds
     semantics as `nv_tensor_ir.load`. The view and tile have the same rank and
     element type. Out-of-bounds elements do not write memory. No ordering
-    is specified between writes to overlapping addresses. `allow_tma = false`
+    is specified between writes to overlapping addresses. `allow_tma false`
     forbids TMA without changing access semantics.
   }];
   let arguments = (ins TensorIR_TensorType:$tile,
@@ -76,12 +77,34 @@ def TensorIR_StoreOp : TensorIR_TiledMemoryOp<"store"> {
                        DefaultValuedAttr<BoolAttr, "true">:$allow_tma);
   let assemblyFormat = [{
     $tile `,` $view `tile_indices` custom<DynamicIndexList>($indices, $static_indices)
-    `,` `alignment` $alignment attr-dict
+    `,` `alignment` $alignment (`allow_tma` $allow_tma^)? attr-dict
     `:` type($tile) `,` type($view)
   }];
   let builders = [OpBuilder<(ins "Value":$tile, "Value":$view,
       "ArrayRef<OpFoldResult>":$indices, "IntegerAttr":$alignment,
       "bool":$allowTma)>];
+}
+
+//===----------------------------------------------------------------------===//
+// Contraction tiling metadata
+//===----------------------------------------------------------------------===//
+
+def TensorIR_TrmmTileInfoOp : TensorIR_Op<"trmm_tile_info", [
+    Pure, AllTypesMatch<["input", "result"]>
+  ]> {
+  let summary = "Global non-contracting bounds of a triangular matmul operand tile";
+  let description = [{
+    Identity on `input`. Grid formation attaches the global offset and bounding
+    span of M for the LHS or N for the RHS, allowing reduction tiling to skip
+    zero triangular K tiles.
+    This operation is consumed by reduction tiling, before backend conversion.
+  }];
+  let arguments = (ins TensorIR_TensorType:$input, Index:$offset,
+                        ConfinedAttr<I64Attr, [IntPositive]>:$span);
+  let results = (outs TensorIR_TensorType:$result);
+  let assemblyFormat = [{
+    $input `offset` `(` $offset `)` `span` `(` $span `)` attr-dict `:` type($input)
+  }];
 }
 
 #endif // TENSORIR_DIALECT_CODEGENOPS_TD

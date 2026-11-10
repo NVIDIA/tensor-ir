@@ -1,16 +1,84 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===- TensorInterfaces.td - Tensor IR Op Interfaces ------*- tablegen -*-===//
-//
-// This file defines the operation interfaces for the Tensor IR dialect.
-//
-//===----------------------------------------------------------------------===//
+/// This file defines the operation interfaces for the Tensor IR dialect.
 
 #ifndef TENSOR_IR_DIALECT_TENSOR_INTERFACES_TD
 #define TENSOR_IR_DIALECT_TENSOR_INTERFACES_TD
 
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/IndexingMapOpInterface.td"
+
+def IterationDomainOpInterface
+    : OpInterface<"IterationDomainOpInterface", [IndexingMapOpInterface]> {
+  let cppNamespace = "::mlir::nv_tensor_ir";
+  let description = [{
+    Describe an operation's implicit parallel and reduction loops independently
+    of memory layout, without requiring destination operands or a region body.
+    Operand shapes and the inherited `IndexingMapOpInterface` maps define loop
+    ranges. Its loops-to-shapes and shapes-to-loops maps support loop-bound
+    inference, tiling, fusion, and lowering to Linalg or explicit loops.
+
+    Operand maps are in operand order; `getResultIndexingMaps` returns maps in
+    result order. `getIterationDomainMaps` concatenates both lists. Each map
+    result is a loop dimension or constant `0` for a static unit axis. An
+    operand broadcasts along parallel loops absent from its map. Reduction
+    loops are absent from result maps, or map to `0` for retained unit axes.
+
+    For example, `matmul` over `(m, n, k)` has iterator types
+    `["parallel", "parallel", "reduction"]`, operand indexing maps
+    `(m, n, k) -> (m, k)` and `(m, n, k) -> (k, n)`, and result indexing map
+    `(m, n, k) -> (m, n)`.
+  }];
+
+  // Keep interface methods vertically aligned with the established style in
+  // this file. clang-format otherwise collapses the method list.
+  // clang-format off
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/"Return the iterator type of each loop.",
+      /*retTy=*/"::llvm::SmallVector<::mlir::utils::IteratorType>",
+      /*methodName=*/"getLoopIteratorTypes"
+    >,
+    InterfaceMethod<
+      /*desc=*/"Return the indexing map of each result, in result order.",
+      /*retTy=*/"::llvm::SmallVector<::mlir::AffineMap>",
+      /*methodName=*/"getResultIndexingMaps"
+    >,
+  ];
+  // clang-format on
+  let extraSharedClassDeclaration = [{
+    /// Return operand indexing maps followed by result indexing maps.
+    ::llvm::SmallVector<::mlir::AffineMap> getIterationDomainMaps() {
+      auto maps = $_op.getIndexingMapsArray();
+      ::llvm::append_range(maps, $_op.getResultIndexingMaps());
+      return maps;
+    }
+
+    /// Return the domain dimensions with reduction iterators, in loop order.
+    ::llvm::SmallVector<int64_t> getReductionDims() {
+      ::llvm::SmallVector<int64_t> dimensions;
+      for (auto [dimension, iterator] :
+           ::llvm::enumerate($_op.getLoopIteratorTypes())) {
+        if (iterator == ::mlir::utils::IteratorType::reduction)
+          dimensions.push_back(dimension);
+      }
+      return dimensions;
+    }
+
+    /// Return whether any loop has a reduction iterator.
+    bool hasReductionLoops() {
+      return ::llvm::is_contained($_op.getLoopIteratorTypes(),
+                                 ::mlir::utils::IteratorType::reduction);
+    }
+
+    /// Operand shapes used by the inherited indexing-map loop range queries.
+    ::llvm::ArrayRef<int64_t> getShape(::mlir::OpOperand *operand) {
+      return ::mlir::cast<::mlir::RankedTensorType>(operand->get().getType())
+          .getShape();
+    }
+  }];
+}
 
 def DynamicDimsOpInterface : OpInterface<"DynamicDimsOpInterface"> {
   let cppNamespace = "::mlir::nv_tensor_ir";
@@ -44,6 +112,8 @@ def DynamicDimsOpInterface : OpInterface<"DynamicDimsOpInterface"> {
         if (operand.getOwner() != $_op.getOperation())
           return false;
         auto dynamicDims = getDynamicDims();
+        if (dynamicDims.empty())
+          return false;
         unsigned operandNumber = operand.getOperandNumber();
         unsigned begin = dynamicDims.getBeginOperandIndex();
         return operandNumber >= begin &&

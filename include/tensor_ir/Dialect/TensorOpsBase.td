@@ -19,8 +19,7 @@ include "mlir/IR/OpAsmInterface.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/RegionKindInterface.td"
 
-// Common TensorIR operation bases.
-
+/// Common TensorIR operation bases.
 class TensorIR_Op<string mnemonic, list<Trait> traits = []>
     : Op<TensorIR_Dialect, mnemonic, traits> {}
 
@@ -46,11 +45,12 @@ class TensorIR_PureTensorOpBase<string mnemonic, list<Trait> traits = []>
   }];
 }
 
-// Elementwise operations on ranked tensor operands and results.
+/// Elementwise operations on ranked tensor operands and results.
 class TensorIR_PointWiseOpBase<string mnemonic, list<Trait> traits = []>
     : TensorIR_PureTensorOpBase<mnemonic, !listconcat([Elementwise], traits)>;
 
-class TensorIR_PointWiseOpUnary<string mnemonic, list<Trait> traits = []>
+class TensorIR_PointWiseOpUnary<string mnemonic, list<Trait> traits = [],
+                                  Type inputType = TensorIR_TensorType>
     : TensorIR_PointWiseOpBase<
           mnemonic,
           !listconcat([SameOperandsAndResultType, ElementwiseMappable], traits)> {
@@ -66,7 +66,7 @@ class TensorIR_PointWiseOpUnary<string mnemonic, list<Trait> traits = []>
     - NaN propagation, infinity handling?
   }];
   let arguments = (ins
-    Arg<TensorIR_TensorType, "Input tensor of the operation">:$input
+    Arg<inputType, "Input tensor of the operation">:$input
   );
   let assemblyFormat = "$input attr-dict `:` type($output)";
 }
@@ -89,6 +89,19 @@ class TensorIR_PointWiseOpBinary<string mnemonic, list<Trait> traits = []>
   let arguments = (ins
     Arg<TensorIR_TensorType, "Left-hand side tensor of the operation">:$lhs,
     Arg<TensorIR_TensorType, "Right-hand side tensor of the operation">:$rhs
+  );
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($output)";
+}
+
+// Base class for integer-only binary pointwise operations.
+class TensorIR_PointWiseIntegerOpBinary<string mnemonic,
+                                        list<Trait> traits = []> :
+    TensorIR_PointWiseOpBase<mnemonic,
+        !listconcat([SameOperandsAndResultType, ElementwiseMappable], traits)> {
+  let summary = "Perform " # mnemonic # " pointwise on integer tensors";
+  let arguments = (ins
+    Arg<TensorIR_IntOrBoolTensor, "Left-hand side integer tensor">:$lhs,
+    Arg<TensorIR_IntOrBoolTensor, "Right-hand side integer tensor">:$rhs
   );
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($output)";
 }
@@ -133,31 +146,6 @@ class TensorIR_ActivationBwdWithBetaOp<
   let assemblyFormat =
       " `<` `beta` `=` $beta `>` $x `,` $dL_by_dy attr-dict `:` "
       "type($output) ";
-}
-
-class TensorIR_PointWiseOpBoolean<string mnemonic, list<Trait> traits = []>
-    : TensorIR_PointWiseOpBase<
-          mnemonic,
-          !listconcat(traits, [
-            SameTypeOperands,
-            TypesMatchWith<
-                "result type has i1 element type and same shape as operands",
-                "lhs", "output", "::llvm::cast<RankedTensorType>($_self).clone("
-                "::mlir::IntegerType::get($_self.getContext(), 1))">
-          ])> {
-  let summary = "Compare two tensors using the boolean operator " # mnemonic;
-  let description = [{
-    This operation takes two tensors of the same shape and returns a new
-    boolean tensor of the same shape as the inputs.
-  }];
-  let arguments = (ins
-    TensorIR_TensorType:$lhs,
-    TensorIR_TensorType:$rhs
-  );
-  let results = (outs
-    TensorIR_BoolTensor:$output
-  );
-  let assemblyFormat = "$lhs `` `,` $rhs attr-dict `:` type($lhs)";
 }
 
 #endif // TENSORIR_DIALECT_TENSOROPSBASE_TD

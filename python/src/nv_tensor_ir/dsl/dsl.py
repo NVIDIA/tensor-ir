@@ -8,14 +8,17 @@ import inspect
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from copy import deepcopy
 
 from .dtypes import DataType
 from .module_builder import TensorInfoOverrides, build_mlir_module
 from .profile import ProfileResult, ProfilingConfig, profile_launches
 from .tensor_spec import _tensor_spec_and_pointer_from_value
 from .tracing import TensorInfo, TraceGraph, _trace_graph_context
+from .utils import get_raw_func_locations
 
 from nv_tensor_ir._mlir.dialects import nv_tensor_ir
+
 
 CompileOptions = nv_tensor_ir.CompileOptions
 CodegenStrategy = nv_tensor_ir.CodegenStrategy
@@ -31,22 +34,27 @@ class ArtifactCache:
     """
 
     def __init__(self) -> None:
-        self._artifacts: dict[str, nv_tensor_ir.Artifact] = {}
+        # Backends own their entries and must retain any native dependencies.
+        self._artifacts: dict[str, object] = {}
 
     def flush(self) -> None:
         """Remove all cached artifacts without invalidating returned artifacts."""
         self._artifacts.clear()
 
-    def _get(self, key: str) -> nv_tensor_ir.Artifact | None:
+    def _get(self, key: str) -> object | None:
         program = self._artifacts.get(key)
         return copy.copy(program) if program is not None else None
 
-    def _put(self, key: str, program: nv_tensor_ir.Artifact) -> None:
+    def _put(self, key: str, program: object) -> None:
         self._artifacts[key] = copy.copy(program)
 
 
 class CompiledKernel:
     """Common execution interface returned by TensorIR DSL backends."""
+
+    # Intermediate representations captured at compile time, keyed by stage
+    # ('graph', 'tir', 'ctir'). Subclasses must define it as an instance field.
+    asm: dict
 
     def run(
         self,
@@ -137,7 +145,8 @@ def _trace(
 ) -> TraceGraph:
     raw_func = _unwrap(kernel_func.func)
     signature = inspect.signature(raw_func, eval_str=True)
-    graph = TraceGraph()
+    src_file, begin_loc, end_loc = get_raw_func_locations(raw_func)
+    graph = TraceGraph(src_file, begin_loc, end_loc)
     _register_output_refs(graph, output)
     traced_args = []
     input_index = 0
@@ -227,6 +236,7 @@ def compile_traced(
         raise TypeError("tir.compile_traced expects a graph returned by tir.trace")
     if artifact_cache is not None and not isinstance(artifact_cache, ArtifactCache):
         raise TypeError("artifact_cache must be a ArtifactCache or None")
+    asm = {"graph": deepcopy(graph)}
     backend_impl = _get_backend_impl(backend)
     tensor_info_overrides = backend_impl.prepare_tensor_infos(
         graph,
@@ -238,7 +248,10 @@ def compile_traced(
         name,
         tensor_info_overrides=tensor_info_overrides,
     )
-    return backend_impl.compile(
+    with context:
+        module_snapshot = module.operation.clone()
+    asm["tir"] = module_snapshot
+    compiled_kernel = backend_impl.compile(
         module,
         context,
         graph,
@@ -246,7 +259,9 @@ def compile_traced(
         tile_sizes=tile_sizes,
         dynamic_shape=dynamic_shape,
         artifact_cache=artifact_cache,
+        asm=asm,
     )
+    return compiled_kernel
 
 
 def compile(

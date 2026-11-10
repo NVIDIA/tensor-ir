@@ -1,12 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===- DiscoverIterationSpaceInfo.cpp - Discover Iteration Space ---------===//
-//
-// Implementation of the transformation pass that discovers iteration space
-// structure for TensorIR operations and attaches iteration space attributes.
-//
-//===----------------------------------------------------------------------===//
+/// Implementation of the transformation pass that discovers iteration space
+/// structure for TensorIR operations and attaches iteration space attributes.
 
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Transform/Passes.h"
@@ -588,6 +584,9 @@ bool IterationSpaceDiscoverer::propagateBackwards() {
       }
 
       auto inputMap = iterSpaceOp.inferInputFromOutputIterSpaceMap(i);
+      if (!inputMap) {
+        continue;
+      }
       propagateMapToValue(inputMap, operand);
       changed = true;
 

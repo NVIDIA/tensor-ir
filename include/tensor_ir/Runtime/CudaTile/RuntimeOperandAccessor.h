@@ -1,22 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===----------------------------------------------------------------------===//
-// RuntimeOperandAccessor — thin adapter for PackedArgs / TensorView
-//
-// Implements the OperandAccessor concept expected by the templated
-// ArgumentPacker / GridSizeComputer:
-//
-//   int32_t  size()               const;
-//   void*    pointer(int32_t i)   const;
-//   int64_t  shape(int32_t i, int32_t d)   const;
-//   int64_t  stride(int32_t i, int32_t d)  const;
-//   bool     hasShape(int32_t i)  const;
-//   bool     isDense(int32_t i)   const;
-//   bool     isScalar(int32_t i)  const;
-//   int32_t  scalarSizeInBytes(int32_t i) const;
-//
-//===----------------------------------------------------------------------===//
+/// RuntimeOperandAccessor — thin adapter for PackedArgs / TensorView
+///
+/// Implements the OperandAccessor concept expected by the templated
+/// ArgumentPacker / GridSizeComputer:
+///
+///   int32_t  size()               const;
+///   void*    pointer(int32_t i)   const;
+///   int64_t  shape(int32_t i, int32_t d)   const;
+///   int64_t  stride(int32_t i, int32_t d)  const;
+///   bool     hasShape(int32_t i)  const;
+///   bool     isDense(int32_t i)   const;
+///   bool     isScalar(int32_t i)  const;
+///   int32_t  scalarSizeInBytes(int32_t i) const;
+///
 
 #ifndef TENSOR_IR_RUNTIME_CUDATILE_RUNTIME_OPERAND_ACCESSOR_H_
 #define TENSOR_IR_RUNTIME_CUDATILE_RUNTIME_OPERAND_ACCESSOR_H_
@@ -118,7 +116,7 @@ struct RuntimeOperandAccessor {
     if (!arg || arg->typeIndex != TypeIndex::kScalar) {
       return 0;
     }
-    return getElementByteWidth(arg->scalar.type);
+    return getScalarByteWidth(arg->scalar.type);
   }
 };
 

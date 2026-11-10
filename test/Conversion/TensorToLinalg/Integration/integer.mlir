@@ -200,7 +200,24 @@ func.func @pow_ui32(%a: tensor<ui32>, %b: tensor<ui32>) -> tensor<f64> {
   return %f : tensor<f64>
 }
 
+func.func @negi_no_wrap(%x: tensor<4xsi32>) -> tensor<4xsi32> {
+  %r = nv_tensor_ir.negi %x overflow <no_wrap> : tensor<4xsi32>
+  return %r : tensor<4xsi32>
+}
+
 func.func @main() {
+  %neg_input = nv_tensor_ir.constant dense<0> : tensor<4xsi32>
+  %neg_expected = nv_tensor_ir.constant dense<0> : tensor<4xsi32>
+  %neg_actual = call @negi_no_wrap(%neg_input) : (tensor<4xsi32>) -> tensor<4xsi32>
+  %neg_equal = nv_tensor_ir.cmp %neg_actual eq %neg_expected : tensor<4xsi32>
+  %neg_c0 = arith.constant 0 : index
+  %neg_c4 = arith.constant 4 : index
+  %neg_c1 = arith.constant 1 : index
+  scf.for %i = %neg_c0 to %neg_c4 step %neg_c1 {
+    %ok = tensor.extract %neg_equal[%i] : tensor<4xi1>
+    cf.assert %ok, "negi no_wrap mismatch"
+  }
+
   %i0 = arith.constant 0 : index
   %i1 = arith.constant 1 : index
   %a_si32 = nv_tensor_ir.constant dense<[-5, 5]> : tensor<2xsi32>

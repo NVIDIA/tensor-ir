@@ -1,30 +1,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===----------------------------------------------------------------------===//
-// KernelLaunchHelpers<Accessor> — helpers for kernel argument packing and
-// grid size computation at launch time.
-//
-// Templated on an OperandAccessor so that the same logic works with any
-// tensor representation (TensorOperandDescriptor, TensorView, etc.).
-//
-// OperandAccessor concept:
-//   int32_t  size()                          const;
-//   void*    pointer(int32_t i)              const;
-//   int64_t  shape(int32_t i, int32_t d)     const;
-//   int64_t  stride(int32_t i, int32_t d)    const;
-//   bool     hasShape(int32_t i)             const;
-//   bool     isDense(int32_t i)              const;
-//
-// Implementations:
-//   Argument Packing:
-//     ArgumentPacker — packs pointers, scalars, and metadata according to the
-//                      dynamic size/stride metadata in KernelMetadata.
-//   Grid Size Computation:
-//     StaticGridComputer    — returns fixed grid dims known at compile time.
-//     TileBasedGridComputer — computes grid from runtime shapes + tile sizes.
-//
-//===----------------------------------------------------------------------===//
+/// KernelLaunchHelpers<Accessor> — helpers for kernel argument packing and
+/// grid size computation at launch time.
+///
+/// Templated on an OperandAccessor so that the same logic works with any
+/// tensor representation (TensorOperandDescriptor, TensorView, etc.).
+///
+/// OperandAccessor concept:
+///   int32_t  size()                          const;
+///   void*    pointer(int32_t i)              const;
+///   int64_t  shape(int32_t i, int32_t d)     const;
+///   int64_t  stride(int32_t i, int32_t d)    const;
+///   bool     hasShape(int32_t i)             const;
+///   bool     isDense(int32_t i)              const;
+///
+/// Implementations:
+///   Argument Packing:
+///     ArgumentPacker — packs pointers, scalars, and metadata according to the
+///                      dynamic size/stride metadata in KernelMetadata.
+///   Grid Size Computation:
+///     StaticGridComputer    — returns fixed grid dims known at compile time.
+///     TileBasedGridComputer — computes grid from runtime shapes + tile sizes.
 
 #ifndef TENSOR_IR_RUNTIME_KERNEL_LAUNCH_HELPERS_H_
 #define TENSOR_IR_RUNTIME_KERNEL_LAUNCH_HELPERS_H_
@@ -32,6 +29,7 @@
 #include "tensor_ir/Artifact/KernelMetadata.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 
 #include <array>
@@ -58,7 +56,7 @@ bool packOperandIntoInt64Slot(const void *ptr, int64_t &slot, bool scalar,
 /// Signatures pack dynamic sizes and explicit dynamic strides. Scalar operands
 /// contribute one by-value slot.
 ///
-/// @tparam Accessor Satisfies the OperandAccessor concept.
+/// \tparam Accessor Satisfies the OperandAccessor concept.
 template <typename Accessor>
 class ArgumentPacker final {
 public:
@@ -97,10 +95,23 @@ private:
       int32_t i = static_cast<int32_t>(tensorIdx);
 
       const auto *scalar = std::get_if<ScalarArgDesc>(&arg);
+      const void *pointer = operands.pointer(i);
+      bool emptyTensor = false;
+      if (const auto *tensor = std::get_if<TensorArgDesc>(&arg);
+          tensor && !pointer && !allowUnresolvedPointers) {
+        for (auto [dim, extent] : llvm::enumerate(tensor->shape())) {
+          if (extent == 0 ||
+              (extent == TensorArgDesc::kDynamic && operands.hasShape(i) &&
+               operands.shape(i, dim) == 0)) {
+            emptyTensor = true;
+            break;
+          }
+        }
+      }
       if (!detail::packOperandIntoInt64Slot(
-              operands.pointer(i), outArgs[idx++], scalar != nullptr,
-              scalar ? getElementByteWidth(scalar->elementType) : 0,
-              allowUnresolvedPointers)) {
+              pointer, outArgs[idx++], scalar != nullptr,
+              scalar ? getScalarByteWidth(scalar->elementType) : 0,
+              allowUnresolvedPointers || emptyTensor)) {
         return -1;
       }
       if (scalar) {
@@ -153,7 +164,7 @@ GridDims computeTileBasedGrid(const KernelMetadata &layout,
 
 /// Interface for computing CUDA grid dimensions at runtime.
 ///
-/// @tparam Accessor  Satisfies the OperandAccessor concept.
+/// \tparam Accessor  Satisfies the OperandAccessor concept.
 template <typename Accessor>
 class GridSizeComputer {
 public:

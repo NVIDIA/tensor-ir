@@ -6,10 +6,10 @@
 #include "tensor_ir/Artifact/TensorIRArtifact.h"
 #include "tensor_ir/Compiler/CudaTile/CudaTileFrontend.h"
 #include "tensor_ir/Compiler/CudaTile/Pipelines.h"
-#include "tensor_ir/Compiler/CudaTile/TileIRAssembly.h"
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Runtime/HostRuntimeAbi.h"
 #include "tensor_ir/Support/Status.h"
+#include "tensor_ir/Support/TileIRAssembly.h"
 
 #include "mlir/Pass/PassManager.h"
 
@@ -157,13 +157,19 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
   }
   ::tensor_ir::rt::Binary binary = ::tensor_ir::rt::TileIRBytecode{
       std::move(tileirBytecode), runtimeBytecodeVersion};
-  if (options.cudaTile.artifactKind == ArtifactKind::Cubin) {
+  TIR_ASSIGN_OR_RETURN(auto filters,
+                       resolveRemarkFilters(options.optimizationRemarks));
+  std::string remarksYaml;
+  if (options.cudaTile.artifactKind == ArtifactKind::Cubin ||
+      filters.isEnabled()) {
     const auto &tileirBinary =
         std::get<::tensor_ir::rt::TileIRBytecode>(binary);
+    llvm::raw_string_ostream remarksStream(remarksYaml);
     TIR_ASSIGN_OR_RETURN(
-        auto cubin, assembleTileIRToCubin(tileirBinary.bytes, *compiledTarget,
-                                          runtimeBytecodeVersion));
-    if (cubin) {
+        auto cubin,
+        assembleTileIRToCubin(tileirBinary.bytes, *compiledTarget,
+                              runtimeBytecodeVersion, options, remarksStream));
+    if (cubin && options.cudaTile.artifactKind == ArtifactKind::Cubin) {
       binary = ::tensor_ir::rt::Cubin{std::move(*cubin)};
     }
   }
@@ -199,7 +205,7 @@ CudaTileCompiler::compile(mlir::ModuleOp module,
   return ::tensor_ir::rt::TensorIRArtifact::create(
       frontend.runtimeKernelName, frontend.entryFunctionName, std::move(binary),
       *compiledTarget, std::move(frontend.argLayout), staticGrid, usesPDL,
-      std::move(hostModule), std::move(entrypointName));
+      std::move(hostModule), std::move(entrypointName), std::move(remarksYaml));
 }
 
 //===----------------------------------------------------------------------===//

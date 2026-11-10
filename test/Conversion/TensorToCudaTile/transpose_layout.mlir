@@ -5,10 +5,10 @@
 // ============================================================================
 // CHECK-LABEL: entry @transpose_self_add
 //  CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
-//       CHECK:   %[[C4:.+]] = constant <i32: 4> : tile<i32>
+//       CHECK:   %[[C2:.+]] = constant <i32: 2> : tile<i32>
 //       CHECK:   %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
-//       CHECK:   %[[COORD0:.+]] = remi %[[BID_X]], %[[C4]] unsigned : tile<i32>
-//       CHECK:   %[[COORD1:.+]] = divi %[[BID_X]], %[[C4]] unsigned : tile<i32>
+//       CHECK:   %[[COORD1:.+]] = remi %[[BID_X]], %[[C2]] unsigned : tile<i32>
+//       CHECK:   %[[COORD0:.+]] = divi %[[BID_X]], %[[C2]] unsigned : tile<i32>
 //       CHECK:   %[[TVIEW_IN:.+]] = make_tensor_view %[[IN_PTR]], shape = [64, 32], strides = [1, 64] : tensor_view<64x32xf32, strides=[1,64]>
 //       CHECK:   %[[PIN:.+]] = make_partition_view %[[TVIEW_IN]] : partition_view<tile=(16x16), tensor_view<64x32xf32, strides=[1,64]>>
 //       CHECK:   %[[TILE0:.+]], {{.*}} = load_view_tko weak %[[PIN]][%[[COORD0]], %[[COORD1]]] : partition_view<tile=(16x16), tensor_view<64x32xf32, strides=[1,64]>>, tile<i32> -> tile<16x16xf32>, token
@@ -34,10 +34,10 @@ module {
 // ============================================================================
 // CHECK-LABEL: entry @transpose_two_inputs
 //  CHECK-SAME: (%[[IN0_PTR:.+]]: tile<ptr<f32>>, %[[IN1_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
-//       CHECK:   %[[C4:.+]] = constant <i32: 4> : tile<i32>
+//       CHECK:   %[[C2:.+]] = constant <i32: 2> : tile<i32>
 //       CHECK:   %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
-//       CHECK:   %[[COORD0:.+]] = remi %[[BID_X]], %[[C4]] unsigned : tile<i32>
-//       CHECK:   %[[COORD1:.+]] = divi %[[BID_X]], %[[C4]] unsigned : tile<i32>
+//       CHECK:   %[[COORD1:.+]] = remi %[[BID_X]], %[[C2]] unsigned : tile<i32>
+//       CHECK:   %[[COORD0:.+]] = divi %[[BID_X]], %[[C2]] unsigned : tile<i32>
 //       CHECK:   %[[TVIEW_IN0:.+]] = make_tensor_view %[[IN0_PTR]], shape = [64, 32], strides = [1, 64] : tensor_view<64x32xf32, strides=[1,64]>
 //       CHECK:   %[[P0:.+]] = make_partition_view %[[TVIEW_IN0]] : partition_view<tile=(16x16), tensor_view<64x32xf32, strides=[1,64]>>
 //       CHECK:   %[[TILE0:.+]], {{.*}} = load_view_tko weak %[[P0]][%[[COORD0]], %[[COORD1]]] : partition_view<tile=(16x16), tensor_view<64x32xf32, strides=[1,64]>>, tile<i32> -> tile<16x16xf32>, token
@@ -70,10 +70,10 @@ module {
 // ============================================================================
 // CHECK-LABEL: entry @transpose_add_chain
 //  CHECK-SAME: (%[[A_PTR:.+]]: tile<ptr<f32>>, %[[B_PTR:.+]]: tile<ptr<f32>>, %[[C_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
-//       CHECK:   %[[C4:.+]] = constant <i32: 4> : tile<i32>
+//       CHECK:   %[[C2:.+]] = constant <i32: 2> : tile<i32>
 //       CHECK:   %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
-//       CHECK:   %[[COORD0:.+]] = remi %[[BID_X]], %[[C4]] unsigned : tile<i32>
-//       CHECK:   %[[COORD1:.+]] = divi %[[BID_X]], %[[C4]] unsigned : tile<i32>
+//       CHECK:   %[[COORD1:.+]] = remi %[[BID_X]], %[[C2]] unsigned : tile<i32>
+//       CHECK:   %[[COORD0:.+]] = divi %[[BID_X]], %[[C2]] unsigned : tile<i32>
 //       CHECK:   %[[TV_A:.+]] = make_tensor_view %[[A_PTR]], shape = [64, 32], strides = [1, 64] : tensor_view<64x32xf32, strides=[1,64]>
 //       CHECK:   %[[PA:.+]] = make_partition_view %[[TV_A]] : partition_view<tile=(16x16), tensor_view<64x32xf32, strides=[1,64]>>
 //       CHECK:   %[[TILE_A:.+]], {{.*}} = load_view_tko weak %[[PA]][%[[COORD0]], %[[COORD1]]] : partition_view<tile=(16x16), tensor_view<64x32xf32, strides=[1,64]>>, tile<i32> -> tile<16x16xf32>, token
@@ -141,10 +141,10 @@ module {
 // ============================================================================
 // CHECK-LABEL: entry @a_plus_transpose_b_non_pow2
 //  CHECK-SAME: (%[[A_PTR:.+]]: tile<ptr<f32>>, %[[B_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
-//       CHECK:   %[[C2:.+]] = constant <i32: 2> : tile<i32>
+//       CHECK:   %[[C4:.+]] = constant <i32: 4> : tile<i32>
 //       CHECK:   %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
-//       CHECK:   %[[COORD0:.+]] = remi %[[BID_X]], %[[C2]] unsigned : tile<i32>
-//       CHECK:   %[[COORD1:.+]] = divi %[[BID_X]], %[[C2]] unsigned : tile<i32>
+//       CHECK:   %[[COORD1:.+]] = remi %[[BID_X]], %[[C4]] unsigned : tile<i32>
+//       CHECK:   %[[COORD0:.+]] = divi %[[BID_X]], %[[C4]] unsigned : tile<i32>
 //       CHECK:   %[[TV_A:.+]] = make_tensor_view %[[A_PTR]], shape = [30, 50], strides = [50, 1]
 //       CHECK:   %[[PA:.+]] = make_partition_view %[[TV_A]] : partition_view<tile=(16x16), tensor_view<30x50xf32, strides=[50,1]>>
 //       CHECK:   %[[TILE_A:.+]], {{.*}} = load_view_tko weak %[[PA]][%[[COORD0]], %[[COORD1]]] : partition_view<tile=(16x16), tensor_view<30x50xf32, strides=[50,1]>>, tile<i32> -> tile<16x16xf32>, token
@@ -177,10 +177,10 @@ module {
 // ============================================================================
 // CHECK-LABEL: entry @transpose_to_row_major
 //  CHECK-SAME: (%[[IN0:.+]]: tile<ptr<f32>>, %[[IN1:.+]]: tile<ptr<f32>>, %[[OUT:.+]]: tile<ptr<f32>>)
-//       CHECK:   %[[C4:.+]] = constant <i32: 4> : tile<i32>
+//       CHECK:   %[[C2:.+]] = constant <i32: 2> : tile<i32>
 //       CHECK:   %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
-//       CHECK:   %[[COORD0:.+]] = remi %[[BID_X]], %[[C4]] unsigned : tile<i32>
-//       CHECK:   %[[COORD1:.+]] = divi %[[BID_X]], %[[C4]] unsigned : tile<i32>
+//       CHECK:   %[[COORD1:.+]] = remi %[[BID_X]], %[[C2]] unsigned : tile<i32>
+//       CHECK:   %[[COORD0:.+]] = divi %[[BID_X]], %[[C2]] unsigned : tile<i32>
 //       CHECK:   %[[TV0:.+]] = make_tensor_view %[[IN0]], shape = [64, 32], strides = [1, 64] : tensor_view<64x32xf32, strides=[1,64]>
 //       CHECK:   %[[P0:.+]] = make_partition_view %[[TV0]] : partition_view<tile=(16x16), tensor_view<64x32xf32, strides=[1,64]>>
 //       CHECK:   %[[T0:.+]], {{.*}} = load_view_tko weak %[[P0]][%[[COORD0]], %[[COORD1]]] : partition_view<tile=(16x16), tensor_view<64x32xf32, strides=[1,64]>>, tile<i32> -> tile<16x16xf32>, token
@@ -215,10 +215,10 @@ module {
 // ============================================================================
 // CHECK-LABEL: entry @a_plus_transpose_b_row_major
 //  CHECK-SAME: (%[[A_PTR:.+]]: tile<ptr<f32>>, %[[B_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
-//       CHECK:   %[[C4:.+]] = constant <i32: 4> : tile<i32>
+//       CHECK:   %[[C2:.+]] = constant <i32: 2> : tile<i32>
 //       CHECK:   %[[BID_X:[^,]+]], {{.*}} = get_tile_block_id : tile<i32>
-//       CHECK:   %[[COORD0:.+]] = remi %[[BID_X]], %[[C4]] unsigned : tile<i32>
-//       CHECK:   %[[COORD1:.+]] = divi %[[BID_X]], %[[C4]] unsigned : tile<i32>
+//       CHECK:   %[[COORD1:.+]] = remi %[[BID_X]], %[[C2]] unsigned : tile<i32>
+//       CHECK:   %[[COORD0:.+]] = divi %[[BID_X]], %[[C2]] unsigned : tile<i32>
 //       CHECK:   %[[TV_A:.+]] = make_tensor_view %[[A_PTR]], shape = [64, 32], strides = [32, 1]
 //       CHECK:   %[[PA:.+]] = make_partition_view %[[TV_A]] : partition_view<tile=(16x16), tensor_view<64x32xf32, strides=[32,1]>>
 //       CHECK:   %[[TILE_A:.+]], {{.*}} = load_view_tko weak %[[PA]][%[[COORD0]], %[[COORD1]]] : partition_view<tile=(16x16), tensor_view<64x32xf32, strides=[32,1]>>, tile<i32> -> tile<16x16xf32>, token

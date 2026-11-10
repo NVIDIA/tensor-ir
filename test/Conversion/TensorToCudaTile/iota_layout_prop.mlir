@@ -117,14 +117,13 @@ nv_tensor_ir.graph @test_iota_i32() -> (tensor<64xsi32>)
 // lowered from one local iota tile and two ranked broadcasts.
 // CHECK-LABEL: entry @test_iota_propagation
 // CHECK-SAME: (%[[OUT:.*]]: tile<ptr<f32>>
-// CHECK-DAG: %[[TILE_SIZE:.*]] = constant <i32: 4> : tile<i32>
+// CHECK-DAG: %[[C4:.*]] = constant <i32: 4> : tile<i32>
 // CHECK-DAG: %[[ROW_STRIDE:.*]] = constant <i32: 64> : tile<i32>
 // CHECK-DAG: %[[IOTA_STRIDE:.*]] = constant <i32: 16> : tile<4x4x4xi32>
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
-// CHECK-DAG: %[[C2:.*]] = constant <i32: 2> : tile<i32>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[ROW:.*]] = remi %[[BLOCK]], %[[C2]] unsigned : tile<i32>
-// CHECK: %[[COL:.*]] = divi %[[BLOCK]], %[[C2]] unsigned : tile<i32>
+// CHECK: %[[COL:.*]] = remi %[[BLOCK]], %[[C4]] unsigned : tile<i32>
+// CHECK: %[[ROW:.*]] = divi %[[BLOCK]], %[[C4]] unsigned : tile<i32>
 // CHECK: %[[IOTA:.*]] = iota : tile<4xi32>
 // CHECK: %[[R0:.*]] = reshape %[[IOTA]] : tile<4xi32> -> tile<4x1x1xi32>
 // CHECK: %[[B0:.*]] = broadcast %[[R0]] : tile<4x1x1xi32> -> tile<4x4x4xi32>
@@ -133,7 +132,7 @@ nv_tensor_ir.graph @test_iota_i32() -> (tensor<64xsi32>)
 // CHECK: %[[R1:.*]] = reshape %[[IOTA]] : tile<4xi32> -> tile<1x1x4xi32>
 // CHECK: %[[B1:.*]] = broadcast %[[R1]] : tile<1x1x4xi32> -> tile<4x4x4xi32>
 // CHECK: %[[IDX_BASE:.*]] = addi %[[SCALED0]], %[[B1]] : tile<4x4x4xi32>
-// CHECK: %[[COL_OFF:.*]] = muli %[[COL]], %[[TILE_SIZE]] : tile<i32>
+// CHECK: %[[COL_OFF:.*]] = muli %[[COL]], %[[C4]] : tile<i32>
 // CHECK: %[[OFF:.*]] = addi %[[ROW_OFF]], %[[COL_OFF]] : tile<i32>
 // CHECK: %[[R2:.*]] = reshape %[[OFF]] : tile<i32> -> tile<1x1x1xi32>
 // CHECK: %[[B2:.*]] = broadcast %[[R2]] : tile<1x1x1xi32> -> tile<4x4x4xi32>

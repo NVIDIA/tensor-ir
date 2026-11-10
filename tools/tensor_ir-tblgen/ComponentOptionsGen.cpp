@@ -449,25 +449,29 @@ void ComponentEmitter::emitCLBindings() {
                 comp.clStaticName());
   emitCLAccessorDefs();
 }
+static void emitEnumValues(const OptionInfo &opt, raw_ostream &os) {
+  os << "llvm::cl::values(\n";
+  interleave(
+      opt.enumInfo->getAllCases(), os,
+      [&](const EnumCase &c) {
+        os << formatv("          clEnumValN({0}::{1}::{2}, \"{3}\", \"{4}\")",
+                      opt.enumInfo->getCppNamespace(), opt.cppType,
+                      makeIdentifier(c.getSymbol()), escapeString(c.getStr()),
+                      escapeString(c.getDef().getValueAsString("help")));
+      },
+      ",\n");
+  os << ')';
+}
 void ComponentEmitter::emitCLOption(const OptionInfo &opt) {
   if (opt.kind == OptionInfo::Kind::Enum) {
     os << formatv("  llvm::cl::opt<{0}::{1}> {2}{{\"{3}\", "
                   "llvm::cl::desc(\"{4}\"),\n"
                   "      llvm::cl::init({0}::{1}::{5}),\n"
-                  "      llvm::cl::values(\n",
+                  "      ",
                   kCppNamespace, opt.cppType, opt.varName, opt.argName,
                   escapeString(opt.helpText), makeIdentifier(opt.defaultValue));
-    interleave(
-        opt.enumInfo->getAllCases(), os,
-        [&](const EnumCase &c) {
-          os << formatv("          clEnumValN({0}::{1}::{2}, \"{3}\", "
-                        "\"{4}\")",
-                        kCppNamespace, opt.cppType,
-                        makeIdentifier(c.getSymbol()), c.getStr(),
-                        escapeString(c.getDef().getValueAsString("help")));
-        },
-        ",\n");
-    os << "),\n      llvm::cl::cat(category)};\n";
+    emitEnumValues(opt, os);
+    os << ",\n      llvm::cl::cat(category)};\n";
     return;
   }
   StringRef format = getCodeTemplate(opt.rec, "clDeclaration");
@@ -839,3 +843,93 @@ static mlir::GenRegistration genComponentOptions(
     "gen-component-options",
     "Generate component option structs, parsers and llvm::cl bindings",
     emitComponentOptions);
+
+static void emitPipelineOption(const OptionInfo &opt, raw_ostream &os) {
+  os << "  PassOptions::Option<"
+     << (opt.kind == OptionInfo::Kind::List ? "std::string" : opt.cppType)
+     << "> " << opt.varName << "{*this, \"" << escapeString(opt.argName)
+     << "\",\n      llvm::cl::desc(\"" << escapeString(opt.helpText) << "\")";
+  if (opt.kind != OptionInfo::Kind::List) {
+    os << ",\n      llvm::cl::init(" << opt.fullDefaultExpr() << ')';
+  }
+  if (opt.kind == OptionInfo::Kind::Enum) {
+    os << ",\n      ";
+    emitEnumValues(opt, os);
+  }
+  os << "};\n";
+}
+
+static void emitPipelineAssignment(StringRef invocationMember,
+                                   const OptionInfo &opt, raw_ostream &os) {
+  if (opt.kind != OptionInfo::Kind::List) {
+    os << formatv("    options.{0}.{1} = {1}.getValue();\n", invocationMember,
+                  opt.varName);
+    return;
+  }
+  os << formatv(R"cpp(    options.{0}.{1} = {2};
+    if ({1}.getNumOccurrences()) {{
+      namespace optd = ::mlir::nv_tensor_ir::opt_detail;
+      auto &opts = options.{0};
+      llvm::StringRef value = {1}.getValue();
+      auto parseValue = [&]() -> llvm::LogicalResult {{
+)cpp",
+                invocationMember, opt.varName, opt.defaultValue);
+  FmtContext ctx;
+  ctx.addSubst("varName", opt.varName)
+      .addSubst("elemType", opt.elementType)
+      .addSubst("delim", escapeString(opt.delimiter))
+      .addSubst("delimChar", opt.delimiterCharLiteral());
+  os << tgfmt(getCodeTemplate(opt.rec, "parse"), &ctx);
+  os << formatv(R"cpp(      };
+      if (llvm::failed(parseValue()))
+        return Status::InvalidArgument("invalid value for '{0}'");
+    }
+)cpp",
+                escapeString(opt.argName));
+}
+
+static bool emitPipelineOptions(const RecordKeeper &records, raw_ostream &os) {
+  if (failed(buildAndValidateAll(records))) {
+    return true;
+  }
+  emitSourceFileHeader("TensorIR Pipeline Options", os, records);
+  NamespaceEmitter ns(os, kCppNamespace);
+  for (const Record *pipeline :
+       records.getAllDerivedDefinitions("PipelineOptions")) {
+    SmallVector<std::pair<StringRef, OptionInfo>> options;
+    StringSet<> fields;
+    for (const Record *selection : pipeline->getValueAsListOfDefs("options")) {
+      OptionInfo opt(selection->getValueAsListOfDefs("matches").front());
+      if (!fields.insert(opt.varName).second) {
+        PrintFatalError(selection->getLoc(),
+                        "duplicate pipeline option '" + opt.varName + "'");
+      }
+      StringRef defaultValue = selection->getValueAsString("defaultValue");
+      if (!defaultValue.empty()) {
+        opt.defaultValue = defaultValue;
+      }
+      options.emplace_back(selection->getValueAsString("invocationMember"),
+                           opt);
+    }
+    os << formatv("struct {0} : public ::mlir::PassPipelineOptions<{0}> {{\n",
+                  pipeline->getName());
+    for (const auto &[member, opt] : options) {
+      emitPipelineOption(opt, os);
+    }
+    os << "\n  StatusOr<CompilerInvocation> getCompilerInvocation() const {\n"
+          "    CompilerInvocation options;\n";
+    for (const auto &[member, opt] : options) {
+      emitPipelineAssignment(member, opt, os);
+    }
+    os << "    if (auto error = options.validate(); !error.ok()) {\n"
+          "      return error;\n"
+          "    }\n"
+          "    return options;\n  }\n};\n\n";
+  }
+  return false;
+}
+
+static mlir::GenRegistration genPipelineOptions(
+    "gen-pipeline-options",
+    "Generate MLIR pipeline option structs from component option selections",
+    emitPipelineOptions);

@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-/// \file PointwiseOps.cpp
 /// Shared pointwise TensorIR-to-CUDA-Tile lowering.
-///
 /// Affine-map lowering adapts operands through `ConversionState`; outlined
 /// lowering receives explicit tiles from the conversion adaptor. Both paths
 /// delegate operation emission to `lowerPointwiseOp`.
@@ -250,8 +248,8 @@ Value buildSigmoid(OpBuilder &rewriter, Value tile) {
 // Erf and GELU operations
 //===----------------------------------------------------------------------===//
 
-// Abramowitz and Stegun 7.1.26 coefficients for erf(x), maximum absolute
-// error approximately 1.5e-7 for real x.
+/// Abramowitz and Stegun 7.1.26 coefficients for erf(x), maximum absolute
+/// error approximately 1.5e-7 for real x.
 constexpr double kErfApproxP = 0.3275911;
 constexpr double kErfApproxA1 = 0.254829592;
 constexpr double kErfApproxA2 = -0.284496736;

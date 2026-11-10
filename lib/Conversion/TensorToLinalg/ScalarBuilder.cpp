@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-/// \file
 /// Scalar Arith and Math builders for TensorIR element operations.
 
 #include "ScalarBuilder.h"
@@ -240,12 +239,15 @@ Value ScalarBuilder::abs(Value input) {
 
 Value ScalarBuilder::ceil(Value input) { return unary<math::CeilOp>(input); }
 Value ScalarBuilder::cos(Value input) { return unary<math::CosOp>(input); }
+Value ScalarBuilder::cosh(Value input) { return unary<math::CoshOp>(input); }
 Value ScalarBuilder::exp(Value input) { return unary<math::ExpOp>(input); }
 Value ScalarBuilder::floor(Value input) { return unary<math::FloorOp>(input); }
 Value ScalarBuilder::log(Value input) { return unary<math::LogOp>(input); }
+Value ScalarBuilder::log2(Value input) { return unary<math::Log2Op>(input); }
 Value ScalarBuilder::neg(Value input) { return unary<arith::NegFOp>(input); }
 Value ScalarBuilder::rsqrt(Value input) { return unary<math::RsqrtOp>(input); }
 Value ScalarBuilder::sin(Value input) { return unary<math::SinOp>(input); }
+Value ScalarBuilder::sinh(Value input) { return unary<math::SinhOp>(input); }
 Value ScalarBuilder::sqrt(Value input) { return unary<math::SqrtOp>(input); }
 Value ScalarBuilder::tan(Value input) { return unary<math::TanOp>(input); }
 Value ScalarBuilder::erf(Value input) { return unary<math::ErfOp>(input); }
@@ -300,4 +302,81 @@ Value ScalarBuilder::ufloorDiv(Value lhs, Value rhs) {
     return floor(quotient);
   }
   return udiv(lhs, rhs);
+}
+
+Value ScalarBuilder::exp2(Value input, bool ftz) {
+  if (ftz) {
+    input = unary<arith::FlushDenormalsOp>(input);
+  }
+  Value result = unary<math::Exp2Op>(input);
+  return ftz ? unary<arith::FlushDenormalsOp>(result) : result;
+}
+
+Value ScalarBuilder::fma(Value lhs, Value rhs, Value acc, bool ftz) {
+  if (ftz) {
+    lhs = unary<arith::FlushDenormalsOp>(lhs);
+    rhs = unary<arith::FlushDenormalsOp>(rhs);
+    acc = unary<arith::FlushDenormalsOp>(acc);
+  }
+  // Compute 16-bit FMAs in f32. Rounding the f32 result again can differ from
+  // a correctly rounded 16-bit FMA in the last place, but the host lowering
+  // needs no 16-bit arithmetic or conversion routines beyond f32 narrowing.
+  Type type = lhs.getType();
+  bool widen = type.getIntOrFloatBitWidth() < 32;
+  if (widen) {
+    Type f32 = builder.getF32Type();
+    lhs = arith::ExtFOp::create(builder, loc, f32, lhs);
+    rhs = arith::ExtFOp::create(builder, loc, f32, rhs);
+    acc = arith::ExtFOp::create(builder, loc, f32, acc);
+  }
+  Value result = math::FmaOp::create(builder, loc, lhs, rhs, acc);
+  if (widen) {
+    result = arith::TruncFOp::create(builder, loc, type, result);
+  }
+  return ftz ? unary<arith::FlushDenormalsOp>(result) : result;
+}
+
+Value ScalarBuilder::mulHigh(Value lhs, Value rhs) {
+  return arith::MulUIExtendedOp::create(builder, loc, lhs, rhs).getHigh();
+}
+
+Value ScalarBuilder::shift(Value lhs, Value rhs, bool right, bool isUnsigned,
+                           IntegerOverflow overflow) {
+  Type type = lhs.getType();
+  Value width = constant(type, type.getIntOrFloatBitWidth());
+  Value maxShift = constant(type, type.getIntOrFloatBitWidth() - 1);
+  // Arith shifts are poison for oversized amounts. Clamp before shifting and
+  // return zero (or sign bits for arithmetic right shifts). Always interpret
+  // the shift amount as unsigned.
+  Value safeShift = umin(rhs, maxShift);
+  if (right && !isUnsigned) {
+    return binary<arith::ShRSIOp>(lhs, safeShift);
+  }
+  Value shifted;
+  if (right) {
+    shifted = binary<arith::ShRUIOp>(lhs, safeShift);
+  } else {
+    auto flags = arith::IntegerOverflowFlags::none;
+    if (overflow == IntegerOverflow::NSW || overflow == IntegerOverflow::NW) {
+      flags = flags | arith::IntegerOverflowFlags::nsw;
+    }
+    if (overflow == IntegerOverflow::NUW || overflow == IntegerOverflow::NW) {
+      flags = flags | arith::IntegerOverflowFlags::nuw;
+    }
+    shifted = arith::ShLIOp::create(builder, loc, lhs, safeShift, flags);
+  }
+  Value zero = constant(type, 0);
+  Value inRange = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ult,
+                                        rhs, width);
+  return select(inRange, shifted, zero);
+}
+
+Value ScalarBuilder::shl(Value lhs, Value rhs, IntegerOverflow overflow) {
+  return shift(lhs, rhs, false, true, overflow);
+}
+Value ScalarBuilder::sshr(Value lhs, Value rhs) {
+  return shift(lhs, rhs, true, false);
+}
+Value ScalarBuilder::ushr(Value lhs, Value rhs) {
+  return shift(lhs, rhs, true, true);
 }

@@ -108,10 +108,10 @@ bool isStreamingScanSliceResult(Value value);
   lhs /* NOLINT(bugprone-macro-parentheses) */ = std::move(*status_or)
 #endif
 
-// Get the alignment of the tensor which should be graph input or output
+/// Get the alignment of the tensor which should be graph input or output
 FailureOr<int64_t> getAlignmentFromGraph(Value tensor);
 
-// Get the stride of the tensor which should be graph input or output
+/// Get the stride of the tensor which should be graph input or output
 FailureOr<tcutegen::Stride> getStrideFromGraph(Value tensor);
 
 /// Returns true if the graph has no operations in the region other than the
@@ -179,7 +179,7 @@ FailureOr<llvm::hash_code> getModuleHash(ModuleOp moduleOp);
 // Shape / tcutegen helpers
 //===----------------------------------------------------------------------===//
 
-/// @brief Type alias for dimension sizes
+/// Type alias for dimension sizes
 using DimSize = int64_t;
 
 template <typename T>
@@ -202,14 +202,13 @@ FailureOr<llvm::SmallVector<int64_t>> toSmallVector(const T &attribute) {
 
 int64_t getDefaultAlignment(RankedTensorType tensorType);
 
-/**
- * @brief Maps the grid size to the 3D grid size needed for kernel launches.
- * @param grid_size The grid size
- * @param loc Location used to emit diagnostics on failure
- * @return The grid size mapped to 3D, or failure (with a diagnostic emitted at
- * @p loc) if the grid is empty or its flattened size exceeds the representable
- * 32-bit limit.
- */
+/// Maps the grid size to the 3D grid size needed for kernel launches.
+///
+/// \param loc Location used to emit diagnostics on failure
+///
+/// \returns The grid size mapped to 3D, or failure (with a diagnostic emitted at
+/// \p loc) if the grid is empty or its flattened size exceeds the representable
+/// 32-bit limit.
 FailureOr<std::array<int32_t, 3>>
 mapGridSizeTo3D(llvm::ArrayRef<DimSize> grid_size, Location loc);
 

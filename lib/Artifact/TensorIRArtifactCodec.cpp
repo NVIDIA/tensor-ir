@@ -24,6 +24,24 @@ namespace tensor_ir::rt {
 namespace {
 namespace schema = ::tensor_ir::rt::schema;
 
+static_assert(static_cast<uint8_t>(schema::ElementType::Bool) == 0);
+static_assert(static_cast<uint8_t>(schema::ElementType::F16) == 1);
+static_assert(static_cast<uint8_t>(schema::ElementType::BF16) == 2);
+static_assert(static_cast<uint8_t>(schema::ElementType::F32) == 3);
+static_assert(static_cast<uint8_t>(schema::ElementType::F64) == 4);
+static_assert(static_cast<uint8_t>(schema::ElementType::F8E4M3FN) == 5);
+static_assert(static_cast<uint8_t>(schema::ElementType::F8E5M2) == 6);
+static_assert(static_cast<uint8_t>(schema::ElementType::SI8) == 7);
+static_assert(static_cast<uint8_t>(schema::ElementType::SI16) == 8);
+static_assert(static_cast<uint8_t>(schema::ElementType::SI32) == 9);
+static_assert(static_cast<uint8_t>(schema::ElementType::SI64) == 10);
+static_assert(static_cast<uint8_t>(schema::ElementType::UI8) == 11);
+static_assert(static_cast<uint8_t>(schema::ElementType::UI16) == 12);
+static_assert(static_cast<uint8_t>(schema::ElementType::UI32) == 13);
+static_assert(static_cast<uint8_t>(schema::ElementType::UI64) == 14);
+static_assert(static_cast<uint8_t>(schema::ElementType::F4E2M1FN) == 15);
+static_assert(static_cast<uint8_t>(schema::ElementType::F8E8M0FNU) == 16);
+
 constexpr uint32_t kTensorIRArtifactVersion = 3;
 
 schema::ArchPortability toSchema(ArchPortability portability) {
@@ -72,8 +90,8 @@ StatusOr<PersistenceMode> fromSchema(schema::Persistence persistence) {
       "serialized TensorIRArtifact has an invalid persistence mode");
 }
 
-// schema::ElementType mirrors ElementType 1:1 (see Artifact.fbs), so this is
-// total -- every ElementType has a schema counterpart.
+/// schema::ElementType mirrors ElementType 1:1 (see Artifact.fbs), so this is
+/// total -- every ElementType has a schema counterpart.
 schema::ElementType toSchema(ElementType type) {
   switch (type) {
   case ElementType::Bool:
@@ -106,6 +124,10 @@ schema::ElementType toSchema(ElementType type) {
     return schema::ElementType::UI32;
   case ElementType::UI64:
     return schema::ElementType::UI64;
+  case ElementType::F4E2M1FN:
+    return schema::ElementType::F4E2M1FN;
+  case ElementType::F8E8M0FNU:
+    return schema::ElementType::F8E8M0FNU;
   }
   llvm_unreachable("unrecognized ElementType");
 }
@@ -142,6 +164,10 @@ StatusOr<ElementType> fromSchema(schema::ElementType type) {
     return ElementType::UI32;
   case schema::ElementType::UI64:
     return ElementType::UI64;
+  case schema::ElementType::F4E2M1FN:
+    return ElementType::F4E2M1FN;
+  case schema::ElementType::F8E8M0FNU:
+    return ElementType::F8E8M0FNU;
   }
   return Status::InvalidArgument(
       "serialized TensorIRArtifact has an invalid element type");
@@ -188,10 +214,10 @@ StatusOr<ArgDesc> decodeArgDesc(schema::ArgDesc kind, const void *value) {
 // Stays out of the anonymous namespace above so its name matches
 // TensorIRArtifact.h's `friend class TensorIRArtifactEncoder;` declaration.
 
-// Builds the TensorIRArtifact FlatBuffers table -- the only place
-// TensorIRArtifact and its generated schema type meet. All nested pieces
-// share one builder, passed in by the caller and held by reference here
-// instead of threaded through every helper argument.
+/// Builds the TensorIRArtifact FlatBuffers table -- the only place
+/// TensorIRArtifact and its generated schema type meet. All nested pieces
+/// share one builder, passed in by the caller and held by reference here
+/// instead of threaded through every helper argument.
 class TensorIRArtifactEncoder {
 public:
   explicit TensorIRArtifactEncoder(::flatbuffers::FlatBufferBuilder &builder)
@@ -262,7 +288,8 @@ public:
 
     return schema::CreateTensorIRArtifact(
         builder_, kTensorIRArtifactVersion, kernelNameOffset, &archStruct,
-        binaryType, binaryOffset, kernels, hostModule, entrypoints);
+        binaryType, binaryOffset, kernels, hostModule, entrypoints,
+        builder_.CreateString(artifact.getRemarks().str()));
   }
 
 private:
@@ -458,7 +485,8 @@ decodeTensorIRArtifact(const schema::TensorIRArtifact &payload) {
   return TensorIRArtifact::create(
       std::move(kernelName), std::move(funcName), std::move(binary), *arch,
       std::move(argLayout), staticGrid, metadata->uses_pdl(),
-      std::move(hostModule), entrypoint->name()->str());
+      std::move(hostModule), entrypoint->name()->str(),
+      payload.remarks_yaml() ? payload.remarks_yaml()->str() : std::string());
 }
 
 class FlatBufferMemoryBuffer final : public llvm::MemoryBuffer {

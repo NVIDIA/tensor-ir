@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// ICompiler - Interface for compiling MLIR to TensorIRArtifact
+/// ICompiler - Interface for compiling MLIR to TensorIRArtifact
 
 #ifndef TENSOR_IR_COMPILER_COMPILER_H
 #define TENSOR_IR_COMPILER_COMPILER_H
@@ -26,10 +26,7 @@ namespace mlir::nv_tensor_ir {
 std::string calculateCacheKey(mlir::ModuleOp module,
                               const CompilerInvocation &options);
 
-//===----------------------------------------------------------------------===//
-// ICompiler - Interface for compiling MLIR to TensorIRArtifact
-//===----------------------------------------------------------------------===//
-
+/// ICompiler - Interface for compiling MLIR to TensorIRArtifact
 class ICompiler {
 public:
   virtual ~ICompiler() = default;
@@ -41,8 +38,8 @@ public:
   virtual StatusOr<std::unique_ptr<::tensor_ir::rt::TensorIRArtifact>>
   compile(llvm::StringRef source, const CompilerInvocation &options);
 
-  // XLA integration contract: keep this lightweight and coordinate before
-  // changing the signature or semantics.
+  /// XLA integration contract: keep this lightweight and coordinate before
+  /// changing the signature or semantics.
   virtual bool canCompile(mlir::ModuleOp module,
                           const CompilerInvocation &options) const = 0;
 

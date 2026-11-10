@@ -6,6 +6,7 @@
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/Dialect/Ptr/IR/PtrTypes.h"
+#include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -17,11 +18,12 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/IndexingMapOpInterface.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ValueBoundsOpInterface.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
-#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
@@ -54,12 +56,6 @@ bool isGraphInput(Value value);
 
 /// Returns true if `value` is consumed by a TensorIR graph results operation.
 bool isGraphOutput(Value value);
-
-/// Returns the extent produced by broadcasting two dimensions, or failure when
-/// two known, non-unit dimensions are incompatible. Zero is a known extent:
-/// it broadcasts with one to zero, but does not broadcast with other static
-/// extents.
-FailureOr<int64_t> mergeBroadcastDimensions(int64_t lhs, int64_t rhs);
 
 /// Returns the common extent of two dimensions, treating a dynamic extent as
 /// an unknown value that may be refined by a static extent.

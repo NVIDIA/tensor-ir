@@ -7,11 +7,13 @@
 
 #include "mlir/IR/BuiltinTypes.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Debug.h"
 
 #include <algorithm>
 #include <functional>
 #include <numeric>
+#include <optional>
 
 #define DEBUG_TYPE "tensor-layout-attrs"
 
@@ -157,7 +159,7 @@ getCommonIterationSpace(SmallVector<SmallVector<int64_t>> shapes) {
   return result;
 }
 
-// Apply a function to each underlying source and return as a vector.
+/// Apply a function to each underlying source and return as a vector.
 llvm::FailureOr<SmallVector<LayoutSourceAttrInterface>>
 mapSources(ArrayRef<LayoutSourceAttrInterface> sources,
            const std::function<LayoutSourceAttrInterface(
@@ -174,8 +176,8 @@ mapSources(ArrayRef<LayoutSourceAttrInterface> sources,
   return newSources;
 }
 
-// Find the boundary whose trailing dimensions have the requested product.
-// Return the rank for an empty trailing range.
+/// Find the boundary whose trailing dimensions have the requested product.
+/// Return the rank for an empty trailing range.
 llvm::FailureOr<size_t> findDimensionWithSuffixProduct(ArrayRef<int64_t> shape,
                                                        int64_t product) {
   int64_t accum = 1;
@@ -191,9 +193,9 @@ llvm::FailureOr<size_t> findDimensionWithSuffixProduct(ArrayRef<int64_t> shape,
   return llvm::failure();
 }
 
-// Compose a layout with a target shape in logical order. Coalesced source and
-// target modes are consumed from fastest to slowest, then the target modes are
-// restored to their original order.
+/// Compose a layout with a target shape in logical order. Coalesced source and
+/// target modes are consumed from fastest to slowest, then the target modes are
+/// restored to their original order.
 tcg::Layout composition(const tcg::Layout &layout, const tcg::Shape &target) {
   tcg::Layout coalesced = tcg::coalesce(layout);
   if (tcg::has_error(coalesced)) {
@@ -1374,11 +1376,201 @@ ReductionSourceAttr::transpose(ArrayRef<int64_t> permutation) const {
                  : nullptr;
 }
 
+namespace {
+
+/// A slice of one output dimension: `[start, limit)` with `step`.
+struct DimSlice {
+  int64_t start;
+  int64_t limit;
+  int64_t step;
+
+  /// Number of elements selected by the slice.
+  int64_t count() const { return 1 + (limit - start - 1) / step; }
+  bool isIdentity(int64_t size) const {
+    return start == 0 && limit == size && step == 1;
+  }
+};
+
+/// Resize leaves of a view whose non-broadcast leaves tile a dense index range
+/// (as ordered by their strides) and recompute the strides so the range stays
+/// dense. `newSizes` has one entry per leaf in depth-first order. Returns
+/// nullopt if the view is not dense or is not static.
+std::optional<tcg::Layout> resizeDenseView(const tcg::Layout &view,
+                                           ArrayRef<int64_t> newSizes) {
+  if (!tcg::is_static(view)) {
+    return std::nullopt;
+  }
+  auto flat = tcg::flatten(view);
+  size_t numLeaves = tcg::rank(flat);
+  assert(newSizes.size() == numLeaves && "expects a size for each leaf");
+
+  SmallVector<int64_t> sizes, strides;
+  for (size_t i = 0; i < numLeaves; ++i) {
+    auto leaf = tcg::get(flat, i);
+    sizes.push_back(leaf.shape().as_int());
+    strides.push_back(leaf.stride().as_int());
+  }
+
+  // Order the leaves that occupy index space (non-unit, non-broadcast).
+  SmallVector<size_t> order;
+  for (size_t i = 0; i < numLeaves; ++i) {
+    if (strides[i] != 0 && sizes[i] != 1) {
+      order.push_back(i);
+    }
+  }
+  llvm::sort(order,
+             [&](size_t a, size_t b) { return strides[a] < strides[b]; });
+
+  // Verify density and compute the new strides.
+  SmallVector<int64_t> newStrides = strides;
+  int64_t base = order.empty() ? 1 : strides[order.front()];
+  int64_t oldStride = base, newStride = base;
+  for (size_t i : order) {
+    if (strides[i] != oldStride) {
+      return std::nullopt;
+    }
+    newStrides[i] = newStride;
+    oldStride *= sizes[i];
+    newStride *= newSizes[i];
+  }
+  // Unit leaves do not occupy index space, so their stride is irrelevant.
+  for (size_t i = 0; i < numLeaves; ++i) {
+    if (newSizes[i] == 1) {
+      newStrides[i] = 0;
+    }
+  }
+
+  // Rebuild the view with the new leaf sizes and strides (depth-first order).
+  size_t next = 0;
+  std::function<tcg::Layout(const tcg::Layout &)> rebuild =
+      [&](const tcg::Layout &layout) -> tcg::Layout {
+    if (tcg::depth(layout) == 0) {
+      size_t idx = next++;
+      return tcg::Layout(newSizes[idx], newStrides[idx]);
+    }
+    std::vector<tcg::Layout> parts;
+    for (size_t i = 0, n = tcg::rank(layout); i < n; ++i) {
+      parts.push_back(rebuild(tcg::get(layout, i)));
+    }
+    return tcg::make_layout(parts);
+  };
+  return rebuild(view);
+}
+
+/// Check slice arguments against the spatial modes of `view` and compute the
+/// new leaf sizes. Fills `leafSlices` with the slice of every leaf that is
+/// sliced non-trivially (keyed by the flat leaf index).
+bool collectLeafSlices(const tcg::Layout &view, ArrayRef<int64_t> starts,
+                       ArrayRef<int64_t> limits, ArrayRef<int64_t> strides,
+                       SmallVectorImpl<int64_t> &newSizes,
+                       llvm::DenseMap<size_t, DimSlice> &leafSlices) {
+  size_t rank = tcg::rank(view) - 1;
+  if (starts.size() != rank || limits.size() != rank ||
+      strides.size() != rank || !tcg::is_static(view)) {
+    return false;
+  }
+  auto flat = tcg::flatten(view);
+  for (size_t i = 0, n = tcg::rank(flat); i < n; ++i) {
+    newSizes.push_back(tcg::get(flat, i).shape().as_int());
+  }
+  size_t leaf = 0; // Flat index of the first leaf of mode `i`.
+  for (size_t i = 0; i < rank; ++i) {
+    auto mode = tcg::get(view, i);
+    size_t firstLeaf = leaf;
+    leaf += tcg::rank(tcg::flatten(mode));
+
+    int64_t size = tcg::static_size(mode);
+    DimSlice slice{starts[i], limits[i], strides[i]};
+    if (starts[i] < 0 || limits[i] <= starts[i] || strides[i] <= 0 ||
+        limits[i] > size) {
+      return false;
+    }
+    if (slice.isIdentity(size)) {
+      continue;
+    }
+    // Only a single leaf (uniform stride) can be sliced.
+    if (tcg::depth(mode) != 0) {
+      LLVM_DEBUG(llvm::dbgs() << "Cannot slice: dimension " << i
+                              << " has no uniform stride\n");
+      return false;
+    }
+    newSizes[firstLeaf] = slice.count();
+    leafSlices[firstLeaf] = slice;
+  }
+  return true;
+}
+
+/// Slice dimension `dim` of `source`.
+LayoutSourceAttrInterface sliceSourceDim(LayoutSourceAttrInterface source,
+                                         size_t dim, const DimSlice &slice) {
+  SmallVector<int64_t> shape = source.getShape();
+  SmallVector<int64_t> starts(shape.size(), 0), limits = shape,
+                                                steps(shape.size(), 1);
+  starts[dim] = slice.start;
+  limits[dim] = slice.limit;
+  steps[dim] = slice.step;
+  return source.slice(starts, limits, steps);
+}
+
+} // namespace
+
 LayoutSourceAttrInterface
 ReductionSourceAttr::slice(ArrayRef<int64_t> starts, ArrayRef<int64_t> limits,
                            ArrayRef<int64_t> strides) const {
-  LLVM_DEBUG(llvm::dbgs() << "Reduction slice is not supported\n");
-  return nullptr;
+  // Only spatial dimensions can be sliced. A sliced dimension must be a single
+  // view leaf (uniform stride) that covers a whole dimension of the source, so
+  // the slice can be pushed down to the source.
+  auto view = getCuteLayout();
+  SmallVector<int64_t> newSizes;
+  llvm::DenseMap<size_t, DimSlice> leafSlices;
+  if (!collectLeafSlices(view, starts, limits, strides, newSizes, leafSlices)) {
+    return nullptr;
+  }
+  if (leafSlices.empty()) {
+    return *this;
+  }
+
+  // Row-major strides of the source dimensions in the view index space.
+  LayoutSourceAttrInterface source = getSource();
+  SmallVector<int64_t> sourceShape = source.getShape();
+  if (llvm::is_contained(sourceShape, kDynamic)) {
+    return nullptr;
+  }
+  SmallVector<int64_t> sourceStrides(sourceShape.size(), 1);
+  for (size_t i = sourceShape.size(); i-- > 1;) {
+    sourceStrides[i - 1] = sourceStrides[i] * sourceShape[i];
+  }
+
+  auto flat = tcg::flatten(view);
+  for (auto [leaf, slice] : leafSlices) {
+    int64_t size = tcg::get(flat, leaf).shape().as_int();
+    int64_t stride = tcg::get(flat, leaf).stride().as_int();
+    if (stride == 0) {
+      continue; // Broadcast: only the extent changes.
+    }
+    std::optional<size_t> dim;
+    for (size_t j = 0; j < sourceShape.size(); ++j) {
+      if (sourceStrides[j] == stride && sourceShape[j] == size) {
+        dim = j;
+        break;
+      }
+    }
+    if (!dim) {
+      LLVM_DEBUG(llvm::dbgs() << "Cannot slice: leaf " << leaf
+                              << " is not a whole source dimension\n");
+      return nullptr;
+    }
+    source = sliceSourceDim(source, *dim, slice);
+    if (!source) {
+      return nullptr;
+    }
+  }
+
+  auto newView = resizeDenseView(view, newSizes);
+  if (!newView) {
+    return nullptr;
+  }
+  return ReductionSourceAttr::get(getContext(), newView->toString(), source);
 }
 
 LayoutSourceAttrInterface ReductionSourceAttr::normalize() const {
@@ -1569,10 +1761,12 @@ LayoutSourceAttrInterface ReductionSourceAttr::normalize() const {
 
 namespace {
 
-// Return coalesced layout where each sub-layout belongs to a single group
-// in the given profile.
-tcg::Layout normalizeLayout(const tcg::Layout &layout,
-                            ArrayRef<int64_t> profile) {
+/// Return coalesced layout where each sub-layout belongs to a single group
+/// in the given profile. Returns std::nullopt if a mode cannot be split along
+/// the group boundaries (e.g. a reshaped and transposed view whose stride does
+/// not divide the cumulative group size).
+std::optional<tcg::Layout> normalizeLayout(const tcg::Layout &layout,
+                                           ArrayRef<int64_t> profile) {
   auto flat = tcg::coalesce(layout);
   std::vector<tcg::Layout> parts;
   for (size_t i = 0, n = tcg::rank(flat); i < n; ++i) {
@@ -1603,8 +1797,16 @@ tcg::Layout normalizeLayout(const tcg::Layout &layout,
         break;
       }
       // More groups are matching the layout.
-      assert(accum % stride == 0);
+      if (accum % stride != 0) {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "Cannot split layout mode (" << shape << ":" << stride
+                   << ") at group boundary " << accum << "\n");
+        return std::nullopt;
+      }
       int64_t n = accum / stride;
+      if (shape % n != 0) {
+        return std::nullopt;
+      }
       splitParts.emplace_back(n, stride);
       shape /= n;
       stride *= n;
@@ -1614,7 +1816,7 @@ tcg::Layout normalizeLayout(const tcg::Layout &layout,
   return tcg::make_layout(parts);
 }
 
-// Extract and sort shape sizes for the given stride range.
+/// Extract and sort shape sizes for the given stride range.
 SmallVector<int64_t> extractSizes(const tcg::Layout &layout, int64_t start,
                                   int64_t size) {
   // Filter layout components matching the range.
@@ -1640,25 +1842,67 @@ SmallVector<int64_t> extractSizes(const tcg::Layout &layout, int64_t start,
   return result;
 }
 
-// Normalize underlying source and split into parts.
+/// Split a normalized source shape at the operand group boundaries.
 llvm::FailureOr<SmallVector<int64_t>>
-normalizeAndSplit(const LayoutSourceAttrInterface &source,
-                  ArrayRef<int64_t> profile) {
+splitNormalizedShape(ArrayRef<int64_t> shape, ArrayRef<int64_t> profile) {
   // Remove unit dimensions (helper).
   auto removeUnitDimensions = [](ArrayRef<int64_t> shape) {
     return SmallVector<int64_t>(
         llvm::make_filter_range(shape, [](int64_t n) { return n != 1; }));
   };
-  // Normalize and apply profile, ignoring unit dimensions.
-  LayoutSourceAttrInterface norm = source.normalize();
-  if (!norm) {
-    return llvm::failure();
-  }
   return getCommonIterationSpace(
-      {removeUnitDimensions(norm.getShape()), removeUnitDimensions(profile)});
+      {removeUnitDimensions(shape), removeUnitDimensions(profile)});
 };
 
-// Build map of strides to dimension index for the output view layout.
+/// Appends strides of a group of operand dimensions, given the stride of the
+/// innermost one.
+void appendOperandStrides(SmallVectorImpl<int64_t> &out,
+                          ArrayRef<int64_t> shape, int64_t baseStride) {
+  SmallVector<int64_t> strides;
+  int64_t stride = baseStride;
+  for (int64_t size : llvm::reverse(shape)) {
+    strides.push_back(stride);
+    stride *= size;
+  }
+  out.append(strides.rbegin(), strides.rend());
+}
+
+/// Returns the strides that the LHS dimensions of a matmul take in its view.
+llvm::FailureOr<SmallVector<int64_t>>
+getLhsExpectedStrides(MatmulSourceAttr attr) {
+  SmallVector<int64_t> result;
+  SmallVector<int64_t> shape = attr.getLhs().getShape();
+  auto m = findDimensionWithSuffixProduct(shape, attr.getM() * attr.getK());
+  auto k = findDimensionWithSuffixProduct(shape, attr.getK());
+  if (failed(m) || failed(k)) {
+    return llvm::failure();
+  }
+  int64_t mnk = attr.getM() * attr.getN() * attr.getK();
+  appendOperandStrides(result, ArrayRef(shape).take_front(*m), mnk);
+  appendOperandStrides(result, ArrayRef(shape).slice(*m, *k - *m),
+                       attr.getN() * attr.getK());
+  appendOperandStrides(result, ArrayRef(shape).drop_front(*k), 1);
+  return result;
+}
+
+/// Returns the strides that the RHS dimensions of a matmul take in its view.
+llvm::FailureOr<SmallVector<int64_t>>
+getRhsExpectedStrides(MatmulSourceAttr attr) {
+  SmallVector<int64_t> result;
+  SmallVector<int64_t> shape = attr.getRhs().getShape();
+  auto k = findDimensionWithSuffixProduct(shape, attr.getK() * attr.getN());
+  auto n = findDimensionWithSuffixProduct(shape, attr.getN());
+  if (failed(k) || failed(n)) {
+    return llvm::failure();
+  }
+  int64_t mnk = attr.getM() * attr.getN() * attr.getK();
+  appendOperandStrides(result, ArrayRef(shape).take_front(*k), mnk);
+  appendOperandStrides(result, ArrayRef(shape).slice(*k, *n - *k), 1);
+  appendOperandStrides(result, ArrayRef(shape).drop_front(*n), attr.getK());
+  return result;
+}
+
+/// Build map of strides to dimension index for the output view layout.
 std::unordered_map<int64_t, size_t>
 buildDimensionMap(const tcg::Layout &layout) {
   std::unordered_map<int64_t, size_t> result;
@@ -1737,32 +1981,14 @@ SmallVector<int64_t> MatmulSourceAttr::getContractingShape() const {
 
 llvm::FailureOr<SmallVector<size_t>>
 MatmulSourceAttr::getLhsDimensionMap() const {
-  // Collect expected strides of LHS dimensions in the output view.
-  SmallVector<int64_t> ident;
-  SmallVector<int64_t> lhsShape = getLhs().getShape();
-  auto lhsM = findDimensionWithSuffixProduct(lhsShape, getM() * getK());
-  auto lhsK = findDimensionWithSuffixProduct(lhsShape, getK());
-  if (failed(lhsM) || failed(lhsK)) {
+  auto expected = getLhsExpectedStrides(*this);
+  if (failed(expected)) {
     return llvm::failure();
   }
-  auto appendStrides = [&](ArrayRef<int64_t> shape, int64_t baseStride) {
-    SmallVector<int64_t> strides;
-    int64_t stride = baseStride;
-    for (int64_t size : llvm::reverse(shape)) {
-      strides.push_back(stride);
-      stride *= size;
-    }
-    ident.append(strides.rbegin(), strides.rend());
-  };
-  appendStrides(ArrayRef(lhsShape).take_front(*lhsM), getM() * getN() * getK());
-  appendStrides(ArrayRef(lhsShape).slice(*lhsM, *lhsK - *lhsM),
-                getN() * getK());
-  appendStrides(ArrayRef(lhsShape).drop_front(*lhsK), 1);
-
   // Map strides to output dimensions.
   SmallVector<size_t> result;
   auto dimensionMap = buildDimensionMap(getCuteLayout());
-  for (int64_t stride : ident) {
+  for (int64_t stride : *expected) {
     auto it = dimensionMap.find(stride);
     if (it == dimensionMap.end()) {
       LLVM_DEBUG(llvm::dbgs() << "Cannot find output dimension for stride "
@@ -1776,31 +2002,14 @@ MatmulSourceAttr::getLhsDimensionMap() const {
 
 llvm::FailureOr<SmallVector<size_t>>
 MatmulSourceAttr::getRhsDimensionMap() const {
-  // Collect expected strides of RHS dimensions in the output view.
-  SmallVector<int64_t> ident;
-  SmallVector<int64_t> rhsShape = getRhs().getShape();
-  auto rhsK = findDimensionWithSuffixProduct(rhsShape, getK() * getN());
-  auto rhsN = findDimensionWithSuffixProduct(rhsShape, getN());
-  if (failed(rhsK) || failed(rhsN)) {
+  auto expected = getRhsExpectedStrides(*this);
+  if (failed(expected)) {
     return llvm::failure();
   }
-  auto appendStrides = [&](ArrayRef<int64_t> shape, int64_t baseStride) {
-    SmallVector<int64_t> strides;
-    int64_t stride = baseStride;
-    for (int64_t size : llvm::reverse(shape)) {
-      strides.push_back(stride);
-      stride *= size;
-    }
-    ident.append(strides.rbegin(), strides.rend());
-  };
-  appendStrides(ArrayRef(rhsShape).take_front(*rhsK), getM() * getN() * getK());
-  appendStrides(ArrayRef(rhsShape).slice(*rhsK, *rhsN - *rhsK), 1);
-  appendStrides(ArrayRef(rhsShape).drop_front(*rhsN), getK());
-
   // Map strides to output dimensions.
   SmallVector<size_t> result;
   auto dimensionMap = buildDimensionMap(getCuteLayout());
-  for (int64_t stride : ident) {
+  for (int64_t stride : *expected) {
     auto it = dimensionMap.find(stride);
     if (it == dimensionMap.end()) {
       LLVM_DEBUG(llvm::dbgs() << "Cannot find output dimension for stride "
@@ -1863,16 +2072,94 @@ MatmulSourceAttr::transpose(ArrayRef<int64_t> permutation) const {
 LayoutSourceAttrInterface
 MatmulSourceAttr::slice(ArrayRef<int64_t> starts, ArrayRef<int64_t> limits,
                         ArrayRef<int64_t> strides) const {
-  LLVM_DEBUG(llvm::dbgs() << "Matmul slice is not supported\n");
-  return nullptr;
+  // Only spatial dimensions can be sliced. A sliced dimension must be a single
+  // view leaf (uniform stride) that corresponds to a whole dimension of the
+  // LHS (M), RHS (N), or both (batch) operands.
+  auto view = getCuteLayout();
+  SmallVector<int64_t> newSizes;
+  llvm::DenseMap<size_t, DimSlice> leafSlices;
+  if (!collectLeafSlices(view, starts, limits, strides, newSizes, leafSlices)) {
+    return nullptr;
+  }
+  if (leafSlices.empty()) {
+    return *this;
+  }
+
+  // Operand dimensions are located by their expected view stride. Unlike
+  // getLhs/RhsDimensionMap, this does not require every operand dimension to
+  // have a view leaf: unit dimensions (e.g. a batch sliced down to size 1) have
+  // zero stride in the view and are never the target of a slice.
+  auto lhsStrides = getLhsExpectedStrides(*this);
+  auto rhsStrides = getRhsExpectedStrides(*this);
+  if (failed(lhsStrides) || failed(rhsStrides)) {
+    return nullptr;
+  }
+
+  auto flat = tcg::flatten(view);
+  LayoutSourceAttrInterface lhs = getLhs(), rhs = getRhs();
+  SmallVector<int64_t> lhsShape = lhs.getShape(), rhsShape = rhs.getShape();
+  int64_t newB = getB(), newM = getM(), newN = getN();
+  for (auto [leaf, slice] : leafSlices) {
+    int64_t size = tcg::get(flat, leaf).shape().as_int();
+    int64_t stride = tcg::get(flat, leaf).stride().as_int();
+    int64_t count = slice.count();
+    if (stride == 0) {
+      continue; // Broadcast: only the extent changes.
+    }
+
+    // Classify the leaf by the stride range it occupies in the logical view.
+    int64_t &extent = stride >= getM() * getN() * getK() ? newB
+                      : stride >= getN() * getK()        ? newM
+                                                         : newN;
+    bool isBatch = stride >= getM() * getN() * getK();
+    bool isLhs = isBatch || stride >= getN() * getK();
+    bool isRhs = isBatch || (!isLhs && stride >= getK());
+    if (!isLhs && !isRhs) {
+      return nullptr;
+    }
+    extent = extent / size * count;
+
+    auto apply = [&](ArrayRef<int64_t> expected, ArrayRef<int64_t> shape,
+                     LayoutSourceAttrInterface &source) {
+      for (size_t dim = 0; dim < expected.size(); ++dim) {
+        if (expected[dim] == stride && shape[dim] == size) {
+          source = sliceSourceDim(source, dim, slice);
+          return static_cast<bool>(source);
+        }
+      }
+      return false;
+    };
+    if ((isLhs && !apply(*lhsStrides, lhsShape, lhs)) ||
+        (isRhs && !apply(*rhsStrides, rhsShape, rhs))) {
+      LLVM_DEBUG(llvm::dbgs() << "Cannot slice: leaf " << leaf
+                              << " is not a whole operand dimension\n");
+      return nullptr;
+    }
+  }
+
+  auto newView = resizeDenseView(view, newSizes);
+  if (!newView) {
+    return nullptr;
+  }
+  return MatmulSourceAttr::get(getContext(), newView->toString(), newB, newM,
+                               newN, getK(), lhs, rhs);
 }
 
 LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
   LLVM_DEBUG(llvm::dbgs() << "Computing iteration space for matmul\n");
   [[maybe_unused]] static constexpr llvm::StringRef kTab = "    ";
 
+  // Retain normalized producers as well as their shapes. In particular, a
+  // reduction operand must preserve the source reordering done by normalize().
+  auto lhsResult = getLhs().normalize();
+  auto rhsResult = getRhs().normalize();
+  if (!lhsResult || !rhsResult) {
+    return nullptr;
+  }
+
   // [1] Compute LHS iteration space and get boundaries.
-  auto lhsIterSpace = normalizeAndSplit(getLhs(), {getB(), getM(), getK()});
+  auto lhsIterSpace =
+      splitNormalizedShape(lhsResult.getShape(), {getB(), getM(), getK()});
   if (llvm::failed(lhsIterSpace)) {
     LLVM_DEBUG(llvm::dbgs() << "Cannot normalize LHS source\n");
     return nullptr;
@@ -1883,7 +2170,8 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
   assert(llvm::succeeded(lhsM) && llvm::succeeded(lhsK));
 
   // [2] Compute RHS iteration space and get boundaries.
-  auto rhsIterSpace = normalizeAndSplit(getRhs(), {getB(), getK(), getN()});
+  auto rhsIterSpace =
+      splitNormalizedShape(rhsResult.getShape(), {getB(), getK(), getN()});
   if (llvm::failed(rhsIterSpace)) {
     LLVM_DEBUG(llvm::dbgs() << "Cannot normalize RHS source\n");
     return nullptr;
@@ -1894,8 +2182,13 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
   assert(llvm::succeeded(rhsK) && llvm::succeeded(rhsN));
 
   // [3] Normalize output layout.
-  auto output =
+  auto outputOrNone =
       normalizeLayout(getCuteLayout(), {getB(), getM(), getN(), getK()});
+  if (!outputOrNone) {
+    LLVM_DEBUG(llvm::dbgs() << "Cannot normalize output layout\n");
+    return nullptr;
+  }
+  tcg::Layout output = *outputOrNone;
   LLVM_DEBUG(llvm::dbgs() << kTab << "Normalized output layout: "
                           << output.toString() << "\n");
 
@@ -1979,7 +2272,6 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
     lhsTarget.push_back(1);
   }
 
-  LayoutSourceAttrInterface lhsResult = getLhs();
   if (lhsResult.getShape() != lhsTarget) {
     lhsResult = lhsResult.reshape(lhsTarget);
     if (!lhsResult) {
@@ -1996,7 +2288,6 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
     rhsTarget.push_back(1);
   }
 
-  LayoutSourceAttrInterface rhsResult = getRhs();
   if (rhsResult.getShape() != rhsTarget) {
     rhsResult = rhsResult.reshape(rhsTarget);
     if (!rhsResult) {
@@ -2011,7 +2302,12 @@ LayoutSourceAttrInterface MatmulSourceAttr::normalize() const {
   profile.insert(profile.end(), nShape->begin(), nShape->end());
   profile.insert(profile.end(), kShape->begin(), kShape->end());
 
-  auto viewLayout = normalizeLayout(getCuteLayout(), profile);
+  auto viewLayoutOrNone = normalizeLayout(getCuteLayout(), profile);
+  if (!viewLayoutOrNone) {
+    LLVM_DEBUG(llvm::dbgs() << "Cannot normalize output layout\n");
+    return nullptr;
+  }
+  tcg::Layout viewLayout = *viewLayoutOrNone;
   LLVM_DEBUG(llvm::dbgs() << kTab << "Resulting output layout: "
                           << viewLayout.toString() << "\n");
 

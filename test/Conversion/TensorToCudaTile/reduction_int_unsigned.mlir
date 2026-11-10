@@ -4,7 +4,7 @@
 // Reductions with small contracting dimension (no loop)
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_add_small
+// CHECK-LABEL: entry @test_reduce_add_small(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[0 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
@@ -23,7 +23,7 @@ nv_tensor_ir.graph @test_reduce_add_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_avg_small
+// CHECK-LABEL: entry @test_reduce_avg_small(
 // CHECK: %[[C16:.*]] = constant <i32: 16>
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[0 : i32]
@@ -44,7 +44,7 @@ nv_tensor_ir.graph @test_reduce_avg_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_norm1_small
+// CHECK-LABEL: entry @test_reduce_norm1_small(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[0 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
@@ -63,7 +63,7 @@ nv_tensor_ir.graph @test_reduce_norm1_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_mul_small
+// CHECK-LABEL: entry @test_reduce_mul_small(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[1 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
@@ -82,7 +82,7 @@ nv_tensor_ir.graph @test_reduce_mul_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_mul_no_zeros_small
+// CHECK-LABEL: entry @test_reduce_mul_no_zeros_small(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -105,7 +105,7 @@ nv_tensor_ir.graph @test_reduce_mul_no_zeros_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_max_small
+// CHECK-LABEL: entry @test_reduce_max_small(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[0 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
@@ -124,7 +124,7 @@ nv_tensor_ir.graph @test_reduce_max_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_amax_small
+// CHECK-LABEL: entry @test_reduce_amax_small(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[0 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
@@ -143,7 +143,7 @@ nv_tensor_ir.graph @test_reduce_amax_small(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_min_small
+// CHECK-LABEL: entry @test_reduce_min_small(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
 // CHECK: %[[REDUCE:.*]] = reduce %[[ARG0]] dim=1 identities=[-1 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
@@ -166,7 +166,7 @@ nv_tensor_ir.graph @test_reduce_min_small(
 // Reductions with large contracting dimension (loop)
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_add_large
+// CHECK-LABEL: entry @test_reduce_add_large(
 // CHECK: %[[ACCUM:.*]] = constant <i32: 0> : tile<32x128xi32>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -189,7 +189,7 @@ nv_tensor_ir.graph @test_reduce_add_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_avg_large
+// CHECK-LABEL: entry @test_reduce_avg_large(
 // CHECK-DAG: %[[C8192:.*]] = constant <i32: 8192> : tile<32x1xi32>
 // CHECK-DAG: %[[ACCUM:.*]] = constant <i32: 0> : tile<32x128xi32>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
@@ -216,7 +216,7 @@ nv_tensor_ir.graph @test_reduce_avg_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_norm1_large
+// CHECK-LABEL: entry @test_reduce_norm1_large(
 // CHECK: %[[ACCUM:.*]] = constant <i32: 0> : tile<32x128xi32>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -239,7 +239,7 @@ nv_tensor_ir.graph @test_reduce_norm1_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_mul_large
+// CHECK-LABEL: entry @test_reduce_mul_large(
 // CHECK: %[[ACCUM:.*]] = constant <i32: 1> : tile<32x128xi32>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -262,7 +262,7 @@ nv_tensor_ir.graph @test_reduce_mul_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_mul_no_zeros_large
+// CHECK-LABEL: entry @test_reduce_mul_no_zeros_large(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ACCUM:.*]] = constant <i32: 1> : tile<32x128xi32>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
@@ -288,7 +288,7 @@ nv_tensor_ir.graph @test_reduce_mul_no_zeros_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_max_large
+// CHECK-LABEL: entry @test_reduce_max_large(
 // CHECK: %[[ACCUM:.*]] = constant <i32: 0> : tile<32x128xi32>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -311,7 +311,7 @@ nv_tensor_ir.graph @test_reduce_max_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_amax_large
+// CHECK-LABEL: entry @test_reduce_amax_large(
 // CHECK: %[[ACCUM:.*]] = constant <i32: 0> : tile<32x128xi32>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -334,7 +334,7 @@ nv_tensor_ir.graph @test_reduce_amax_large(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_min_large
+// CHECK-LABEL: entry @test_reduce_min_large(
 // CHECK: %[[ACCUM:.*]] = constant <i32: -1>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ACCUM]])
 // CHECK:   %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -361,7 +361,7 @@ nv_tensor_ir.graph @test_reduce_min_large(
 // Verify identity value for min reductions
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_min_i8
+// CHECK-LABEL: entry @test_reduce_min_i8(
 // CHECK: %[[IDENTITY:.*]] = constant <i8: -1> : tile<32x128xi8>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[IDENTITY]])
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -384,7 +384,7 @@ nv_tensor_ir.graph @test_reduce_min_i8(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_min_i16
+// CHECK-LABEL: entry @test_reduce_min_i16(
 // CHECK: %[[IDENTITY:.*]] = constant <i16: -1> : tile<32x128xi16>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[IDENTITY]])
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -407,7 +407,7 @@ nv_tensor_ir.graph @test_reduce_min_i16(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_min_i64
+// CHECK-LABEL: entry @test_reduce_min_i64(
 // CHECK: %[[IDENTITY:.*]] = constant <i64: -1> : tile<32x128xi64>
 // CHECK: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[IDENTITY]])
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko
@@ -434,7 +434,7 @@ nv_tensor_ir.graph @test_reduce_min_i64(
 // Verify large reduction with small types (mode=avg)
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_avg_i8
+// CHECK-LABEL: entry @test_reduce_avg_i8(
 // With ReshapeOp::fold, reshape(constant) becomes a constant of the result
 // type; the public cuda-tile used by the OSS build leaves the reshape.
 // CHECK: %[[OUTPUT:.*]] = {{(constant <i8: 0> : tile<32xi8>|reshape .* -> tile<32xi8>)}}
@@ -451,7 +451,7 @@ nv_tensor_ir.graph @test_reduce_avg_i8(
 
 // -----
 
-// CHECK-LABEL: @test_reduce_avg_i16
+// CHECK-LABEL: entry @test_reduce_avg_i16(
 // With ReshapeOp::fold, reshape(constant) becomes a constant of the result
 // type; the public cuda-tile used by the OSS build leaves the reshape.
 // CHECK: %[[OUTPUT:.*]] = {{(constant <i16: 0> : tile<32xi16>|reshape .* -> tile<32xi16>)}}

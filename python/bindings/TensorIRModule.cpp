@@ -114,8 +114,8 @@ public:
         handle(), 100, MlirTensorIRArchPortabilityFamilyPortable);
   }
 
-  // Move-only: the handle is owning, and nothing in the Python API copies an
-  // options object. `parse` returns one by value, which the move covers.
+  /// Move-only: the handle is owning, and nothing in the Python API copies an
+  /// options object. `parse` returns one by value, which the move covers.
   CompileOptions(CompileOptions &&) noexcept = default;
   CompileOptions &operator=(CompileOptions &&) noexcept = default;
   CompileOptions(const CompileOptions &) = delete;
@@ -132,6 +132,15 @@ public:
                                   text);
     }
     return options;
+  }
+
+  bool hasRemarks() const {
+    bool enabled = false;
+    std::string error;
+    checkCAPIResult(mlirTensorIRCompilerInvocationHasRemarks(
+                        handle(), &enabled, appendStringRef, &error),
+                    "mlirTensorIRCompilerInvocationHasRemarks", error);
+    return enabled;
   }
 
   std::string toString() const {
@@ -237,9 +246,9 @@ int64_t bitcastAndZExtTo64(T value) {
   return bits;
 }
 
-// nb::cast<int64_t> throws an unfriendly, nanobind-internal exception for a
-// Python int outside int64_t's range (e.g. >= 2**63) -- report a clean
-// TypeError instead.
+/// nb::cast<int64_t> throws an unfriendly, nanobind-internal exception for a
+/// Python int outside int64_t's range (e.g. >= 2**63) -- report a clean
+/// TypeError instead.
 int64_t castToInt64OrThrow(nb::handle value) {
   try {
     return nb::cast<int64_t>(value);
@@ -249,8 +258,8 @@ int64_t castToInt64OrThrow(nb::handle value) {
   }
 }
 
-// A bare Python int/float scalar argument gets a fixed default element type
-// from its Python type: float -> F32, int -> SI64.
+/// A bare Python int/float scalar argument gets a fixed default element type
+/// from its Python type: float -> F32, int -> SI64.
 MlirTensorIRArgument packBareNumberArg(nb::handle value) {
   MlirTensorIRArgument argument{};
   argument.kind = MlirTensorIRArgumentKindScalar;
@@ -266,8 +275,8 @@ MlirTensorIRArgument packBareNumberArg(nb::handle value) {
   return argument;
 }
 
-// A bare Python bool is an unambiguous i1 scalar (unlike int/float, which
-// have no fixed width) -- accepted directly.
+/// A bare Python bool is an unambiguous i1 scalar (unlike int/float, which
+/// have no fixed width) -- accepted directly.
 MlirTensorIRArgument packBoolArg(nb::handle value) {
   MlirTensorIRArgument argument{};
   argument.kind = MlirTensorIRArgumentKindScalar;
@@ -365,10 +374,28 @@ size_t checkedElementCount(llvm::ArrayRef<int64_t> shape) {
   return elementCount;
 }
 
+constexpr size_t getDLPackElementBitWidth(DLDataType dtype) {
+  return static_cast<size_t>(dtype.bits) * static_cast<size_t>(dtype.lanes);
+}
+
+constexpr bool isByteAddressableDLPackDType(DLDataType dtype) {
+  return getDLPackElementBitWidth(dtype) % 8 == 0;
+}
+
+static_assert(!isByteAddressableDLPackDType(DLDataType{
+    kDLFloat4_e2m1fn, /*bits=*/4, /*lanes=*/1}));
+static_assert(isByteAddressableDLPackDType(DLDataType{
+    kDLFloat4_e2m1fn, /*bits=*/4, /*lanes=*/2}));
+
 size_t checkedByteSize(const DLTensor &tensor, llvm::ArrayRef<int64_t> shape) {
   size_t elementCount = checkedElementCount(shape);
-  size_t elementBytes =
-      static_cast<size_t>((tensor.dtype.bits * tensor.dtype.lanes + 7) / 8);
+  size_t bitWidth = getDLPackElementBitWidth(tensor.dtype);
+  if (!isByteAddressableDLPackDType(tensor.dtype)) {
+    throw nb::type_error(
+        "TensorIR workspace dtype must be byte-addressable; use a uint8 "
+        "workspace for sub-byte storage");
+  }
+  size_t elementBytes = bitWidth / 8;
   if (elementBytes != 0 &&
       elementCount > std::numeric_limits<size_t>::max() / elementBytes) {
     throw nb::type_error("DLPack tensor byte size overflow");
@@ -437,10 +464,10 @@ void appendDLPackTensorView(const DLTensor &tensor, PackedPythonArgs &packed) {
   packed.strides.push_back(std::move(stride));
 }
 
-// A 0-d DLPack object used as a scalar argument; its element type comes
-// from its own dtype. GPU-resident 0-d objects are rejected below (see
-// the device_type check) -- express those as a real tensor operand
-// instead.
+/// A 0-d DLPack object used as a scalar argument; its element type comes
+/// from its own dtype. GPU-resident 0-d objects are rejected below (see
+/// the device_type check) -- express those as a real tensor operand
+/// instead.
 MlirTensorIRArgument packDLPackScalarArg(const DLTensor &tensor) {
   if (tensor.device.device_type != kDLCPU &&
       tensor.device.device_type != kDLCUDAHost) {
@@ -477,10 +504,10 @@ MlirTensorIRArgument packDLPackScalarArg(const DLTensor &tensor) {
   return argument;
 }
 
-// Packs an N-d DLPack object as a Tensor argument. `capsule` must be the
-// result of createDLPackCapsule(value); ownership moves into
-// `packed.dlpackCapsules` so the data/shape/stride pointers below stay
-// valid for the whole runtime call.
+/// Packs an N-d DLPack object as a Tensor argument. `capsule` must be the
+/// result of createDLPackCapsule(value); ownership moves into
+/// `packed.dlpackCapsules` so the data/shape/stride pointers below stay
+/// valid for the whole runtime call.
 MlirTensorIRArgument packDLPackTensorArg(nb::object capsule,
                                          PackedPythonArgs &packed) {
   packed.dlpackCapsules.push_back(std::move(capsule));
@@ -658,6 +685,15 @@ public:
     return nb::bytes(bytecode.data(), bytecode.size());
   }
 
+  std::string getRemarks() const {
+    std::string yaml, error;
+    checkCAPIResult(mlirTensorIRArtifactGetRemarks(artifact_, appendStringRef,
+                                                   &yaml, appendStringRef,
+                                                   &error),
+                    "mlirTensorIRArtifactGetRemarks", error);
+    return yaml;
+  }
+
   nb::bytes serialize() const {
     std::string bytes;
     std::string error;
@@ -711,6 +747,14 @@ NB_MODULE(_tensor_ir, m) {
       .value("TileIR", MlirTensorIRCudaTileArtifactKindTileIR)
       .value("Cubin", MlirTensorIRCudaTileArtifactKindCubin);
 
+  nb::enum_<MlirTensorIROptimizationRemarkRemarkCategory>(m, "RemarkCategory")
+      .value("NONE", MlirTensorIROptimizationRemarkRemarkCategoryNone)
+      .value("INHERIT", MlirTensorIROptimizationRemarkRemarkCategoryInherit)
+      .value("ALL", MlirTensorIROptimizationRemarkRemarkCategoryAll)
+      .value("MEMORY", MlirTensorIROptimizationRemarkRemarkCategoryMemory)
+      .value("TENSORCORE",
+             MlirTensorIROptimizationRemarkRemarkCategoryTensorCore);
+
   nb::enum_<MlirTensorIRCudaTileAutoGdcInsertion>(m, "AutoGdcInsertion")
       .value("NONE", MlirTensorIRCudaTileAutoGdcInsertionNone)
       .value("CONSERVATIVE", MlirTensorIRCudaTileAutoGdcInsertionConservative);
@@ -761,7 +805,8 @@ NB_MODULE(_tensor_ir, m) {
       nb::class_<CompileOptions>(m, "CompileOptions")
           .def(nb::init<>())
           .def_static("parse", &CompileOptions::parse, nb::arg("text"))
-          .def("__str__", &CompileOptions::toString);
+          .def("__str__", &CompileOptions::toString)
+          .def("has_remarks", &CompileOptions::hasRemarks);
 
   // The target reaches Python as the compute capability and portability pair a
   // caller chooses; the invocation stores the `kernel-target` spelling they name.
@@ -835,10 +880,22 @@ NB_MODULE(_tensor_ir, m) {
                   CodegenStrategy);
   TIR_BIND_OPTION(MlirTensorIRCudaTileArtifactKind, "artifact_kind",
                   ArtifactKind);
+  TIR_BIND_OPTION(MlirTensorIROptimizationRemarkRemarkCategory, "remarks",
+                  RemarksFilter);
+  TIR_BIND_OPTION(MlirTensorIROptimizationRemarkRemarkCategory,
+                  "remarks_passed", RemarksPassedFilter);
+  TIR_BIND_OPTION(MlirTensorIROptimizationRemarkRemarkCategory,
+                  "remarks_missed", RemarksMissedFilter);
+  TIR_BIND_OPTION(MlirTensorIROptimizationRemarkRemarkCategory,
+                  "remarks_failed", RemarksFailedFilter);
+  TIR_BIND_OPTION(MlirTensorIROptimizationRemarkRemarkCategory,
+                  "remarks_analysis", RemarksAnalysisFilter);
+  TIR_BIND_STRING_OPTION("remarks_output_file", RemarksOutputFile);
   TIR_BIND_OPTION(bool, "print_ir_after_all", PrintIRAfterAll);
   TIR_BIND_OPTION(bool, "enable_timing", EnableTiming);
   TIR_BIND_OPTION(bool, "print_cuda_tile_ir", PrintCudaTileIR);
   TIR_BIND_STRING_OPTION("cuda_toolkit_path", CudaToolkitPath);
+  TIR_BIND_STRING_OPTION("tileiras_path", TileirasPath);
   TIR_BIND_STRING_OPTION("dump_cuda_tile_ir_path", DumpCudaTileIRPath);
   TIR_BIND_STRING_OPTION("dump_tileir_bc_path", DumpTileIRBCPath);
   TIR_BIND_STRING_OPTION("load_tileir_bc_path", LoadTileIRBCPath);
@@ -856,6 +913,7 @@ NB_MODULE(_tensor_ir, m) {
   nb::class_<PyArtifact>(m, "_Artifact")
       .def("load", &PyArtifact::load)
       .def("get_bytecode", &PyArtifact::getBytecode)
+      .def("get_remarks", &PyArtifact::getRemarks)
       .def("serialize", &PyArtifact::serialize)
       .def_static("deserialize", &PyArtifact::deserialize, nb::arg("bytes"));
 

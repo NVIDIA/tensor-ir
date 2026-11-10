@@ -9,12 +9,12 @@ func.func @load(
   // CHECK-SAME: %[[M:[^:]+]]: index, %[[STRIDE:[^:]+]]: index, %[[OFFSET:[^:]+]]: index
   // CHECK-SAME: %[[ROW:[^:]+]]: index, %[[COLUMN:[^:]+]]: index
   // CHECK: %[[VIEW:.*]] = memref.reinterpret_cast %[[BASE]] to offset: [%[[OFFSET]]], sizes: [%[[M]], 128], strides: [%[[STRIDE]], 1]
-  // CHECK: %[[TILE:.*]] = nv_tensor_ir.load %[[VIEW]] tile_indices [%[[ROW]], %[[COLUMN]]], alignment 16, padding <zero>
+  // CHECK: %[[TILE:.*]] = nv_tensor_ir.load %[[VIEW]] tile_indices [%[[ROW]], %[[COLUMN]]], alignment 16, padding <zero> allow_tma false
   // CHECK: return %[[TILE]]
   %access_view_0 = memref.reinterpret_cast %base to offset: [%offset], sizes: [%m, 128], strides: [%stride, 1]
       : memref<f32> to memref<?x128xf32, strided<[?, 1], offset: ?>>
   %tile = nv_tensor_ir.load %access_view_0 tile_indices [%row, %column], alignment 16,
-      padding <zero>
+      padding <zero> allow_tma false
       : memref<?x128xf32, strided<[?, 1], offset: ?>> to tensor<32x64xf32>
   return %tile : tensor<32x64xf32>
 }
@@ -26,10 +26,10 @@ func.func @store(
   // CHECK-SAME: %[[BASE:[^:]+]]: memref<si32>, %[[TILE:[^:]+]]: tensor<16x16xsi32>
   // CHECK-SAME: %[[ROW:[^:]+]]: index, %[[COLUMN:[^:]+]]: index
   // CHECK: %[[VIEW:.*]] = memref.reinterpret_cast %[[BASE]] to offset: [0], sizes: [64, 64], strides: [64, 1]
-  // CHECK: nv_tensor_ir.store %[[TILE]], %[[VIEW]] tile_indices [%[[ROW]], %[[COLUMN]]], alignment 4
+  // CHECK: nv_tensor_ir.store %[[TILE]], %[[VIEW]] tile_indices [%[[ROW]], %[[COLUMN]]], alignment 4 allow_tma false
   %access_view_0 = memref.reinterpret_cast %base to offset: [0], sizes: [64, 64], strides: [64, 1]
       : memref<si32> to memref<64x64xsi32, strided<[64, 1], offset: 0>>
-  nv_tensor_ir.store %tile, %access_view_0 tile_indices [%row, %column], alignment 4
+  nv_tensor_ir.store %tile, %access_view_0 tile_indices [%row, %column], alignment 4 allow_tma false
       : tensor<16x16xsi32>, memref<64x64xsi32, strided<[64, 1], offset: 0>>
   return
 }

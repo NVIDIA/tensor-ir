@@ -14,11 +14,11 @@ using namespace mlir::nv_tensor_ir::tiling_analysis;
 
 namespace {
 
-// Test pass that drives TilingEvaluator so its behavior can be exercised with
-// FileCheck instead of C++ unit tests. Runs TilingEvaluator::create() plus
-// evaluate() with the tile-shape/reduction-tile-size pass options and stashes
-// the string form of the result (or the evaluation failure) as an
-// "tiling-evaluation" attribute on the graph.
+/// Test pass that drives TilingEvaluator so its behavior can be exercised with
+/// FileCheck instead of C++ unit tests. Runs TilingEvaluator::create() plus
+/// evaluate() with the tile-shape/reduction-tile-size pass options and stashes
+/// the string form of the result (or the evaluation failure) as an
+/// "tiling-evaluation" attribute on the graph.
 struct TestTilingEvaluatorPass
     : public PassWrapper<TestTilingEvaluatorPass, OperationPass<GraphOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestTilingEvaluatorPass);

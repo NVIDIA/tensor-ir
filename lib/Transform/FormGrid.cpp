@@ -1,34 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Layout propagation describes every tensor source as a logical strided view
-// in a normalized iteration-space carrier. This pass consumes a function whose
-// buffer boundary is already explicit (produced by tir-bufferize) and tiles its
-// tensor computation onto a 1D GPU block grid.
-//
-// Key responsibilities of this pass:
-// 1. Grid creation: Establishes an scf.forall loop mapped to #gpu.block<x>
-//    covering the total number of tiles in the flattened iteration space.
-// 2. Delinearization: Converts the 1D block index into multi-dimensional tile
-//    coordinates using column-major ordering.
-// 3. Tile materialization: Recursively traces backward from each boundary
-//    bufferization.materialize_in_destination to produce fixed-size tile
-//    values:
-//    - Replaces bufferization.to_tensor inputs with tiled LoadOps having
-//      concrete offsets, sizes, strides, alignments, and tile slice
-//      coordinates.
-//    - Folds layout-modifying operations into access descriptors, then restores
-//      broadcast dimensions with explicit tile broadcasts.
-//    - Evaluates ConcatenateOps into nested scf.if branches partitioned along
-//      the concatenation dimension.
-//    - Materializes IotaOps by composing local tile coordinates with global
-//      block offsets.
-//    - Tiles PointwiseOps by cloning them with concrete tile result types.
-//    - Prepares coarse tiles for ReduceOps and MatmulOps, attaching formation
-//      metadata for the downstream TileReductionsPass.
-// 4. Cleanup: Erases the bufferization bridges and dead untiled computation,
-//    and strips analysis-only attributes (tile sizes) so downstream passes
-//    operate on explicit SSA values and types.
+/// Layout propagation describes every tensor source as a logical strided view
+/// in a normalized iteration-space carrier. This pass consumes a function whose
+/// buffer boundary is already explicit (produced by tir-bufferize) and tiles its
+/// tensor computation onto a 1D GPU block grid.
+///
+/// Key responsibilities of this pass:
+/// 1. Grid creation: Establishes an scf.forall loop mapped to #gpu.block<x>
+///    covering the total number of tiles in the flattened iteration space.
+/// 2. Delinearization: Converts the 1D block index into multi-dimensional tile
+///    coordinates in back-to-front order (the last dimension is fastest).
+/// 3. Tile materialization: Recursively traces backward from each boundary
+///    bufferization.materialize_in_destination to produce fixed-size tile
+///    values:
+///    - Replaces bufferization.to_tensor inputs with tiled LoadOps having
+///      concrete offsets, sizes, strides, alignments, and tile slice
+///      coordinates.
+///    - Folds layout-modifying operations into access descriptors, then restores
+///      broadcast dimensions with explicit tile broadcasts.
+///    - Evaluates ConcatenateOps into nested scf.if branches partitioned along
+///      the concatenation dimension.
+///    - Materializes IotaOps by composing local tile coordinates with global
+///      block offsets.
+///    - Tiles PointwiseOps by cloning them with concrete tile result types.
+///    - Prepares coarse tiles for ReduceOps and MatmulOps, attaching formation
+///      metadata for the downstream TileReductionsPass.
+/// 4. Cleanup: Erases the bufferization bridges and dead untiled computation,
+///    and strips analysis-only attributes (tile sizes) so downstream passes
+///    operate on explicit SSA values and types.
 
 #include "tensor_ir/Analysis/LayoutPropagation.h"
 #include "tensor_ir/Dialect/TensorIR.h"
@@ -530,14 +530,14 @@ static void createTiledStore(OpBuilder &builder, Location loc, Value tile,
 
 /// Delinearize a 1D linear block index into multi-dimensional tile coordinates.
 ///
-/// Uses column-major ordering (dimension 0 is fastest-varying):
-///   coord[0] = linear % tileCounts[0]; linear /= tileCounts[0];
-///   coord[1] = linear % tileCounts[1]; linear /= tileCounts[1];
+/// Decodes back to front (the last dimension is fastest-varying):
+///   coord[N-1] = linear % tileCounts[N-1]; linear /= tileCounts[N-1];
+///   coord[N-2] = linear % tileCounts[N-2]; linear /= tileCounts[N-2];
 ///   ...
-///   coord[N-1] = linear;
+///   coord[0] = linear;
 ///
 /// Dimensions with a tile count of 1 are optimized to constant 0 without
-/// emitting modulo or division operations. The last dimension with another
+/// emitting modulo or division operations. The first dimension with another
 /// tile count takes the remaining linear index.
 static SmallVector<Value>
 delinearize(OpBuilder &builder, Location loc, Value linear,
@@ -545,34 +545,33 @@ delinearize(OpBuilder &builder, Location loc, Value linear,
   auto isSingleTile = [](OpFoldResult count) {
     return getConstantIntValue(count) == 1;
   };
-  size_t lastTiled = dimensionTileCounts.size();
-  for (size_t dimension = dimensionTileCounts.size(); dimension > 0;
-       --dimension) {
-    if (!isSingleTile(dimensionTileCounts[dimension - 1])) {
-      lastTiled = dimension - 1;
+  size_t firstTiled = dimensionTileCounts.size();
+  for (size_t dimension = 0; dimension < dimensionTileCounts.size();
+       ++dimension) {
+    if (!isSingleTile(dimensionTileCounts[dimension])) {
+      firstTiled = dimension;
       break;
     }
   }
-  SmallVector<Value> result;
-  result.reserve(dimensionTileCounts.size());
+  SmallVector<Value> result(dimensionTileCounts.size());
   Value zero;
-  for (size_t dimension = 0; dimension < dimensionTileCounts.size();
-       ++dimension) {
-    if (dimension == lastTiled) {
-      result.push_back(linear);
+  for (size_t dimension = dimensionTileCounts.size(); dimension > 0;
+       --dimension) {
+    size_t index = dimension - 1;
+    if (index == firstTiled) {
+      result[index] = linear;
       continue;
     }
-    if (dimension > lastTiled || isSingleTile(dimensionTileCounts[dimension])) {
+    if (isSingleTile(dimensionTileCounts[index])) {
       if (!zero) {
         zero = arith::ConstantIndexOp::create(builder, loc, 0);
       }
-      result.push_back(zero);
+      result[index] = zero;
       continue;
     }
-    Value count = getValueOrCreateConstantIndexOp(
-        builder, loc, dimensionTileCounts[dimension]);
-    Value coordinate = arith::RemUIOp::create(builder, loc, linear, count);
-    result.push_back(coordinate);
+    Value count = getValueOrCreateConstantIndexOp(builder, loc,
+                                                  dimensionTileCounts[index]);
+    result[index] = arith::RemUIOp::create(builder, loc, linear, count);
     linear = arith::DivUIOp::create(builder, loc, linear, count);
   }
   return result;
@@ -1193,10 +1192,10 @@ private:
     }
     Block &body = scanSlice.getBody().front();
     for (Operation &operation : body.without_terminator()) {
-      if (!isa<AddOp, MulOp, ExpOp, SubOp, DivOp, MinOp, MaxOp, NegOp, AbsOp,
-               LogOp, SqrtOp, RsqrtOp, ReciprocalOp, SinOp, CosOp, TanhFwdOp,
-               CeilOp, FloorOp, ConvertOp, ReshapeOp, BroadcastOp, ReduceOp>(
-              operation)) {
+      if (!isa<AddOp, MulOp, ExpOp, SubOp, DivOp, MinOp, MaxOp, NegOp, NegIOp,
+               AbsOp, LogOp, SqrtOp, RsqrtOp, ReciprocalOp, SinOp, CosOp,
+               TanhFwdOp, CeilOp, FloorOp, ConvertOp, ReshapeOp, BroadcastOp,
+               ReduceOp>(operation)) {
         return operation.emitOpError("is not supported inside scan_slice");
       }
       if (auto reshape = dyn_cast<ReshapeOp>(operation)) {
@@ -1858,8 +1857,51 @@ private:
     Type elementType = matmul.getType().getElementType();
     auto mmaResultType =
         RankedTensorType::get(plan.mmaOutputShape, elementType);
-    auto tiledMatmul =
-        MatmulOp::create(builder, matmul.getLoc(), mmaResultType, lhs, rhs);
+    bool hasLeftTriangle = matmul.getLeftTriangle().has_value();
+    bool hasRightTriangle = matmul.getRightTriangle().has_value();
+    if ((hasLeftTriangle || hasRightTriangle) &&
+        plan.contractionShape.size() != 1) {
+      return matmul.emitError()
+             << (hasLeftTriangle ? "left_triangle" : "right_triangle")
+             << " requires an unfragmented K dimension";
+    }
+    auto attachTileInfo = [&](Value input, bool isLeft) -> Value {
+      // Matmul layout strides encode [batch, M, N, K]. Recover the
+      // logical M or N interval independently of storage order.
+      Location loc = matmul.getLoc();
+      Value tileOffset = arith::ConstantIndexOp::create(builder, loc, 0);
+      int64_t span = 1;
+      int64_t axisStride =
+          isLeft ? plan.layout.getN() * plan.layout.getK() : plan.layout.getK();
+      int64_t nextAxisStride =
+          axisStride * (isLeft ? plan.layout.getM() : plan.layout.getN());
+      auto view = plan.layout.getCuteLayout();
+      for (size_t dim = 0; dim < coordinates.size(); ++dim) {
+        int64_t stride = tcg::get(view, dim).stride().as_int();
+        if (stride < axisStride || stride >= nextAxisStride) {
+          continue;
+        }
+        int64_t axisScale = stride / axisStride;
+        Value scale = arith::ConstantIndexOp::create(
+            builder, loc, outputTileShape[dim] * axisScale);
+        Value offset =
+            arith::MulIOp::create(builder, loc, coordinates[dim], scale);
+        tileOffset = arith::AddIOp::create(builder, loc, tileOffset, offset);
+        span += (outputTileShape[dim] - 1) * axisScale;
+      }
+      return TrmmTileInfoOp::create(builder, loc, input.getType(), input,
+                                    tileOffset,
+                                    builder.getI64IntegerAttr(span));
+    };
+    if (hasLeftTriangle) {
+      lhs = attachTileInfo(lhs, /*isLeft=*/true);
+    }
+    if (hasRightTriangle) {
+      rhs = attachTileInfo(rhs, /*isLeft=*/false);
+    }
+    auto tiledMatmul = MatmulOp::create(
+        builder, matmul.getLoc(), mmaResultType, lhs, rhs, Value{},
+        matmul.getLeftTriangleAttr(), matmul.getRightTriangleAttr());
     tiledMatmul->setAttr("nv_tensor_ir.contraction_shape",
                          builder.getDenseI64ArrayAttr(plan.contractionShape));
     tiledMatmul->setAttr("nv_tensor_ir.lhs_source_shape",

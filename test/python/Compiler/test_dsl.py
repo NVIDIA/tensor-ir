@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-# RUN: %PYTHON -m pytest --capture=no -vv %s
+# RUN: %pytest %s
 # REQUIRES: cuda-gpu
 
 from __future__ import annotations
@@ -450,6 +450,21 @@ def test_dynamic_shape_transpose_graph(profiling: bool) -> None:
     _run_assert_trace(compiled, a, b, output=output, profile=profiling)
 
 
+def test_matmul_normalizes_reduction_operand():
+    _require_runtime_launch()
+
+    @tir.kernel
+    def kernel(values, rhs):
+        lhs = tir.reshape(tir.reduce(values, dimensions=(0,)), shape=(8, 16))
+        return tir.matmul(lhs, rhs, dtype=tir.DataType.F32)
+
+    values = torch.randint(-2, 3, (4, 8, 16), device="cuda").float()
+    rhs = torch.randint(-2, 3, (16, 32), device="cuda").float()
+    output = values.new_empty((8, 32))
+    compiled = tir.compile(kernel, values, rhs, output=output, tile_sizes=(4, 8))
+    _run_assert_trace(compiled, values, rhs, output=output, rtol=0, atol=0)
+
+
 def test_matmul_result_dtype(profiling: bool) -> None:
     lhs = torch.randn((8, 16), device="cuda", dtype=torch.float16)
     rhs = torch.randn((16, 32), device="cuda", dtype=torch.float16)
@@ -877,11 +892,20 @@ def test_tensor_spec_rejects_string_dtype() -> None:
         tir.TensorSpec((8, 8), dtype="f32")
 
 
-def test_tensor_spec_rejects_string_shape_or_stride() -> None:
-    with pytest.raises(TypeError, match="shape must be an int sequence"):
-        tir.TensorSpec("8,8", dtype=tir.DataType.F32)
-    with pytest.raises(TypeError, match="stride must be an int sequence"):
-        tir.TensorSpec((8, 8), dtype=tir.DataType.F32, stride="8,1")
+@pytest.mark.parametrize(
+    "field,value,message",
+    [
+        ("shape", "8,8", "must be an int sequence"),
+        ("stride", "8,1", "must be an int sequence"),
+        ("shape", 8, "must be iterable"),
+        ("stride", 8, "must be iterable"),
+        ("shape", (0, 8), "dimensions must be positive"),
+    ],
+)
+def test_tensor_spec_rejects_invalid_shape_or_stride(field, value, message) -> None:
+    kwargs = {"shape": (8, 8), field: value}
+    with pytest.raises(TypeError, match=f"TensorSpec {field} {message}"):
+        tir.TensorSpec(dtype=tir.DataType.F32, **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -952,15 +976,21 @@ def test_public_api_surface() -> None:
         "constant",
         "convert",
         "cos",
+        "cosh",
         "div",
         "elu",
         "exp",
+        "exp2",
+        "expm1",
+        "fma",
         "floor",
         "full_like",
         "gelu_approx_tanh",
         "iota",
         "iota_like",
         "log",
+        "log2",
+        "log1p",
         "logical_and",
         "logical_not",
         "logical_or",
@@ -969,7 +999,9 @@ def test_public_api_surface() -> None:
         "min",
         "mod",
         "mul",
+        "mul_high",
         "neg",
+        "negi",
         "pow",
         "reduce",
         "rem",
@@ -979,17 +1011,21 @@ def test_public_api_surface() -> None:
         "rsqrt",
         "sigmoid",
         "sin",
+        "sinh",
         "slice",
         "softplus",
         "splat",
         "sqrt",
         "scan_slice",
+        "shift_left",
+        "shift_right",
         "sub",
         "swish",
         "tan",
         "tanh",
         "transpose",
         "where",
+        "xor",
     }
     assert (
         set(tir.__all__)

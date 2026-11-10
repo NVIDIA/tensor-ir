@@ -11,11 +11,7 @@
 namespace mlir::nv_tensor_ir {
 namespace tiling_analysis {
 
-/**
-  * @brief Get the tiling configurations in the evaluator scope.
-  * @param evaluator The tiling config evaluator.
-  * @param maxResults The maximum number of results to return.
-  */
+/// Get the tiling configurations in the evaluator scope.
 SmallVector<TilingConfig> enumerateTilings(TilingEvaluator &evaluator,
                                            size_t maxResults = 1000);
 

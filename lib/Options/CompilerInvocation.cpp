@@ -30,6 +30,7 @@ CompilerInvocation::getCodegenComputeCapability() const {
 std::string CompilerInvocation::toShaderNameSuffix() const {
   CompilerInvocation cacheOptions = *this;
   cacheOptions.debug = {};
+  cacheOptions.optimizationRemarks = {};
   if (FailureOr<ComputeCapability> codegenTarget =
           getCodegenComputeCapability();
       succeeded(codegenTarget)) {
@@ -63,6 +64,7 @@ HostTarget CompilerInvocation::getEffectiveHostTarget() const {
 }
 
 Status CompilerInvocation::validate() const {
+  TIR_ASSIGN_OR_RETURN(auto remarks, resolveRemarkFilters(optimizationRemarks));
   FailureOr<SmTarget> target = getKernelSmTarget();
   if (failed(target)) {
     return Status::InvalidArgument("Invalid target SM '" +

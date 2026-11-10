@@ -19,9 +19,11 @@ add_tensor_ir_dialect_library(NVTensorIRDialect
   MLIRControlFlowInterfaces
   MLIRFunctionInterfaces
   MLIRGPUDialect
+  MLIRIndexingMapOpInterface
   MLIRInferTypeOpInterface
   MLIRIR
   MLIRPtrDialect
+  MLIRValueBoundsOpInterface
   MLIRViewLikeInterface
  )
 

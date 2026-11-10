@@ -4,5 +4,6 @@ mlir_tablegen(OptionsEnums.cpp.inc -gen-enum-defs)
 
 set(LLVM_TARGET_DEFINITIONS Options.td)
 tablegen(TensorIR CompilerOptions.h.inc -gen-component-options)
+tablegen(TensorIR PipelineOptions.h.inc -gen-pipeline-options)
 add_public_tablegen_target(NVTensorIRCompilerOptionsIncGen)
 add_dependencies(mlir-headers NVTensorIRCompilerOptionsIncGen)

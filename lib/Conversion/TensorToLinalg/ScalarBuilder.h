@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-/// \file
 /// Scalar Arith and Math builders for TensorIR element operations.
 
 #ifndef TENSOR_IR_LIB_CONVERSION_TENSORTOLINALG_SCALARBUILDER_H
@@ -61,12 +60,16 @@ public:
   Value abs(Value input);
   Value ceil(Value input);
   Value cos(Value input);
+  Value cosh(Value input);
   Value exp(Value input);
+  Value exp2(Value input, bool ftz);
   Value floor(Value input);
   Value log(Value input);
+  Value log2(Value input);
   Value neg(Value input);
   Value rsqrt(Value input);
   Value sin(Value input);
+  Value sinh(Value input);
   Value sqrt(Value input);
   Value tan(Value input);
   Value erf(Value input);
@@ -74,8 +77,17 @@ public:
   Value atan2(Value lhs, Value rhs);
   Value _or(Value lhs, Value rhs);
   Value _xor(Value lhs, Value rhs);
+  Value shl(Value lhs, Value rhs, IntegerOverflow overflow);
+  Value sshr(Value lhs, Value rhs);
+  Value ushr(Value lhs, Value rhs);
+  Value mulHigh(Value lhs, Value rhs);
+  /// Builds a fused multiply-add. The TensorIR rounding mode is not modeled:
+  /// the result always rounds to nearest even.
+  Value fma(Value lhs, Value rhs, Value acc, bool ftz);
 
 private:
+  Value shift(Value lhs, Value rhs, bool right, bool isUnsigned,
+              IntegerOverflow overflow = IntegerOverflow::NONE);
   template <typename ScalarOp>
   Value unary(Value input);
   template <typename ScalarOp>

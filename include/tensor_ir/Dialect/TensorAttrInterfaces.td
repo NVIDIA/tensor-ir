@@ -1,11 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===- TensorAttrInterfaces.td - Tensor IR Attr Interfaces -*- tablegen -*-===//
-//
-// This file defines the attribute interfaces for the Tensor IR dialect.
-//
-//===----------------------------------------------------------------------===//
+/// This file defines the attribute interfaces for the Tensor IR dialect.
 
 #ifndef TENSORIR_DIALECT_TENSORATTRINTERFACES_TD
 #define TENSORIR_DIALECT_TENSORATTRINTERFACES_TD

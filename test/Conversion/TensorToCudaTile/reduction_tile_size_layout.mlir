@@ -1,4 +1,4 @@
-// RUN: tensor_ir-opt "-layout-propagation-pipeline=tile-size=4 tile-size=1024 reduction-tile-size=256" %s | FileCheck %s
+// RUN: tensor_ir-opt "-layout-propagation-pipeline=tile-size=4x1024 reduction-tile-size=256" %s | FileCheck %s
 
 module {
   nv_tensor_ir.graph @rmsnorm_reduction_tile(

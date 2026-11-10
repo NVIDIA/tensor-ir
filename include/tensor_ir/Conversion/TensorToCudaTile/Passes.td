@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===-- Passes.td - TensorToCudaTile conversion pass definitions ---*- tablegen -*-===//
+/// TensorToCudaTile conversion pass definitions
 
 #ifndef TENSOR_IR_CONVERSION_TENSORTOCUDATILE_PASSES
 #define TENSOR_IR_CONVERSION_TENSORTOCUDATILE_PASSES

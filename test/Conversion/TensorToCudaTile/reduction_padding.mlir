@@ -4,7 +4,7 @@
 // Padding applied at tile load
 // ============================================================================
 
-// CHECK-LABEL: @test_pad_load_no_loop
+// CHECK-LABEL: entry @test_pad_load_no_loop(
 // CHECK: %[[PVIEW:.*]] = make_partition_view %{{.*}} : partition_view<tile=(32x64), padding_value = zero
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko weak %[[PVIEW]]{{.*}} -> tile<32x64xf32>
 // CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1
@@ -24,7 +24,7 @@ nv_tensor_ir.graph @test_pad_load_no_loop(
 
 // -----
 
-// CHECK-LABEL: @test_pad_load_one_loop
+// CHECK-LABEL: entry @test_pad_load_one_loop(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C4:.*]] = constant <i32: 4>
@@ -53,7 +53,7 @@ nv_tensor_ir.graph @test_pad_load_one_loop(
 
 // -----
 
-// CHECK-LABEL: @test_pad_load_two_loops
+// CHECK-LABEL: entry @test_pad_load_two_loops(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C2:.*]] = constant <i32: 2>
@@ -87,7 +87,7 @@ nv_tensor_ir.graph @test_pad_load_two_loops(
 
 // -----
 
-// CHECK-LABEL: @test_pad_load_max
+// CHECK-LABEL: entry @test_pad_load_max(
 // CHECK: %[[PVIEW:.*]] = make_partition_view %{{.*}} : partition_view<tile=(32x64), padding_value = neg_inf
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko weak %[[PVIEW]]{{.*}} -> tile<32x64xf32>
 // CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1 identities=[0xFF800000 : f32]
@@ -107,7 +107,7 @@ nv_tensor_ir.graph @test_pad_load_max(
 
 // -----
 
-// CHECK-LABEL: @test_pad_load_min
+// CHECK-LABEL: entry @test_pad_load_min(
 // CHECK: %[[PVIEW:.*]] = make_partition_view %{{.*}} : partition_view<tile=(32x64), padding_value = pos_inf
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko weak %[[PVIEW]]{{.*}} -> tile<32x64xf32>
 // CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1 identities=[0x7F800000 : f32]
@@ -127,7 +127,7 @@ nv_tensor_ir.graph @test_pad_load_min(
 
 // -----
 
-// CHECK-LABEL: @test_pad_load_chain
+// CHECK-LABEL: entry @test_pad_load_chain(
 // CHECK: %[[PVIEW:.*]] = make_partition_view %{{.*}} : partition_view<tile=(1x8x64), padding_value = zero
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko weak %[[PVIEW]]{{.*}} -> tile<1x8x64xbf16>
 // CHECK: %[[BCAST:.*]] = broadcast %[[INPUT]] : tile<1x8x64xbf16> -> tile<4x8x64xbf16>
@@ -158,7 +158,7 @@ nv_tensor_ir.graph @test_pad_load_chain(
 // Padding applied before the reduction
 // ============================================================================
 
-// CHECK-LABEL: @test_pad_mask_no_loop
+// CHECK-LABEL: entry @test_pad_mask_no_loop(
 // CHECK-NOT: padding_value
 // CHECK-DAG: %[[C50:.*]] = constant <i32: 50>
 // CHECK-DAG: %[[NEUTRAL:.*]] = constant <f32: 1.000000e+00> : [[TILE:tile<32x64xf32>]]
@@ -185,7 +185,7 @@ nv_tensor_ir.graph @test_pad_mask_no_loop(
 
 // -----
 
-// CHECK-LABEL: @test_pad_mask_one_loop
+// CHECK-LABEL: entry @test_pad_mask_one_loop(
 // CHECK-NOT: padding_value
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
@@ -225,7 +225,7 @@ nv_tensor_ir.graph @test_pad_mask_one_loop(
 
 // -----
 
-// CHECK-LABEL: @test_pad_mask_two_loops
+// CHECK-LABEL: entry @test_pad_mask_two_loops(
 // CHECK-NOT: padding_value
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
@@ -282,7 +282,7 @@ nv_tensor_ir.graph @test_pad_mask_two_loops(
 
 // -----
 
-// CHECK-LABEL: @test_pad_mask_chain
+// CHECK-LABEL: entry @test_pad_mask_chain(
 // CHECK-NOT: padding_value
 // CHECK-DAG: %[[C50:.*]] = constant <i32: 50>
 // CHECK-DAG: %[[NEUTRAL:.*]] = constant <f32: 0xFF800000> : [[TILE:tile<32x64xf32>]]

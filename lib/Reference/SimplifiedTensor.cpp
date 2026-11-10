@@ -513,10 +513,7 @@ static void printElem(int8_t const *mem, size_t elementOffset, DataType type) {
   }
 }
 
-// ============================================================================
-// Internal helper for printing tensor data content
-// ============================================================================
-
+/// Internal helper for printing tensor data content
 void SimplifiedTensor::printData(const void *dataPtr, const char *label,
                                  const char *ptrName,
                                  const void *ptrValue) const {
@@ -637,10 +634,7 @@ void SimplifiedTensor::printHostData() const {
   printData(hostPtr(), "Host Data", "hostPtr", hostPtr());
 }
 
-// ============================================================================
-// Helper to convert values to double for comparison (internal)
-// ============================================================================
-
+/// Helper to convert values to double for comparison (internal)
 template <typename T>
 static inline double toDoubleForCheck(const T &val) {
   return static_cast<double>(val);
@@ -662,7 +656,7 @@ static inline double toDoubleForCheck(const __nv_fp8_e5m2 &val) {
   return static_cast<double>(static_cast<float>(val));
 }
 
-// Unified tensor comparison kernel for checkRef
+/// Unified tensor comparison kernel for checkRef
 template <typename T>
 static bool checkRefKernel(const SimplifiedTensor &tensor, const void *ref_ptr,
                            const void *test_ptr, int64_t numElements,
@@ -764,7 +758,7 @@ bool SimplifiedTensor::checkRefAgainst(const void *gpuResultHost, double rtol,
   return matches;
 }
 
-// Factory functions
+/// Factory functions
 std::shared_ptr<SimplifiedTensor> createTensor(const std::string &name,
                                                llvm::ArrayRef<int64_t> dims,
                                                DataType dtype) {

@@ -5,6 +5,7 @@
 #define TENSORIR_DIALECT_TENSOROPS_TD
 
 include "tensor_ir/Dialect/TensorOpsBase.td"
+include "mlir/Interfaces/ValueBoundsOpInterface.td"
 
 //===----------------------------------------------------------------------===//
 // Graph Operations
@@ -179,7 +180,7 @@ def TensorIR_ScanSliceOp : TensorIR_Op<"scan_slice",
     Example (forward prefix sum; `reverse` defaults to `false`):
     ```mlir
     %final, %prefixes = nv_tensor_ir.scan_slice (%initial, %values)
-        scan_dimensions = [0] output_dimensions = [0]
+        <scan_dimensions = [0], output_dimensions = [0]>
         : (tensor<8xf32>, tensor<5x8xf32>) {
       ^bb0(%carry: tensor<8xf32>, %value: tensor<8xf32>):
         %next = nv_tensor_ir.add %carry, %value : tensor<8xf32>
@@ -197,8 +198,7 @@ def TensorIR_ScanSliceOp : TensorIR_Op<"scan_slice",
   let regions = (region SizedRegion<1>:$body);
   let results = (outs Variadic<TensorIR_ScanSliceTensor>:$results);
   let assemblyFormat = [{
-    `(` $inputs `)` `scan_dimensions` `=` $scan_dimensions
-    `output_dimensions` `=` $output_dimensions attr-dict
+    `(` $inputs `)` prop-dict attr-dict
     `:` `(` type($inputs) `)` $body
   }];
   let builders = [OpBuilder<(ins "ValueRange":$inputs,
@@ -221,6 +221,7 @@ def TensorIR_ScanSliceOp : TensorIR_Op<"scan_slice",
   let hasVerifier = 1;
 }
 
+// Binary Operations
 def TensorIR_AddOp : TensorIR_PointWiseOpBinary<"add", [Commutative]>;
 def TensorIR_SubOp : TensorIR_PointWiseOpBinary<"sub">;
 def TensorIR_MulOp : TensorIR_PointWiseOpBinary<"mul", [Commutative]>;
@@ -312,6 +313,76 @@ def TensorIR_MinOp : TensorIR_PointWiseOpBinary<"min", [Commutative]> {
     ordering and are not affected by NaN semantics.
   }];
 }
+def TensorIR_XorOp :
+    TensorIR_PointWiseIntegerOpBinary<"xor", [Commutative]> {
+  let description = [{
+    Computes the bitwise XOR of corresponding integer elements.
+  }];
+}
+def TensorIR_ShiftLeftOp :
+    TensorIR_PointWiseIntegerOpBinary<"shift_left"> {
+  let description = [{
+    Shifts each `$lhs` element left by the corresponding `$rhs` element.
+    Shift amounts are interpreted as unsigned integers. With the default
+    `none` overflow policy, bits shifted out are discarded and shift amounts
+    greater than or equal to the element width produce zero.
+
+    `no_signed_wrap`, `no_unsigned_wrap`, and `no_wrap` assume that the
+    mathematical left shift fits in the signed, unsigned, or both ranges,
+    respectively. Violating an assumption is undefined behavior.
+  }];
+  let arguments = (ins
+    Arg<TensorIR_IntOrBoolTensor, "Left-hand side integer tensor">:$lhs,
+    Arg<TensorIR_IntOrBoolTensor, "Right-hand side integer tensor">:$rhs,
+    DefaultValuedAttr<IntegerOverflowAttr, "IntegerOverflow::NONE">:$overflow
+  );
+  let assemblyFormat =
+      "$lhs `,` $rhs (`overflow` $overflow^)? attr-dict `:` type($output)";
+}
+def TensorIR_ShiftRightOp :
+    TensorIR_PointWiseIntegerOpBinary<"shift_right"> {
+  let description = [{
+    Shifts each `$lhs` element right by the corresponding `$rhs` element.
+    Shift amounts are interpreted as unsigned integers. Signed input tensors
+    use an arithmetic shift, while unsigned and i1 input tensors use a logical
+    shift. Shift amounts greater than or equal to the element width produce
+    sign bits for signed tensors and zero for unsigned and i1 tensors.
+  }];
+}
+def TensorIR_MulHighOp : TensorIR_PointWiseOpBase<"mul_high",
+    [SameOperandsAndResultType, ElementwiseMappable, Commutative]> {
+  let summary = "Compute the high half of an unsigned integer product";
+  let description = [{
+    Multiplies corresponding unsigned N-bit integer elements and returns the
+    upper N bits of each full 2N-bit product. I1 elements are interpreted as
+    unsigned integers. Signed integers and floating-point types are not
+    supported.
+  }];
+  let arguments = (ins
+    Arg<TensorIR_UnsignedIntTensor, "Left-hand side unsigned integer tensor">:$lhs,
+    Arg<TensorIR_UnsignedIntTensor, "Right-hand side unsigned integer tensor">:$rhs
+  );
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($output)";
+}
+def TensorIR_FmaOp : TensorIR_PointWiseOpBase<"fma",
+    [SameOperandsAndResultType, ElementwiseMappable]> {
+  let summary = "Compute a fused pointwise multiply-add";
+  let description = [{
+    Computes `lhs * rhs + acc` for corresponding floating-point elements as a
+    fused operation. The rounding mode and flush-to-zero behavior
+    are explicit attributes matching the corresponding CudaTile operation.
+  }];
+  let arguments = (ins
+    Arg<TensorIR_BaseFloatTensor, "Left-hand side multiplicand tensor">:$lhs,
+    Arg<TensorIR_BaseFloatTensor, "Right-hand side multiplicand tensor">:$rhs,
+    Arg<TensorIR_BaseFloatTensor, "Accumulator tensor">:$acc,
+    DefaultValuedAttr<RoundingModeAttr,
+                      "RoundingMode::NEAREST_EVEN">:$rounding_mode,
+    UnitAttr:$ftz
+  );
+  let assemblyFormat = "$lhs `,` $rhs `,` $acc prop-dict attr-dict `:` type($output)";
+  let hasVerifier = 1;
+}
 
 def TensorIR_AddSquareOp : TensorIR_PointWiseOpBinary<"add_square">;
 def TensorIR_Atan2Op
@@ -345,6 +416,8 @@ def TensorIR_PowOp : TensorIR_PointWiseOpBase<"pow",
 def TensorIR_AbsOp : TensorIR_PointWiseOpUnary<"abs">;
 def TensorIR_CeilOp : TensorIR_PointWiseOpUnary<"ceil", [ResultsAreFloatLike]>;
 def TensorIR_CosOp : TensorIR_PointWiseOpUnary<"cos", [ResultsAreFloatLike]>;
+def TensorIR_CoshOp : TensorIR_PointWiseOpUnary<
+    "cosh", [ResultsAreFloatLike], TensorIR_BaseFloatTensor>;
 def TensorIR_ExpOp : TensorIR_PointWiseOpUnary<"exp", [ResultsAreFloatLike]> {
   // clang-format off
   let description = [{
@@ -372,13 +445,74 @@ def TensorIR_ExpOp : TensorIR_PointWiseOpUnary<"exp", [ResultsAreFloatLike]> {
   let assemblyFormat = "$input prop-dict attr-dict `:` type($input)";
   let hasVerifier = 1;
 }
+def TensorIR_Exp2Op : TensorIR_PointWiseOpBase<"exp2",
+    [SameOperandsAndResultType, ElementwiseMappable, ResultsAreFloatLike]> {
+  let arguments = (ins
+    Arg<TensorIR_BaseFloatTensor, "Input tensor">:$input,
+    UnitAttr:$ftz
+  );
+  let assemblyFormat = "$input prop-dict attr-dict `:` type($output)";
+  let hasVerifier = 1;
+}
+def TensorIR_ExpM1Op : TensorIR_PointWiseOpUnary<"expm1", [ResultsAreFloatLike]> {
+  let summary =
+      "Compute exp(x) - 1 for each element in the tensor";
+  let description = [{
+    Computes `exp(x) - 1` for each element of the input tensor.
+
+    The result is accurate when `x` is close to zero. A direct computation of
+    `exp(x) - 1` loses precision in this case, because `exp(x)` is close to 1.
+    The lowering to CudaTile uses Kahan's method to prevent this loss.
+
+    The result has the same shape and element type as the input. The element
+    type must be a floating-point type.
+  }];
+}
+
 def TensorIR_FloorOp
     : TensorIR_PointWiseOpUnary<"floor", [ResultsAreFloatLike]>;
 def TensorIR_LogOp : TensorIR_PointWiseOpUnary<"log", [ResultsAreFloatLike]>;
+def TensorIR_Log2Op : TensorIR_PointWiseOpUnary<
+    "log2", [ResultsAreFloatLike], TensorIR_BaseFloatTensor>;
+def TensorIR_Log1POp : TensorIR_PointWiseOpUnary<"log1p", [ResultsAreFloatLike]> {
+  let summary =
+      "Compute log(1 + x) for each element in the tensor";
+  let description = [{
+    Computes `log(1 + x)` for each element of the input tensor.
+
+    The result is accurate when `x` is close to zero. A direct computation of
+    `log(1 + x)` loses precision in this case, because `1 + x` rounds to a
+    value close to 1. The lowering to CudaTile uses Kahan's method to prevent
+    this loss.
+
+    The result has the same shape and element type as the input. The element
+    type must be a floating-point type.
+  }];
+}
 def TensorIR_NegOp : TensorIR_PointWiseOpUnary<"neg", [ResultsAreFloatLike]>;
+def TensorIR_NegIOp : TensorIR_PointWiseOpBase<"negi",
+    [SameOperandsAndResultType, ElementwiseMappable]> {
+  let summary = "Negate an integer tensor pointwise";
+  let description = [{
+    Negates each integer element, interpreting its bits as a signed integer
+    regardless of the tensor element type's signedness. The default overflow
+    policy permits wrap-around. `no_signed_wrap` assumes signed overflow does
+    not occur, while `no_wrap` excludes signed and unsigned overflow.
+    Violating an assumption is undefined behavior. `no_unsigned_wrap` is not
+    supported.
+  }];
+  let arguments = (ins
+    Arg<TensorIR_IntOrBoolTensor, "Input integer tensor">:$input,
+    DefaultValuedAttr<IntegerOverflowAttr, "IntegerOverflow::NONE">:$overflow
+  );
+  let assemblyFormat = "$input (`overflow` $overflow^)? attr-dict `:` type($output)";
+  let hasVerifier = 1;
+}
 def TensorIR_RsqrtOp
     : TensorIR_PointWiseOpUnary<"rsqrt", [ResultsAreFloatLike]>;
 def TensorIR_SinOp : TensorIR_PointWiseOpUnary<"sin", [ResultsAreFloatLike]>;
+def TensorIR_SinhOp : TensorIR_PointWiseOpUnary<
+    "sinh", [ResultsAreFloatLike], TensorIR_BaseFloatTensor>;
 def TensorIR_SqrtOp : TensorIR_PointWiseOpUnary<"sqrt", [ResultsAreFloatLike]>;
 def TensorIR_TanOp : TensorIR_PointWiseOpUnary<"tan", [ResultsAreFloatLike]>;
 def TensorIR_ErfOp : TensorIR_PointWiseOpUnary<"erf", [ResultsAreFloatLike]>;
@@ -488,8 +622,10 @@ def TensorIR_CmpOp : TensorIR_PointWiseOpBase<"cmp",
   let hasVerifier = 1;
 }
 
-def TensorIR_LogicalAndOp : TensorIR_PointWiseOpBoolean<"and", [Commutative]>;
-def TensorIR_LogicalOrOp : TensorIR_PointWiseOpBoolean<"or", [Commutative]>;
+// Bitwise Operations
+
+def TensorIR_AndOp : TensorIR_PointWiseIntegerOpBinary<"and", [Commutative]>;
+def TensorIR_OrOp : TensorIR_PointWiseIntegerOpBinary<"or", [Commutative]>;
 def TensorIR_LogicalNotOp : TensorIR_PointWiseOpUnary<"not">;
 
 def TensorIR_ConvertOp : TensorIR_PointWiseOpBase<"convert",
@@ -547,7 +683,9 @@ def TensorIR_ReduceOp
                           "inferInputFromOutputIterSpaceMap",
                           "inferOutputFromInputIterSpaceMaps"]>,
                      DeclareOpInterfaceMethods<
-                         LayoutPropInterface, ["inferResultLayout"]>]> {
+                         LayoutPropInterface, ["inferResultLayout"]>,
+    DeclareOpInterfaceMethods<IndexingMapOpInterface>,
+    DeclareOpInterfaceMethods<IterationDomainOpInterface>]> {
   let summary = "Reduce operator";
   let description = [{
     Reduce operation represents reducing values of a tensor in one or more dimensions.
@@ -593,10 +731,6 @@ def TensorIR_ReduceOp
   let extraClassDeclaration = [{
     /// Returns true when the result omits every reduced dimension.
     bool dropsReducedDimensions();
-
-    /// Returns a mask indexed by input dimension. A set bit is a reduced
-    /// dimension.
-    llvm::SmallBitVector getReductionDimMask();
   }];
   let hasFolder = 1;
   let hasVerifier = 1;
@@ -607,7 +741,9 @@ def TensorIR_TypedAttrArray
 
 def TensorIR_ReduceUDOp : TensorIR_Op<"reduce_ud",
   [Pure, SingleBlockImplicitTerminator<"YieldOp">, OpAsmOpInterface,
-    DeclareOpInterfaceMethods<LayoutPropInterface, ["inferResultLayout"]>
+    DeclareOpInterfaceMethods<LayoutPropInterface, ["inferResultLayout"]>,
+    DeclareOpInterfaceMethods<IndexingMapOpInterface>,
+    DeclareOpInterfaceMethods<IterationDomainOpInterface>
   ]> {
   let summary = "Reduce operator for user defined implementation";
   let description = [{
@@ -709,10 +845,6 @@ def TensorIR_ReduceUDOp : TensorIR_Op<"reduce_ud",
   let extraClassDeclaration = [{
     /// Returns true when every result omits every reduced dimension.
     bool dropsReducedDimensions();
-
-    /// Returns a mask indexed by input dimension. A set bit is a reduced
-    /// dimension.
-    llvm::SmallBitVector getReductionDimMask();
   }];
   let hasVerifier = 1;
   let hasRegionVerifier = 1;
@@ -745,7 +877,9 @@ def TensorIR_YieldOp
   let assemblyFormat = "$result attr-dict `:` type($result)";
 }
 
-def TensorIR_ContractionOp : TensorIR_Op<"contraction", [Pure]> {
+def TensorIR_ContractionOp : TensorIR_Op<"contraction", [Pure,
+    DeclareOpInterfaceMethods<IndexingMapOpInterface>,
+    DeclareOpInterfaceMethods<IterationDomainOpInterface>]> {
   let summary =
       "Tensor contraction with multiple product and reduction dimensions";
   let description = [{
@@ -756,7 +890,7 @@ def TensorIR_ContractionOp : TensorIR_Op<"contraction", [Pure]> {
     precision is not fixed by the input format. The accumulator must have
     exactly C's type.
 
-    `indexing_maps` contains three affine maps, for A, B, and C respectively,
+    `domain_maps` contains three affine maps, for A, B, and C respectively,
     from a shared logical iteration domain to tensor dimension indices, as
     in Linalg. Each map must be a symbol-free projected permutation with one
     result per tensor dimension. Input dimensions can appear in any order.
@@ -778,40 +912,40 @@ def TensorIR_ContractionOp : TensorIR_Op<"contraction", [Pure]> {
     maps (m, n, k) -> (k, m), (k, n), (m, n)
     ```
     The custom syntax shares the domain across the three maps. Generic syntax
-    stores them as the `indexing_maps` array of affine map attributes.
+    stores them as the `domain_maps` array of affine map attributes.
 
-    Corresponding batch extents broadcast using the same rules as `matmul`:
-    unit extents broadcast, and a dynamic extent paired with a non-unit static
-    extent is constrained to broadcast to that extent. C's batch extents must
-    equal the inferred broadcast shape. Product extents are inherited exactly
-    from their input, including dynamic extents. Corresponding contraction
-    extents must agree at runtime; unequal static extents are rejected.
+    Corresponding batch extents of A and B must be equal. A static extent
+    may refine a dynamic extent, and C's batch extent must equal that common
+    extent. Unit extents do not implicitly broadcast; use an explicit
+    `broadcast` operation to expand an operand. Product extents are inherited
+    exactly from their input, including dynamic extents. Corresponding
+    contraction extents must agree at runtime; unequal static extents are
+    rejected.
 
-    This operation does not yet have a lowering.
   }];
   let arguments = (ins
     TensorIR_TensorType:$a,
     TensorIR_TensorType:$b,
     Optional<TensorIR_TensorType>:$acc,
-    ConfinedAttr<AffineMapArrayAttr, [ArrayCount<3>]>:$indexing_maps
+    ConfinedAttr<AffineMapArrayAttr, [ArrayCount<3>]>:$domain_maps
   );
   let results = (outs TensorIR_TensorType:$c);
   let assemblyFormat = [{
     `(` $a `,` $b `)`
     (`accum` `(` $acc^ `:` type($acc) `)`)?
-    `maps` custom<ContractionIndexingMaps>($indexing_maps)
+    `maps` custom<ContractionDomainMaps>($domain_maps)
     prop-dict attr-dict `:` `(` type($a) `,` type($b) `)` `->` type($c)
   }];
   let extraClassDeclaration = [{
     /// These accessors require verified indexing maps.
     AffineMap getLhsIndexingMap() {
-      return cast<AffineMapAttr>(getIndexingMaps()[0]).getValue();
+      return cast<AffineMapAttr>(getDomainMaps()[0]).getValue();
     }
     AffineMap getRhsIndexingMap() {
-      return cast<AffineMapAttr>(getIndexingMaps()[1]).getValue();
+      return cast<AffineMapAttr>(getDomainMaps()[1]).getValue();
     }
     AffineMap getResultIndexingMap() {
-      return cast<AffineMapAttr>(getIndexingMaps()[2]).getValue();
+      return cast<AffineMapAttr>(getDomainMaps()[2]).getValue();
     }
 
     /// Domain dimensions absent from the result are contraction dimensions.
@@ -830,11 +964,6 @@ def TensorIR_ContractionOp : TensorIR_Op<"contraction", [Pure]> {
       return map.getNumDims() - map.getNumResults();
     }
 
-    /// Result dimensions that are not products are batch dimensions.
-    unsigned getNumBatchDims() {
-      return getResultIndexingMap().getNumResults() -
-             getNumLhsProductDims() - getNumRhsProductDims();
-    }
   }];
   let hasVerifier = 1;
 }
@@ -842,7 +971,9 @@ def TensorIR_ContractionOp : TensorIR_Op<"contraction", [Pure]> {
 def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
     Pure, OpAsmOpInterface, AnchorOpInterface, IterationSpaceInfoInterface,
     AllRanksMatch<["a", "b", "c"]>,
-    DeclareOpInterfaceMethods<LayoutPropInterface, ["inferResultLayout"]>
+    DeclareOpInterfaceMethods<LayoutPropInterface, ["inferResultLayout"]>,
+    DeclareOpInterfaceMethods<IndexingMapOpInterface>,
+    DeclareOpInterfaceMethods<IterationDomainOpInterface>
   ]> {
   let summary = "Matrix multiplication";
   let description = [{
@@ -852,6 +983,16 @@ def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
     * a: First matrix of type `TensorIR_TensorType`
     * b: Second matrix of type `TensorIR_TensorType`
     * acc: Optional initial accumulator with the same type as `C`
+    * left_triangle: Optional `#nv_tensor_ir.triangle<upper>` or
+      `#nv_tensor_ir.triangle<lower>`; omission means no
+      triangular constraint. Declares
+      that A is triangular in its logical innermost [M, K] dimensions.
+      Elements outside the declared triangle must already be zero. Backends
+      may skip entirely zero K tiles; diagonal tiles are computed normally.
+      This is a structural promise, not an elementwise masking operation.
+    * right_triangle: Same choices and zero-input promise as left_triangle,
+      applied to B's logical innermost [K, N] dimensions. Both parameters
+      may be set; the K loop uses the intersection of their allowed ranges.
 
     The numerical semantics follow CUDA Tile matrix-multiply-accumulate
     operations (`mmaf` and `mmai`) for their supported type combinations.
@@ -881,6 +1022,8 @@ def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
 
     The other outer dimensions specify a batch matrix multiplication.
 
+    Unit batch extents do not implicitly broadcast; use an explicit
+    `broadcast` operation to expand an operand.
     Corresponding batch dimensions of `A` and `B` must be equal. A static
     extent may refine a dynamic extent, and the result batch dimension must
     equal the merged extent. The result `M` dimension is inherited exactly
@@ -898,13 +1041,16 @@ def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
     Arg<TensorIR_TensorType, "First Tensor of Matmul">:$a,
     Arg<TensorIR_TensorType, "Second Tensor of Matmul">:$b,
     Arg<Optional<TensorIR_TensorType>,
-        "Optional initial accumulator for Matmul">:$acc
+        "Optional initial accumulator for Matmul">:$acc,
+    OptionalAttr<TriangleAttr>:$left_triangle,
+    OptionalAttr<TriangleAttr>:$right_triangle
   );
   let results = (outs
     Arg<TensorIR_TensorType, "Output of Matmul">:$c
   );
   let builders = [
-    OpBuilder<(ins "Type":$c, "Value":$a, "Value":$b)>
+    OpBuilder<(ins "Type":$c, "Value":$a, "Value":$b)>,
+    OpBuilder<(ins "Type":$c, "Value":$a, "Value":$b, "Value":$acc)>
   ];
 
   let extraClassDeclaration = [{
@@ -934,13 +1080,15 @@ def TensorIR_MatmulOp : TensorIR_Op<"matmul", [
   let assemblyFormat = [{
     `(` $a `,` $b `)`
      (`accum` `(` $acc^ `:` type($acc) `)`)?
-     attr-dict `:`
+     prop-dict attr-dict `:`
      `(` type($a) `,` type($b) `)` `->` type($c)
   }];
   let hasVerifier = 1;
 }
 
-def TensorIR_DimOp : TensorIR_Op<"dim", [Pure, OpAsmOpInterface]> {
+def TensorIR_DimOp : TensorIR_Op<"dim", [Pure, OpAsmOpInterface,
+    DeclareOpInterfaceMethods<ValueBoundsOpInterface,
+                              ["populateBoundsForIndexValue"]>]> {
   let summary = "Return a tensor dimension extent";
   let description = [{
     Returns the runtime extent of `input` dimension `dimension` as an index
@@ -958,8 +1106,43 @@ def TensorIR_DimOp : TensorIR_Op<"dim", [Pure, OpAsmOpInterface]> {
   let hasVerifier = 1;
 }
 
-// SplatOp takes a scalar input rather than a tensor, so it overrides the
-// IterationSpaceInfoInterface methods that assume tensor operands.
+def TensorIR_AssumeShapeOp : TensorIR_Op<"assume_shape"> {
+  let summary = "Assume tensor dimensions equal the supplied extents";
+  let description = [{
+    Promises that every dimension of `input` equals the corresponding entry
+    in `sizes`. Entries are nonnegative integer constants or index SSA
+    values. Dimension queries and index arithmetic can express equalities
+    between tensor shapes, including scaled dimensions and polynomial
+    extents.
+
+    The promise applies throughout the containing TensorIR graph or
+    bufferized function. Violating a promised equality or supplying a
+    negative runtime extent has undefined behavior. This operation performs
+    no runtime check. Shape analysis consumes the promise when deriving
+    symbolic extents.
+
+    ```mlir
+    %rows = nv_tensor_ir.dim %b dimension = 0 : tensor<?x4xf32>
+    %four = arith.constant 4 : index
+    %elements = arith.muli %rows, %four : index
+    nv_tensor_ir.assume_shape %a, [%elements] : tensor<?xf32>
+    ```
+  }];
+  let arguments = (ins TensorIR_TensorType:$input,
+                       Variadic<Index>:$dynamic_sizes,
+                       DenseI64ArrayAttr:$static_sizes);
+  let assemblyFormat = [{
+    $input `,` custom<DynamicIndexList>($dynamic_sizes, $static_sizes)
+    attr-dict `:` type($input)
+  }];
+  let extraClassDeclaration = [{
+    SmallVector<OpFoldResult> getMixedSizes();
+  }];
+  let hasVerifier = 1;
+}
+
+/// SplatOp takes a scalar input rather than a tensor, so it overrides the
+/// IterationSpaceInfoInterface methods that assume tensor operands.
 def TensorIR_SplatOp : TensorIR_PureTensorOpBase<"splat", [
     DynamicDimsOpInterface,
     DeclareOpInterfaceMethods<IterationSpaceInfoInterface, [
@@ -1274,6 +1457,7 @@ def TensorIR_ConcatenateOp : TensorIR_Op<"concatenate", [
   let assemblyFormat =
       "$inputs `dimension` `=` $dimension attr-dict `:` "
       "functional-type(operands, results)";
+  let hasCanonicalizer = 1;
   let hasFolder = 1;
   let hasVerifier = 1;
 }

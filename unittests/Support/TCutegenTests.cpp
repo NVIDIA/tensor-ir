@@ -577,6 +577,29 @@ TYPED_TEST(TCutegenSequenceTest, ComparesSequences) {
   }
 }
 
+TEST(TCutegenSequenceIteratorTest,
+     EqualityIncludesPositionAndSequenceIdentity) {
+  tcg::Shape first({2, 3});
+  tcg::Shape second({2, 3});
+
+  // Equal contents do not make iterators into different sequences equal.
+  EXPECT_TRUE(first.begin() == first.begin());
+  EXPECT_FALSE(first.begin() == first.end());
+  EXPECT_FALSE(first.begin() == second.begin());
+}
+
+TEST(TCutegenCoordTest, ScalarEqualityRejectsTuplesAndErrors) {
+  const tcg::Coord scalar(2);
+  const tcg::Coord tuple(llvm::ArrayRef<int64_t>{2});
+  const tcg::Coord error(tcg::CgErrorT{});
+
+  EXPECT_TRUE(scalar == 2);
+  EXPECT_FALSE(scalar == 3);
+  // A rank-one tuple is still distinct from a scalar coordinate.
+  EXPECT_FALSE(tuple == 2);
+  EXPECT_FALSE(error == 2);
+}
+
 TYPED_TEST(TCutegenSequenceTest, PropagatesErrors) {
   TypeParam error(tcg::CgErrorT{});
   TypeParam storedError;

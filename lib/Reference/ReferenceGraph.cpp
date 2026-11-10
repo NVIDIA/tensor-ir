@@ -339,8 +339,8 @@ NodeResult makeNode(Operation *op, const NodeFactory &factory) {
   BINARY_NODE(SigmoidBwdOp, SIGMOID_BWD);
   BINARY_NODE(TanhBwdOp, TANH_BWD);
   BINARY_NODE(GeluApproxTanhBwdOp, GELU_APPROX_TANH_BWD);
-  BINARY_NODE(LogicalAndOp, LOGICAL_AND);
-  BINARY_NODE(LogicalOrOp, LOGICAL_OR);
+  BINARY_NODE(AndOp, LOGICAL_AND);
+  BINARY_NODE(OrOp, LOGICAL_OR);
 #undef BINARY_NODE
 #define UNARY_NODE(OpT, Mode)                                                  \
   result.Case<OpT>([&](auto) {                                                 \

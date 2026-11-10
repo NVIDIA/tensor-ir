@@ -200,10 +200,7 @@ static bool isSupportedConvertNumericDataType(DataType dtype) {
   return status.ok() && isSupported;
 }
 
-// ============================================================================
-// NumericConverter - Single-direction type conversion
-// ============================================================================
-
+/// NumericConverter - Single-direction type conversion
 template <typename To, typename From>
 struct NumericConverter {
   using ResultType = To;
@@ -214,7 +211,7 @@ struct NumericConverter {
   }
 };
 
-// Specialization: f8E4M3FN -> f8E5M2
+/// Specialization: f8E4M3FN -> f8E5M2
 template <>
 struct NumericConverter<__nv_fp8_e5m2, __nv_fp8_e4m3> {
   static inline __nv_fp8_e5m2 convert(__nv_fp8_e4m3 const &val) {
@@ -222,7 +219,7 @@ struct NumericConverter<__nv_fp8_e5m2, __nv_fp8_e4m3> {
   }
 };
 
-// Specialization: f8E5M2 -> f8E4M3FN
+/// Specialization: f8E5M2 -> f8E4M3FN
 template <>
 struct NumericConverter<__nv_fp8_e4m3, __nv_fp8_e5m2> {
   static inline __nv_fp8_e4m3 convert(__nv_fp8_e5m2 const &val) {
@@ -230,19 +227,19 @@ struct NumericConverter<__nv_fp8_e4m3, __nv_fp8_e5m2> {
   }
 };
 
-// Specialization: half -> float
+/// Specialization: half -> float
 template <>
 struct NumericConverter<float, half> {
   static inline float convert(half const &val) { return __half2float(val); }
 };
 
-// Specialization: float -> half
+/// Specialization: float -> half
 template <>
 struct NumericConverter<half, float> {
   static inline half convert(float const &val) { return __float2half(val); }
 };
 
-// Specialization: half -> double
+/// Specialization: half -> double
 template <>
 struct NumericConverter<double, half> {
   static inline double convert(half const &val) {
@@ -250,7 +247,7 @@ struct NumericConverter<double, half> {
   }
 };
 
-// Specialization: double -> half
+/// Specialization: double -> half
 template <>
 struct NumericConverter<half, double> {
   static inline half convert(double const &val) {
@@ -258,7 +255,7 @@ struct NumericConverter<half, double> {
   }
 };
 
-// Specialization: bfloat16 -> float
+/// Specialization: bfloat16 -> float
 template <>
 struct NumericConverter<float, nv_bfloat16> {
   static inline float convert(nv_bfloat16 const &val) {
@@ -266,7 +263,7 @@ struct NumericConverter<float, nv_bfloat16> {
   }
 };
 
-// Specialization: float -> bfloat16
+/// Specialization: float -> bfloat16
 template <>
 struct NumericConverter<nv_bfloat16, float> {
   static inline nv_bfloat16 convert(float const &val) {
@@ -274,7 +271,7 @@ struct NumericConverter<nv_bfloat16, float> {
   }
 };
 
-// Specialization: bfloat16 -> double
+/// Specialization: bfloat16 -> double
 template <>
 struct NumericConverter<double, nv_bfloat16> {
   static inline double convert(nv_bfloat16 const &val) {
@@ -282,7 +279,7 @@ struct NumericConverter<double, nv_bfloat16> {
   }
 };
 
-// Specialization: double -> bfloat16
+/// Specialization: double -> bfloat16
 template <>
 struct NumericConverter<nv_bfloat16, double> {
   static inline nv_bfloat16 convert(double const &val) {
@@ -290,7 +287,7 @@ struct NumericConverter<nv_bfloat16, double> {
   }
 };
 
-// Specialization: bfloat16 -> half
+/// Specialization: bfloat16 -> half
 template <>
 struct NumericConverter<half, nv_bfloat16> {
   static inline half convert(nv_bfloat16 const &val) {
@@ -298,7 +295,7 @@ struct NumericConverter<half, nv_bfloat16> {
   }
 };
 
-// Specialization: half -> bfloat16
+/// Specialization: half -> bfloat16
 template <>
 struct NumericConverter<nv_bfloat16, half> {
   static inline nv_bfloat16 convert(half const &val) {
@@ -306,7 +303,7 @@ struct NumericConverter<nv_bfloat16, half> {
   }
 };
 
-// Specialization: int32 -> half
+/// Specialization: int32 -> half
 template <>
 struct NumericConverter<half, int32_t> {
   static inline half convert(int32_t const &val) {
@@ -314,7 +311,7 @@ struct NumericConverter<half, int32_t> {
   }
 };
 
-// Specialization: float -> int32
+/// Specialization: float -> int32
 template <>
 struct NumericConverter<int32_t, float> {
   static inline int32_t convert(float const &val) {
@@ -324,7 +321,7 @@ struct NumericConverter<int32_t, float> {
   }
 };
 
-// Specialization: double -> int32
+/// Specialization: double -> int32
 template <>
 struct NumericConverter<int32_t, double> {
   static inline int32_t convert(double const &val) {
@@ -334,7 +331,7 @@ struct NumericConverter<int32_t, double> {
   }
 };
 
-// Specialization: half -> int32
+/// Specialization: half -> int32
 template <>
 struct NumericConverter<int32_t, half> {
   static inline int32_t convert(half const &val) {
@@ -342,7 +339,7 @@ struct NumericConverter<int32_t, half> {
   }
 };
 
-// Specialization: int32 -> bfloat16
+/// Specialization: int32 -> bfloat16
 template <>
 struct NumericConverter<nv_bfloat16, int32_t> {
   static inline nv_bfloat16 convert(int32_t const &val) {
@@ -350,7 +347,7 @@ struct NumericConverter<nv_bfloat16, int32_t> {
   }
 };
 
-// Specialization: bfloat16 -> int32
+/// Specialization: bfloat16 -> int32
 template <>
 struct NumericConverter<int32_t, nv_bfloat16> {
   static inline int32_t convert(nv_bfloat16 const &val) {
@@ -358,7 +355,7 @@ struct NumericConverter<int32_t, nv_bfloat16> {
   }
 };
 
-// Specialization: bool -> any type (false -> 0, true -> 1 via float)
+/// Specialization: bool -> any type (false -> 0, true -> 1 via float)
 template <typename To>
 struct NumericConverter<To, bool> {
   static inline To convert(bool const &val) {
@@ -407,13 +404,13 @@ using ReferenceComputeTypeT = typename ReferenceComputeType<T>::Type;
 
 } // anonymous namespace
 
-// Unified matrix multiplication kernel supporting both 2D and 3D (batched)
-// cases
-// - For 2D: pass batchSize=1, and strides should have 2 elements [mStride,
-// kStride]
-// - For 3D: pass actual batchSize, and strides should have 3 elements
-// [batchStride, mStride, kStride] Supports independent Input/Compute/Output
-// types for mixed-precision operations
+/// Unified matrix multiplication kernel supporting both 2D and 3D (batched)
+/// cases
+/// - For 2D: pass batchSize=1, and strides should have 2 elements [mStride,
+/// kStride]
+/// - For 3D: pass actual batchSize, and strides should have 3 elements
+/// [batchStride, mStride, kStride] Supports independent Input/Compute/Output
+/// types for mixed-precision operations
 template <typename InputT, typename ComputeT, typename OutputT>
 static void
 matmulKernel(const void *aPtr, const void *bPtr, void *cPtr, int64_t batchSize,
@@ -489,7 +486,7 @@ matmulKernel(const void *aPtr, const void *bPtr, void *cPtr, int64_t batchSize,
 
 namespace {
 
-// Hash function for (DataType, DataType) pair
+/// Hash function for (DataType, DataType) pair
 struct DataTypePairHash {
   std::size_t operator()(const std::pair<DataType, DataType> &p) const {
     return std::hash<int>()(static_cast<int>(p.first)) ^
@@ -499,7 +496,7 @@ struct DataTypePairHash {
 
 } // anonymous namespace
 
-// Type alias for matmul kernel function pointer
+/// Type alias for matmul kernel function pointer
 using MatmulKernelFunc = void (*)(const void *, const void *, void *, int64_t,
                                   int64_t, int64_t, int64_t, double, double,
                                   llvm::ArrayRef<int64_t>,
@@ -535,7 +532,7 @@ static const std::unordered_map<std::pair<DataType, DataType>, MatmulKernelFunc,
 #pragma clang diagnostic pop
 #endif
 
-// Check if an (inputType, outputType) combination is supported for matmul
+/// Check if an (inputType, outputType) combination is supported for matmul
 bool MatmulNode::isSupportedTypeCombination(DataType inputType,
                                             DataType outputType) {
   return kMatmulKernelRegistry.find({inputType, outputType}) !=
@@ -2229,7 +2226,7 @@ static T evaluateBinaryPointwise(BinaryPointwiseMode mode, T a, T b) {
 
 } // anonymous namespace
 
-// Generic binary pointwise kernel
+/// Generic binary pointwise kernel
 template <typename T>
 static void
 binaryPointwiseKernel(const SimplifiedTensor &a, const SimplifiedTensor &b,
@@ -2278,7 +2275,7 @@ static Status validateIntegerDivRemInputs(BinaryPointwiseMode mode,
   return Status::Ok();
 }
 
-// Type alias for binary pointwise kernel function pointer
+/// Type alias for binary pointwise kernel function pointer
 using BinaryPointwiseKernelFunc = void (*)(const SimplifiedTensor &,
                                            const SimplifiedTensor &,
                                            SimplifiedTensor &,

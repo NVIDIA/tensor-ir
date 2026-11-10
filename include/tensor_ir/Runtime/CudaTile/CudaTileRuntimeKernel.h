@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// CudaTileRuntimeKernel - Compiled runtime kernel for CudaTile backend
+/// CudaTileRuntimeKernel - Compiled runtime kernel for CudaTile backend
 
 #ifndef TENSOR_IR_RUNTIME_CUDATILE_CUDATILERUNTIMEKERNEL_H
 #define TENSOR_IR_RUNTIME_CUDATILE_CUDATILERUNTIMEKERNEL_H
@@ -88,7 +88,7 @@ public:
 
   Kind getKind() const override { return Kind::CudaTile; }
 
-  // To implement LLVM-style polymorphism
+  /// To implement LLVM-style polymorphism
   static bool classof(const IRuntimeKernel *kernel) {
     return kernel->getKind() == Kind::CudaTile;
   }

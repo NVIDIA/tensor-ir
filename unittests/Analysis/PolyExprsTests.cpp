@@ -1,17 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "tensor_ir/Analysis/PolyExprs.h"
-
-#include "llvm/ADT/STLExtras.h"
-
-#include "gtest/gtest.h"
-#include <limits>
-#include <type_traits>
-
-using namespace mlir::nv_tensor_ir;
-
-/// \file
 /// Unit tests for sparse integer polynomials and symbol evaluation contexts in TensorIR.
 ///
 /// Test Suite Scope:
@@ -28,6 +17,16 @@ using namespace mlir::nv_tensor_ir;
 /// - Range Boundaries: symbol definitions at the extremes of VariableId (DenseMap sentinel avoidance).
 /// - Memoization & Cache Invalidation: caching normalization failures and clearing caches on updates.
 /// - Context Isolation: cross-context rejection for operations, definitions, and queries.
+
+#include "tensor_ir/Analysis/PolyExprs.h"
+
+#include "llvm/ADT/STLExtras.h"
+
+#include "gtest/gtest.h"
+#include <limits>
+#include <type_traits>
+
+using namespace mlir::nv_tensor_ir;
 
 /// Helper to construct a `PolyExpr` from small 64-bit integer coefficients for convenient test setup.
 static PolyExpr getSmall(PolyExprContext &context,
@@ -278,11 +277,40 @@ TEST_F(PolyExprTest, CheckedExponents) {
             nullptr);
 }
 
+/// Verifies the reduction basis, three-valued queries and freezing.
+///
+/// Evaluates:
+/// - x*y and z are not known equal before the basis holds x*y - z; z + 1 and z differ.
+/// - Adding 2*x*y - 2*z keeps its primitive part, so x*y normalizes to z and
+///   multiples of x*y and z compare equal, while x*y and z + 1 differ.
+/// - An element that normalizes to zero adds nothing; one that normalizes to a
+///   nonzero constant is rejected.
+/// - freeze() marks the context frozen.
+TEST_F(PolyExprTest, ReductionBasis) {
+  auto z = PolyExpr::getSymbol(context, 2);
+  auto xy = x.multiply(y);
+  auto two = PolyExpr::getConstant(context, 2);
+  auto three = PolyExpr::getConstant(context, 3);
+  EXPECT_EQ(context.areEqual(xy, z), std::nullopt);
+  EXPECT_EQ(context.areEqual(z.add(one), z), false);
+  ASSERT_TRUE(context.addReduction(xy.subtract(z).multiply(two)));
+  EXPECT_EQ(context.normalize(xy), z);
+  EXPECT_EQ(context.areEqual(xy, z), true);
+  EXPECT_EQ(context.areEqual(xy.multiply(three), z.multiply(three)), true);
+  EXPECT_EQ(context.areEqual(xy, z.add(one)), false);
+  EXPECT_EQ(context.isOne(xy.subtract(z).add(one)), true);
+  EXPECT_TRUE(context.addReduction(z.subtract(xy)));
+  EXPECT_FALSE(context.addReduction(xy.subtract(z).add(one)));
+  EXPECT_FALSE(context.isFrozen());
+  context.freeze();
+  EXPECT_TRUE(context.isFrozen());
+}
+
 /// Verifies symbol definitions, transitive normalization, and cache invalidation.
 ///
 /// Evaluates:
 /// - Normalizing an unmapped symbol y returns y.
-/// - y and x + 1 compare unequal initially, but compare equal once y -> x + 1 is added.
+/// - y and x + 1 are not known equal initially, but compare equal once y -> x + 1 is added.
 /// - Transitive evaluation: z -> y^2, then x -> 2 leads to z normalizing to (2 + 1)^2 = 9.
 /// - Cache invalidation: adding the definition for x invalidates cached normalizations for z.
 /// - Undefined symbols return nullptr from getDefinition.
@@ -290,7 +318,7 @@ TEST_F(PolyExprTest, DefinitionsNormalizeAndInvalidateCache) {
   auto z = PolyExpr::getSymbol(context, 2);
   auto sum = x.add(one);
   EXPECT_EQ(context.normalize(y), y);
-  EXPECT_EQ(context.areEqual(y, sum), false);
+  EXPECT_EQ(context.areEqual(y, sum), std::nullopt);
   ASSERT_TRUE(context.addDefinition(1, sum));
   EXPECT_EQ(context.normalize(y), sum);
   EXPECT_EQ(context.areEqual(y, sum), true);

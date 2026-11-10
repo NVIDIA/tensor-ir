@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Source of generated option structs, parsers, bindings, and documentation.
+/// Source of generated option structs, parsers, bindings, and documentation.
 include "tensor_ir/Options/OptionsBase.td"
 include "tensor_ir/Options/Enums.td"
 
@@ -18,6 +18,25 @@ def DeviceTargetOptions : ComponentOptions<"DeviceTarget"> {
            "0", "Concrete compute capability used for code generation; zero "
                 "derives it from kernel-target",
            1, [RangeTrait<0, 2147483647>]>,
+  ];
+}
+
+def OptimizationRemarkOptions : ComponentOptions<"OptimizationRemark"> {
+  let clCategory = "TensorIR Optimization Remark Options";
+  let invocationMember = "optimizationRemarks";
+  let options = [
+    EnumOption<"remarksFilter", "remarks", RemarkCategoryEnum, "None",
+               "Enable optimization remarks by category">,
+    EnumOption<"remarksPassedFilter", "remarks-passed", RemarkCategoryEnum,
+               "Inherit", "Override passed remark category (including none)">,
+    EnumOption<"remarksMissedFilter", "remarks-missed", RemarkCategoryEnum,
+               "Inherit", "Override missed remark category (including none)">,
+    EnumOption<"remarksFailedFilter", "remarks-failed", RemarkCategoryEnum,
+               "Inherit", "Override failed remark category (including none)">,
+    EnumOption<"remarksAnalysisFilter", "remarks-analysis", RemarkCategoryEnum,
+               "Inherit", "Override analysis remark category (including none)">,
+    StringOption<"remarksOutputFile", "remarks-output-file",
+                 "Remark YAML destination; empty uses stderr, - uses stdout">
   ];
 }
 
@@ -87,7 +106,9 @@ def CodegenOptions : ComponentOptions<"Codegen"> {
                        "Per-dimension kernel tile sizes ('x' or ',' separated)">,
       StringOption<"cudaToolkitPath", "cuda-toolkit-path",
                "Path to the CUDA toolkit root (replaces the CUDA_ROOT env "
-               "variable for compilation)">
+               "variable for compilation)">,
+      StringOption<"tileirasPath", "tileiras-path",
+               "Path to tileiras executable (overrides CUDA toolkit and PATH lookup)">
   ];
 }
 
@@ -163,5 +184,15 @@ def CompilerInvocation
         DeviceTargetOptions,
         CodegenOptions,
         CudaTileOptions,
-        CompilerDebugOptions
+        CompilerDebugOptions,
+        OptimizationRemarkOptions
       ]>;
+
+def LayoutPropagationPipelineOptions : PipelineOptions<[
+    PipelineOption<CodegenOptions, "tileSize">,
+    PipelineOption<CudaTileOptions, "bytecodeVersion">,
+    PipelineOption<CudaTileOptions, "reductionTileSize">,
+    PipelineOption<CudaTileOptions, "persistenceMode">,
+    PipelineOption<CudaTileOptions, "smCount">,
+    PipelineOption<CudaTileOptions, "occupancy">
+]>;

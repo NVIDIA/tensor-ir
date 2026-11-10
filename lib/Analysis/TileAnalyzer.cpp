@@ -28,17 +28,13 @@ namespace nv_tensor_ir {
 
 namespace {
 
-/**
- * @brief Get dimensions ordered from fastest to slowest based on stride
- * values.
- * @param tensorStrides Strides of the tensor
- * @return Ordered dimension indices
- *
- * A smaller stride indicates faster dimension (elements closer in memory).
- * The returned vector contains dimension indices where:
- * vec[0] is the fastest dimension (smallest stride)
- * vec[vec.size()-1] is the slowest dimension (largest stride)
- */
+/// Get dimensions ordered from fastest to slowest based on stride
+/// values.
+///
+/// A smaller stride indicates faster dimension (elements closer in memory).
+/// The returned vector contains dimension indices where:
+/// vec[0] is the fastest dimension (smallest stride)
+/// vec[vec.size()-1] is the slowest dimension (largest stride)
 llvm::SmallVector<size_t>
 getDimensionOrder(llvm::ArrayRef<DimSize> tensorStrides) {
   llvm::SmallVector<size_t> order(tensorStrides.size());
@@ -54,27 +50,27 @@ enum TilingStrategy {
   Strategy1,
 };
 
-// Use the pointwise baseline strategy until we will have enough benchmarking
-// and data to select better strategies.
+/// Use the pointwise baseline strategy until we will have enough benchmarking
+/// and data to select better strategies.
 constexpr TilingStrategy tilingStrategy = PointwiseBaseline;
 
-// A simple strategy, which provides good performance for pointwise kernels.
-//
-// It makes tiles of size <= 128 ("one element for each CUDA core of an SM"),
-// like XLA's MLIR emitter does. This should be a good baseline for more
-// advanced strategies. This results in good occupancy: we use as many SMs as
-// possible and each core does something. This always returns tile sizes where
-// each dimension is a power of 2.
-//
-// This strategy tries to build a contiguous tile by first growing the
-// fastest-varying dimension and then growing the slower dimensions, until we
-// reach the desired size.
-//
-// For example, for a row-major tensor, this could make the following tile
-// sizes:
-// - tensorShape: [1024, 1024] -> tileSize: [1, 128]
-// - tensorShape: [16, 16, 16] -> tileSize: [1, 8, 16]
-// - tensorShape: [16, 3, 16] -> tileSize: [2, 4, 16]
+/// A simple strategy, which provides good performance for pointwise kernels.
+///
+/// It makes tiles of size <= 128 ("one element for each CUDA core of an SM"),
+/// like XLA's MLIR emitter does. This should be a good baseline for more
+/// advanced strategies. This results in good occupancy: we use as many SMs as
+/// possible and each core does something. This always returns tile sizes where
+/// each dimension is a power of 2.
+///
+/// This strategy tries to build a contiguous tile by first growing the
+/// fastest-varying dimension and then growing the slower dimensions, until we
+/// reach the desired size.
+///
+/// For example, for a row-major tensor, this could make the following tile
+/// sizes:
+/// - tensorShape: [1024, 1024] -> tileSize: [1, 128]
+/// - tensorShape: [16, 16, 16] -> tileSize: [1, 8, 16]
+/// - tensorShape: [16, 3, 16] -> tileSize: [2, 4, 16]
 llvm::SmallVector<DimSize>
 GetTileSize_PointwiseBaseline(llvm::ArrayRef<DimSize> tensorShape,
                               llvm::ArrayRef<size_t> dimOrder,
@@ -108,69 +104,63 @@ GetTileSize_PointwiseBaseline(llvm::ArrayRef<DimSize> tensorShape,
 
 namespace strategy1 {
 
-/*
-Tile Size Analyzer for GPU Tensor Operations
+/// Tile Size Analyzer for GPU Tensor Operations
+///
+/// This algorithm determines tile sizes for tensor operations on GPUs, focusing on
+/// pointwise operations. The process follows these steps:
+///
+/// 1. Dimension Ordering:
+///    - Sort dimensions based on stride values (smallest to largest)
+///    - Identifies the fastest-changing dimension for memory access optimization
+///
+/// 2. Tile Size Selection:
+///    For fastest-changing dimension:
+///    - Start with warp size (32)
+///    - Allow growth up to 128 elements or dimension size
+///    - Maintain warp alignment for potential memory coalescing
+///
+///    For other dimensions:
+///    - Target 64 elements (2 warps) to amortize setup costs
+///    - Align to warp size only when beneficial
+///    - Avoid unnecessary padding that could limit parallelism
+///
+/// Key Principles:
+/// - Tile represents a logical unit of computation
+/// - Compiler can map a tile to one or more thread blocks
+/// - Single thread block doesn't process multiple tiles
+/// - Avoid oversized tiles that cause scheduling inefficiency
+/// - Maintain enough elements per tile to amortize setup costs
+///
+/// Design Considerations:
+/// 1. Memory Access:
+///    - Fastest dimension prioritizes memory access efficiency
+///    - Warp alignment where beneficial for potential coalescing
+///    - Compiler determines final memory access patterns
+///
+/// 2. Scheduling Efficiency:
+///    - Large tiles can lead to underutilization in last wave
+///    - Small tiles increase relative overhead costs
+///    - Moderate sizes enable flexible compiler optimization
+///
+/// 3. Parallelism:
+///    - Compiler decides elements per thread
+///    - Tile size doesn't directly correspond to thread count
+///    - Focus on enabling efficient execution patterns
+///
+/// This approach provides simple but effective guidelines for tile size selection
+/// while giving the compiler flexibility in mapping computation to hardware
+/// resources.
 
-This algorithm determines tile sizes for tensor operations on GPUs, focusing on
-pointwise operations. The process follows these steps:
-
-1. Dimension Ordering:
-   - Sort dimensions based on stride values (smallest to largest)
-   - Identifies the fastest-changing dimension for memory access optimization
-
-2. Tile Size Selection:
-   For fastest-changing dimension:
-   - Start with warp size (32)
-   - Allow growth up to 128 elements or dimension size
-   - Maintain warp alignment for potential memory coalescing
-
-   For other dimensions:
-   - Target 64 elements (2 warps) to amortize setup costs
-   - Align to warp size only when beneficial
-   - Avoid unnecessary padding that could limit parallelism
-
-Key Principles:
-- Tile represents a logical unit of computation
-- Compiler can map a tile to one or more thread blocks
-- Single thread block doesn't process multiple tiles
-- Avoid oversized tiles that cause scheduling inefficiency
-- Maintain enough elements per tile to amortize setup costs
-
-Design Considerations:
-1. Memory Access:
-   - Fastest dimension prioritizes memory access efficiency
-   - Warp alignment where beneficial for potential coalescing
-   - Compiler determines final memory access patterns
-
-2. Scheduling Efficiency:
-   - Large tiles can lead to underutilization in last wave
-   - Small tiles increase relative overhead costs
-   - Moderate sizes enable flexible compiler optimization
-
-3. Parallelism:
-   - Compiler decides elements per thread
-   - Tile size doesn't directly correspond to thread count
-   - Focus on enabling efficient execution patterns
-
-This approach provides simple but effective guidelines for tile size selection
-while giving the compiler flexibility in mapping computation to hardware
-resources.
-*/
-
-/// @brief Maximum tile dimension to avoid oversized scheduling units
+/// Maximum tile dimension to avoid oversized scheduling units
 constexpr DimSize MAX_TILE_DIM = 128;
 
-/// @brief Minimum tile dimension for setup cost amortization
+/// Minimum tile dimension for setup cost amortization
 constexpr DimSize MIN_TILE_DIM = 8;
 
-/// @brief Warp size for alignment considerations
+/// Warp size for alignment considerations
 constexpr DimSize WARP_MULTIPLE = 32;
 
-/**
- * @brief Align size to warp multiple if beneficial
- * @param size Size to align
- * @return Aligned size
- */
+/// Align size to warp multiple if beneficial
 DimSize alignToWarpSize(DimSize size) {
   if (size > WARP_MULTIPLE / 2) {
     return ((size + WARP_MULTIPLE - 1) / WARP_MULTIPLE) * WARP_MULTIPLE;
@@ -178,12 +168,7 @@ DimSize alignToWarpSize(DimSize size) {
   return size;
 }
 
-/**
- * @brief Calculate appropriate tile size for a dimension
- * @param dimSize Size of the dimension
- * @param isFastestDim Whether this is the fastest-changing dimension
- * @return Calculated tile size
- */
+/// Calculate appropriate tile size for a dimension
 DimSize calculateTileSize(DimSize dimSize, bool isFastestDim) {
   if (dimSize == 1) {
     return 1;
@@ -235,12 +220,7 @@ GetTileSize_Strategy1(llvm::ArrayRef<DimSize> tensorShape,
 
 } // namespace strategy1
 
-/**
- * @brief Get tile sizes based on dimension characteristics
- * @param tensorShape Shape of the tensor
- * @param dimOrder Dimension order
- * @return Tile sizes
- */
+/// Get tile sizes based on dimension characteristics
 llvm::SmallVector<DimSize>
 getTileSize(llvm::ArrayRef<DimSize> tensorShape,
             llvm::ArrayRef<size_t> dimOrder,
@@ -374,15 +354,11 @@ analyzeTileSizeForGraph(TileAnalyzer &tileAnalyzer,
   LLVM_DEBUG(llvm::dbgs() << "Starting to look for reduction operations...\n");
 
   for (Operation &op : graphOp.getBody()->getOperations()) {
-    if (auto reductionOp = mlir::dyn_cast<mlir::nv_tensor_ir::ReduceOp>(&op)) {
-      for (int64_t dim : reductionOp.getDimensions()) {
-        reductionDims.push_back(dim);
-      }
-    } else if (auto reductionUDOp =
-                   mlir::dyn_cast<mlir::nv_tensor_ir::ReduceUDOp>(&op)) {
-      for (int64_t dim : reductionUDOp.getDimensions()) {
-        reductionDims.push_back(dim);
-      }
+    auto domain = dyn_cast<IterationDomainOpInterface>(&op);
+    // Tile coordinates use input axes, so require the same domain coordinates.
+    if (domain && domain.hasReductionLoops() &&
+        domain.getIndexingMapsArray().front().isIdentity()) {
+      llvm::append_range(reductionDims, domain.getReductionDims());
     }
   }
   LLVM_DEBUG(llvm::dbgs() << "Finished looking for reduction operations. Found "

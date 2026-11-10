@@ -17,23 +17,16 @@ namespace mlir::nv_tensor_ir::reference {
 
 class SimplifiedTensor;
 
-/**
- * @brief TensorMemory - Manages host memory allocation for tensors
- *
- * This class owns one CPU buffer used for interpreter inputs and reference
- * results. The buffer is allocated on construction and released on destruction.
- */
+/// TensorMemory - Manages host memory allocation for tensors
+///
+/// This class owns one CPU buffer used for interpreter inputs and reference
+/// results. The buffer is allocated on construction and released on destruction.
 class TensorMemory {
 public:
-  /**
-   * @brief Construct and zero-initialize a host buffer
-   * @param sizeInBytes Total number of bytes to allocate
-   */
+  /// Construct and zero-initialize a host buffer
   explicit TensorMemory(size_t sizeInBytes);
 
-  /**
-   * @brief Release the owned host buffer
-   */
+  /// Release the owned host buffer
   ~TensorMemory();
 
   TensorMemory(const TensorMemory &) = delete;

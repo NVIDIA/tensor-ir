@@ -6,33 +6,62 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ErrorHandling.h"
 
+#include <cassert>
+#include <string>
 #include <utility>
 
 namespace tensor_ir::rt {
 
-int32_t getElementByteWidth(ElementType type) {
+static_assert(static_cast<uint8_t>(ElementType::Bool) == 0);
+static_assert(static_cast<uint8_t>(ElementType::F16) == 1);
+static_assert(static_cast<uint8_t>(ElementType::BF16) == 2);
+static_assert(static_cast<uint8_t>(ElementType::F32) == 3);
+static_assert(static_cast<uint8_t>(ElementType::F64) == 4);
+static_assert(static_cast<uint8_t>(ElementType::F8E4M3FN) == 5);
+static_assert(static_cast<uint8_t>(ElementType::F8E5M2) == 6);
+static_assert(static_cast<uint8_t>(ElementType::SI8) == 7);
+static_assert(static_cast<uint8_t>(ElementType::SI16) == 8);
+static_assert(static_cast<uint8_t>(ElementType::SI32) == 9);
+static_assert(static_cast<uint8_t>(ElementType::SI64) == 10);
+static_assert(static_cast<uint8_t>(ElementType::UI8) == 11);
+static_assert(static_cast<uint8_t>(ElementType::UI16) == 12);
+static_assert(static_cast<uint8_t>(ElementType::UI32) == 13);
+static_assert(static_cast<uint8_t>(ElementType::UI64) == 14);
+static_assert(static_cast<uint8_t>(ElementType::F4E2M1FN) == 15);
+static_assert(static_cast<uint8_t>(ElementType::F8E8M0FNU) == 16);
+
+int32_t getElementBitWidth(ElementType type) {
   switch (type) {
+  case ElementType::F4E2M1FN:
+    return 4;
   case ElementType::Bool:
   case ElementType::SI8:
   case ElementType::UI8:
   case ElementType::F8E4M3FN:
   case ElementType::F8E5M2:
-    return 1;
+  case ElementType::F8E8M0FNU:
+    return 8;
   case ElementType::F16:
   case ElementType::BF16:
   case ElementType::SI16:
   case ElementType::UI16:
-    return 2;
+    return 16;
   case ElementType::F32:
   case ElementType::SI32:
   case ElementType::UI32:
-    return 4;
+    return 32;
   case ElementType::F64:
   case ElementType::SI64:
   case ElementType::UI64:
-    return 8;
+    return 64;
   }
   llvm_unreachable("unhandled ElementType");
+}
+
+int32_t getScalarByteWidth(ElementType type) {
+  int32_t bitWidth = getElementBitWidth(type);
+  assert(bitWidth % 8 == 0 && "sub-byte type has no scalar byte width");
+  return bitWidth / 8;
 }
 
 bool isValidElementType(ElementType type) {
@@ -45,6 +74,10 @@ ScalarArgDesc::create(ElementType elementType) {
   if (!isValidElementType(elementType)) {
     return ::mlir::nv_tensor_ir::Status::InvalidArgument(
         "scalar argument has an invalid element type");
+  }
+  if (getElementBitWidth(elementType) % 8 != 0) {
+    return ::mlir::nv_tensor_ir::Status::InvalidArgument(
+        "sub-byte scalar arguments are not representable; use a packed tensor");
   }
   return ScalarArgDesc(elementType);
 }
@@ -79,6 +112,21 @@ TensorArgDesc::create(ElementType elementType, llvm::ArrayRef<int64_t> shape,
       (strides && !llvm::all_of(*strides, validDim))) {
     return Status::InvalidArgument(
         "tensor argument shape and strides must be non-negative or kDynamic");
+  }
+  int32_t bitWidth = getElementBitWidth(elementType);
+  if (bitWidth < 8 && !llvm::is_contained(shape, TensorArgDesc::kDynamic)) {
+    assert(8 % bitWidth == 0 && "sub-byte type must pack evenly into bytes");
+    int32_t elementsPerByte = 8 / bitWidth;
+    int32_t remainder = 1;
+    for (int64_t dim : shape) {
+      remainder = (remainder * static_cast<int32_t>(dim % elementsPerByte)) %
+                  elementsPerByte;
+    }
+    if (remainder != 0) {
+      return Status::InvalidArgument(
+          "sub-byte tensor argument element count must be a multiple of " +
+          std::to_string(elementsPerByte));
+    }
   }
   return TensorArgDesc(elementType, shape, strides);
 }

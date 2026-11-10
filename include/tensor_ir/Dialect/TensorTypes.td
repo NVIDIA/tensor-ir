@@ -34,6 +34,7 @@ class TensorIR_TensorTypeOf<list<Type> dtypes>
 }
 
 def TensorIR_FloatTensor : TensorIR_TensorTypeOf<[TensorIR_Float]>;
+def TensorIR_BaseFloatTensor : TensorIR_TensorTypeOf<[F16, BF16, F32, F64]>;
 def TensorIR_FloatTensorLike : AnyTypeOf<[TensorIR_Float, TensorIR_FloatTensor]>;
 
 
@@ -45,6 +46,11 @@ def TensorIR_BoolTensorLike : AnyTypeOf<[I1, TensorIR_BoolTensor]>;
 def TensorIR_Int : AnyTypeOf<[SI8, SI16, SI32, SI64, UI8, UI16, UI32, UI64], "integer">;
 def TensorIR_IntTensor : TensorIR_TensorTypeOf<[TensorIR_Int]>;
 def TensorIR_IntTensorLike : AnyTypeOf<[TensorIR_Int, TensorIR_IntTensor]>;
+
+def TensorIR_IntOrBoolTensor : TensorIR_TensorTypeOf<[I1, TensorIR_Int]>;
+
+def TensorIR_UnsignedInt : AnyTypeOf<[UI8, UI16, UI32, UI64], "unsigned integer">;
+def TensorIR_UnsignedIntTensor : TensorIR_TensorTypeOf<[I1, TensorIR_UnsignedInt]>;
 
 def TensorIR_TensorElementType : AnyTypeOf<[TensorIR_Float, I1, TensorIR_Int]>;
 def TensorIR_TensorType : TensorIR_TensorTypeOf<[TensorIR_TensorElementType]>;

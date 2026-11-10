@@ -7,149 +7,211 @@
 // RUN:   | FileCheck %s --implicit-check-not=nv_tensor_ir.
 
 // CHECK-LABEL: func.func @reduce_add(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3x4xf32>
 nv_tensor_ir.graph @reduce_add(%a: tensor<2x3x4xf32>) -> tensor<1x3x1xf32> {
   %r = reduce(%a)<dimensions = [0, 2], reduction_mode = <add>> : tensor<2x3x4xf32> -> tensor<1x3x1xf32>
   results %r : tensor<1x3x1xf32>
 }
 // CHECK: %[[ID:.*]] = arith.constant 0.000000e+00 : f32
-// CHECK: linalg.fill ins(%[[ID]] : f32)
-// CHECK: linalg.reduce
-// CHECK: linalg.broadcast
-// CHECK-SAME: dimensions = [0, 2]
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (0, d1, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3x4xf32>) outs(%[[INIT]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[SCALAR:.*]] = arith.addf %[[ACC]], %[[IN]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<1x3x1xf32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_mul(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3x4xf32>
 nv_tensor_ir.graph @reduce_mul(%a: tensor<2x3x4xf32>) -> tensor<1x3x1xf32> {
   %r = reduce(%a)<dimensions = [0, 2], reduction_mode = <mul>> : tensor<2x3x4xf32> -> tensor<1x3x1xf32>
   results %r : tensor<1x3x1xf32>
 }
 // CHECK: %[[ID:.*]] = arith.constant 1.000000e+00 : f32
-// CHECK: linalg.fill ins(%[[ID]] : f32)
-// CHECK: linalg.reduce
-// CHECK-SAME: arith.mulf
-// CHECK: linalg.broadcast
-// CHECK-SAME: dimensions = [0, 2]
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (0, d1, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3x4xf32>) outs(%[[INIT]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[SCALAR:.*]] = arith.mulf %[[ACC]], %[[IN]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<1x3x1xf32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_min(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3x4xf32>
 nv_tensor_ir.graph @reduce_min(%a: tensor<2x3x4xf32>) -> tensor<1x3x1xf32> {
   %r = reduce(%a)<dimensions = [0, 2], reduction_mode = <min>> : tensor<2x3x4xf32> -> tensor<1x3x1xf32>
   results %r : tensor<1x3x1xf32>
 }
 // CHECK: %[[ID:.*]] = arith.constant 0x7F800000 : f32
-// CHECK: linalg.fill ins(%[[ID]] : f32)
-// CHECK: linalg.reduce
-// CHECK: arith.minimumf
-// CHECK: linalg.broadcast
-// CHECK-SAME: dimensions = [0, 2]
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (0, d1, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3x4xf32>) outs(%[[INIT]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[SCALAR:.*]] = arith.minimumf %[[ACC]], %[[IN]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<1x3x1xf32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_max(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3x4xf32>
 nv_tensor_ir.graph @reduce_max(%a: tensor<2x3x4xf32>) -> tensor<1x3x1xf32> {
   %r = reduce(%a)<dimensions = [0, 2], reduction_mode = <max>> : tensor<2x3x4xf32> -> tensor<1x3x1xf32>
   results %r : tensor<1x3x1xf32>
 }
 // CHECK: %[[ID:.*]] = arith.constant 0xFF800000 : f32
-// CHECK: linalg.fill ins(%[[ID]] : f32)
-// CHECK: linalg.reduce
-// CHECK: arith.maximumf
-// CHECK: linalg.broadcast
-// CHECK-SAME: dimensions = [0, 2]
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (0, d1, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3x4xf32>) outs(%[[INIT]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[SCALAR:.*]] = arith.maximumf %[[ACC]], %[[IN]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<1x3x1xf32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_amax(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3x4xf32>
 nv_tensor_ir.graph @reduce_amax(%a: tensor<2x3x4xf32>) -> tensor<1x3x1xf32> {
   %r = reduce(%a)<dimensions = [0, 2], reduction_mode = <amax>> : tensor<2x3x4xf32> -> tensor<1x3x1xf32>
   results %r : tensor<1x3x1xf32>
 }
 // CHECK: %[[ID:.*]] = arith.constant 0xFF800000 : f32
-// CHECK: linalg.fill ins(%[[ID]] : f32)
-// CHECK: linalg.reduce
-// CHECK: math.absf
-// CHECK: linalg.broadcast
-// CHECK-SAME: dimensions = [0, 2]
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (0, d1, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3x4xf32>) outs(%[[INIT]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[ABS:.*]] = math.absf %[[IN]] : f32
+// CHECK: %[[SCALAR:.*]] = arith.maximumf %[[ACC]], %[[ABS]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<1x3x1xf32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_avg(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3x4xf32>
 nv_tensor_ir.graph @reduce_avg(%a: tensor<2x3x4xf32>) -> tensor<1x3x1xf32> {
   %r = reduce(%a)<dimensions = [0, 2], reduction_mode = <avg>> : tensor<2x3x4xf32> -> tensor<1x3x1xf32>
   results %r : tensor<1x3x1xf32>
 }
 // CHECK: %[[ID:.*]] = arith.constant 0.000000e+00 : f32
-// CHECK: linalg.fill ins(%[[ID]] : f32)
-// CHECK: linalg.reduce
-// CHECK: linalg.broadcast
-// CHECK-SAME: dimensions = [0, 2]
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (0, d1, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3x4xf32>) outs(%[[INIT]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[SCALAR:.*]] = arith.addf %[[ACC]], %[[IN]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
 // CHECK: arith.muli
-// CHECK: arith.index_cast
-// CHECK: arith.sitofp
-// CHECK: linalg.generic
-// CHECK: arith.divf
+// CHECK: %[[COUNT:.*]] = arith.index_cast
+// CHECK: %[[DIVISOR:.*]] = arith.sitofp %[[COUNT]] : i64 to f32
+// CHECK: %[[POST:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[R]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[REDUCED:[^:]+]]: f32, %{{[^:]+}}: f32):
+// CHECK: %[[FINAL:.*]] = arith.divf %[[REDUCED]], %[[DIVISOR]] : f32
+// CHECK: linalg.yield %[[FINAL]] : f32
+// CHECK: return %[[POST]] : tensor<1x3x1xf32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_norm1(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3x4xf32>
 nv_tensor_ir.graph @reduce_norm1(%a: tensor<2x3x4xf32>) -> tensor<1x3x1xf32> {
   %r = reduce(%a)<dimensions = [0, 2], reduction_mode = <norm1>> : tensor<2x3x4xf32> -> tensor<1x3x1xf32>
   results %r : tensor<1x3x1xf32>
 }
 // CHECK: %[[ID:.*]] = arith.constant 0.000000e+00 : f32
-// CHECK: linalg.fill ins(%[[ID]] : f32)
-// CHECK: linalg.reduce
-// CHECK: math.absf
-// CHECK: linalg.broadcast
-// CHECK-SAME: dimensions = [0, 2]
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (0, d1, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3x4xf32>) outs(%[[INIT]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[ABS:.*]] = math.absf %[[IN]] : f32
+// CHECK: %[[SCALAR:.*]] = arith.addf %[[ACC]], %[[ABS]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<1x3x1xf32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_norm2(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3x4xf32>
 nv_tensor_ir.graph @reduce_norm2(%a: tensor<2x3x4xf32>) -> tensor<1x3x1xf32> {
   %r = reduce(%a)<dimensions = [0, 2], reduction_mode = <norm2>> : tensor<2x3x4xf32> -> tensor<1x3x1xf32>
   results %r : tensor<1x3x1xf32>
 }
 // CHECK: %[[ID:.*]] = arith.constant 0.000000e+00 : f32
-// CHECK: linalg.fill ins(%[[ID]] : f32)
-// CHECK: linalg.reduce
-// CHECK: arith.mulf
-// CHECK: arith.addf
-// CHECK: linalg.broadcast
-// CHECK-SAME: dimensions = [0, 2]
-// CHECK: linalg.generic
-// CHECK: math.sqrt
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (0, d1, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3x4xf32>) outs(%[[INIT]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[SQUARE:.*]] = arith.mulf %[[IN]], %[[IN]] : f32
+// CHECK: %[[SCALAR:.*]] = arith.addf %[[ACC]], %[[SQUARE]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: %[[POST:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[R]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[REDUCED:[^:]+]]: f32, %{{[^:]+}}: f32):
+// CHECK: %[[FINAL:.*]] = math.sqrt %[[REDUCED]] : f32
+// CHECK: linalg.yield %[[FINAL]] : f32
+// CHECK: return %[[POST]] : tensor<1x3x1xf32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_mul_no_zeros(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3x4xf32>
 nv_tensor_ir.graph @reduce_mul_no_zeros(%a: tensor<2x3x4xf32>) -> tensor<1x3x1xf32> {
   %r = reduce(%a)<dimensions = [0, 2], reduction_mode = <mul_no_zeros>> : tensor<2x3x4xf32> -> tensor<1x3x1xf32>
   results %r : tensor<1x3x1xf32>
 }
 // CHECK: %[[ID:.*]] = arith.constant 1.000000e+00 : f32
-// CHECK: linalg.fill ins(%[[ID]] : f32)
-// CHECK: linalg.reduce
-// CHECK: arith.cmpf oeq
-// CHECK: arith.mulf
-// CHECK: arith.select
-// CHECK: linalg.broadcast
-// CHECK-SAME: dimensions = [0, 2]
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (0, d1, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3x4xf32>) outs(%[[INIT]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[ZERO:.*]] = arith.constant 0.000000e+00 : f32
+// CHECK: %[[IS_ZERO:.*]] = arith.cmpf oeq, %[[IN]], %[[ZERO]] : f32
+// CHECK: %[[PRODUCT:.*]] = arith.mulf %[[ACC]], %[[IN]] : f32
+// CHECK: %[[SCALAR:.*]] = arith.select %[[IS_ZERO]], %[[ACC]], %[[PRODUCT]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<1x3x1xf32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_all(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3xf32>
 nv_tensor_ir.graph @reduce_all(%a: tensor<2x3xf32>) -> tensor<1x1xf32> {
   %r = reduce(%a)<dimensions = [0, 1], reduction_mode = <add>> : tensor<2x3xf32> -> tensor<1x1xf32>
   results %r : tensor<1x1xf32>
 }
-// CHECK: tensor.empty() : tensor<f32>
-// CHECK: linalg.reduce
-// CHECK-SAME: dimensions = [0, 1]
-// CHECK: linalg.broadcast
-// CHECK-SAME: ins(%{{.*}} : tensor<f32>)
+// CHECK: %[[ID:.*]] = arith.constant 0.000000e+00 : f32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (0, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3xf32>) outs(%[[INIT]] : tensor<1x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[SCALAR:.*]] = arith.addf %[[ACC]], %[[IN]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<1x1xf32>
 
 // -----
 
@@ -173,30 +235,34 @@ nv_tensor_ir.graph @reduce_ud_noncommutative(%a: tensor<2x3xf32>, %b: tensor<2x3
   } : tensor<2x3xf32>, tensor<2x3xf32>, tensor<2x3xf32>, tensor<2x3xf32> -> tensor<2x1xf32>, tensor<2x1xf32>, tensor<2x1xf32>, tensor<2x1xf32>
   results %r#0, %r#1, %r#2, %r#3 : tensor<2x1xf32>, tensor<2x1xf32>, tensor<2x1xf32>, tensor<2x1xf32>
 }
-// CHECK: %[[R:.*]]:4 = linalg.reduce
-// CHECK-SAME: dimensions = [1]
-// CHECK: (%[[B00:.*]]: f32, %[[B01:.*]]: f32, %[[B10:.*]]: f32, %[[B11:.*]]: f32, %[[A00:.*]]: f32, %[[A01:.*]]: f32, %[[A10:.*]]: f32, %[[A11:.*]]: f32) {
+// CHECK: %[[R:.*]]:4 = linalg.generic
+// CHECK-SAME: iterator_types = ["parallel", "reduction"]
+// CHECK: (%[[B00:.*]]: f32, %[[B01:.*]]: f32, %[[B10:.*]]: f32, %[[B11:.*]]: f32, %[[A00:.*]]: f32, %[[A01:.*]]: f32, %[[A10:.*]]: f32, %[[A11:.*]]: f32):
 // CHECK: %[[P00:.*]] = arith.mulf %[[A00]], %[[B00]] : f32
 // CHECK: %[[Q00:.*]] = arith.mulf %[[A01]], %[[B10]] : f32
 // CHECK: %[[R00:.*]] = arith.addf %[[P00]], %[[Q00]] : f32
 // CHECK: %[[P01:.*]] = arith.mulf %[[A00]], %[[B01]] : f32
 // CHECK: linalg.yield %[[R00]],
-// CHECK: linalg.broadcast ins(%[[R]]#0
-// CHECK: linalg.broadcast ins(%[[R]]#1
-// CHECK: linalg.broadcast ins(%[[R]]#2
-// CHECK: linalg.broadcast ins(%[[R]]#3
+// CHECK: return %[[R]]#0, %[[R]]#1, %[[R]]#2, %[[R]]#3 : tensor<2x1xf32>, tensor<2x1xf32>, tensor<2x1xf32>, tensor<2x1xf32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_unsorted(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3x4xf32>
 nv_tensor_ir.graph @reduce_unsorted(%a: tensor<2x3x4xf32>) -> tensor<1x3x1xf32> {
   %r = reduce(%a)<dimensions = [2, 0], reduction_mode = <add>> : tensor<2x3x4xf32> -> tensor<1x3x1xf32>
   results %r : tensor<1x3x1xf32>
 }
-// CHECK: linalg.reduce
-// CHECK-SAME: dimensions = [0, 2]
-// CHECK: linalg.broadcast
-// CHECK-SAME: dimensions = [0, 2]
+// CHECK: %[[ID:.*]] = arith.constant 0.000000e+00 : f32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (0, d1, 0)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
+// CHECK-SAME: ins(%[[A]] : tensor<2x3x4xf32>) outs(%[[INIT]] : tensor<1x3x1xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[SCALAR:.*]] = arith.addf %[[ACC]], %[[IN]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<1x3x1xf32>
 
 // -----
 
@@ -209,8 +275,9 @@ nv_tensor_ir.graph @reduce_ud_unsorted(%a: tensor<2x3x4xf32>) -> tensor<3xf32> {
   } : tensor<2x3x4xf32> -> tensor<3xf32>
   results %r : tensor<3xf32>
 }
-// CHECK: linalg.reduce
-// CHECK-SAME: dimensions = [0, 2]
+// CHECK: linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (d1)>]
+// CHECK-SAME: iterator_types = ["reduction", "parallel", "reduction"]
 
 // -----
 
@@ -255,10 +322,12 @@ nv_tensor_ir.graph @reduce_ud_mixed_dropped(%a: tensor<?x8xf32>, %b: tensor<4x?x
   results %r#0, %r#1 : tensor<4xf32>, tensor<4xf32>
 }
 // CHECK: tensor.cast %{{.*}} : tensor<?x8xf32> to tensor<4x8xf32>
-// CHECK: linalg.reduce
+// CHECK: %[[R:.*]]:2 = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>]
+// CHECK-SAME: iterator_types = ["parallel", "reduction"]
 // CHECK-SAME: tensor<4x8xf32>, tensor<4x8xf32>
 // CHECK-NOT: linalg.broadcast
-// CHECK: return {{.*}} : tensor<4xf32>, tensor<4xf32>
+// CHECK: return %[[R]]#0, %[[R]]#1 : tensor<4xf32>, tensor<4xf32>
 
 // -----
 
@@ -273,10 +342,12 @@ nv_tensor_ir.graph @reduce_ud_mixed_retained(%a: tensor<4x?xf32>, %b: tensor<?x8
   results %r#0, %r#1 : tensor<4x1xf32>, tensor<4x1xf32>
 }
 // CHECK: tensor.cast %{{.*}} : tensor<4x?xf32> to tensor<4x8xf32>
-// CHECK: linalg.reduce
+// CHECK: %[[R:.*]]:2 = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, 0)>, affine_map<(d0, d1) -> (d0, 0)>]
+// CHECK-SAME: iterator_types = ["parallel", "reduction"]
 // CHECK-SAME: tensor<4x8xf32>, tensor<4x8xf32>
-// CHECK: linalg.broadcast
-// CHECK: return {{.*}} : tensor<4x1xf32>, tensor<4x1xf32>
+// CHECK-NOT: linalg.broadcast
+// CHECK: return %[[R]]#0, %[[R]]#1 : tensor<4x1xf32>, tensor<4x1xf32>
 
 // -----
 
@@ -291,7 +362,47 @@ nv_tensor_ir.graph @reduce_ud_mixed_dynamic(%a: tensor<?x?xf32>, %b: tensor<?x8x
   results %r#0, %r#1 : tensor<?xf32>, tensor<?xf32>
 }
 // CHECK: tensor.cast %{{.*}} : tensor<?x?xf32> to tensor<?x8xf32>
-// CHECK: linalg.reduce
+// CHECK: %[[R:.*]]:2 = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>]
+// CHECK-SAME: iterator_types = ["parallel", "reduction"]
 // CHECK-SAME: tensor<?x8xf32>, tensor<?x8xf32>
 // CHECK-NOT: linalg.broadcast
-// CHECK: return {{.*}} : tensor<?xf32>, tensor<?xf32>
+// CHECK: return %[[R]]#0, %[[R]]#1 : tensor<?xf32>, tensor<?xf32>
+
+// -----
+
+// CHECK-LABEL: func.func @reduce_middle_retained(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<4x8x16xf32>
+nv_tensor_ir.graph @reduce_middle_retained(%a: tensor<4x8x16xf32>) -> tensor<4x1x16xf32> {
+  %r = reduce(%a)<dimensions = [1], reduction_mode = <add>> : tensor<4x8x16xf32> -> tensor<4x1x16xf32>
+  results %r : tensor<4x1x16xf32>
+}
+// CHECK: %[[ID:.*]] = arith.constant 0.000000e+00 : f32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (d0, 0, d2)>]
+// CHECK-SAME: iterator_types = ["parallel", "reduction", "parallel"]
+// CHECK-SAME: ins(%[[A]] : tensor<4x8x16xf32>) outs(%[[INIT]] : tensor<4x1x16xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[SCALAR:.*]] = arith.addf %[[ACC]], %[[IN]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<4x1x16xf32>
+
+// -----
+
+// CHECK-LABEL: func.func @reduce_middle_dropped(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<4x8x16xf32>
+nv_tensor_ir.graph @reduce_middle_dropped(%a: tensor<4x8x16xf32>) -> tensor<4x16xf32> {
+  %r = reduce(%a)<dimensions = [1], reduction_mode = <add>> : tensor<4x8x16xf32> -> tensor<4x16xf32>
+  results %r : tensor<4x16xf32>
+}
+// CHECK: %[[ID:.*]] = arith.constant 0.000000e+00 : f32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : f32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d2)>]
+// CHECK-SAME: iterator_types = ["parallel", "reduction", "parallel"]
+// CHECK-SAME: ins(%[[A]] : tensor<4x8x16xf32>) outs(%[[INIT]] : tensor<4x16xf32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: f32, %[[ACC:[^:]+]]: f32):
+// CHECK: %[[SCALAR:.*]] = arith.addf %[[ACC]], %[[IN]] : f32
+// CHECK: linalg.yield %[[SCALAR]] : f32
+// CHECK: return %[[R]] : tensor<4x16xf32>

@@ -164,7 +164,8 @@ typedef enum MlirTensorIRArgumentKind {
   MlirTensorIRArgumentKindScalar = 3,
 } MlirTensorIRArgumentKind;
 
-/// Identifies the element type of a `MlirTensorIRScalarView`.
+/// Identifies the element type of a `MlirTensorIRScalarView`. Values are
+/// append-only to preserve C ABI compatibility.
 typedef enum MlirTensorIRElementType {
   MlirTensorIRElementTypeBool = 0,
   MlirTensorIRElementTypeF16 = 1,
@@ -181,6 +182,7 @@ typedef enum MlirTensorIRElementType {
   MlirTensorIRElementTypeUI64 = 12,
   MlirTensorIRElementTypeF8E4M3FN = 13,
   MlirTensorIRElementTypeF8E5M2 = 14,
+  MlirTensorIRElementTypeF8E8M0FNU = 15,
 } MlirTensorIRElementType;
 
 /// Parses an MLIR assembly element type spelling (e.g. "f32") into a
@@ -209,8 +211,9 @@ typedef struct MlirTensorIRTensorView {
   /// Number of tensor dimensions.
   int32_t rank;
 
-  /// Pointer to an array containing the extent of each dimension. May be NULL
-  /// when the compiled kernel does not require runtime shape metadata.
+  /// Pointer to an array containing the extent of each dimension. Required
+  /// when `rank` is nonzero, including for statically shaped tensors. May be
+  /// NULL when `rank` is zero.
   int64_t *shape;
 
   /// Pointer to an array containing the element stride of each dimension. May
@@ -308,6 +311,18 @@ MLIR_CAPI_EXPORTED MlirTensorIRArtifact mlirTensorIRArtifactCompile(
 /// Destroy the artifact handle and its storage. A null handle is ignored.
 MLIR_CAPI_EXPORTED void
 mlirTensorIRArtifactDestroy(MlirTensorIRArtifact artifact);
+
+/// Returns whether the validated invocation enables any effective remark kind.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRCompilerInvocationHasRemarks(
+    MlirTensorIRCompilerInvocation invocation, bool *enabled,
+    MlirStringCallback errorCallback, void *errorUserData);
+
+/// Sends LLVM remark YAML to callback, valid during the callback.
+/// Empty if disabled or no records were emitted.
+/// Copying and serialization preserve remarks; artifact equality includes them.
+MLIR_CAPI_EXPORTED MlirLogicalResult mlirTensorIRArtifactGetRemarks(
+    MlirTensorIRArtifact artifact, MlirStringCallback callback, void *userData,
+    MlirStringCallback errorCallback, void *errorUserData);
 
 /// Send the original device binary to callback (required). The binary string
 /// borrows storage valid only during the callback. Rejects a null artifact.

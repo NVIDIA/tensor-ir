@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-# RUN: %PYTHON -m pytest --capture=no -vv %s
+# RUN: %pytest %s
 # REQUIRES: cuda-gpu
 
 from __future__ import annotations
@@ -150,7 +150,9 @@ def extended_float_ops_kernel(a, b):
         + tir.ceil(a)
         + tir.floor(a)
         + tir.exp(a)
+        + tir.expm1(a)
         + tir.log(b)
+        + tir.log1p(b)
         + tir.sin(a)
         + tir.cos(a)
         + tir.tan(a)
@@ -366,8 +368,10 @@ def test_trace_frontend_op_mapping() -> None:
         ceil_value = tir.ceil(add_value)
         cos_value = tir.cos(add_value)
         exp_value = tir.exp(add_value)
+        expm1_value = tir.expm1(add_value)
         floor_value = tir.floor(add_value)
         log_value = tir.log(add_value)
+        log1p_value = tir.log1p(add_value)
         convert_value = tir.convert(add_value, dtype=tir.DataType.F16)
         reciprocal_value = tir.reciprocal(add_value)
         sqrt_value = tir.sqrt(abs_value)
@@ -419,8 +423,10 @@ def test_trace_frontend_op_mapping() -> None:
             matmul_value
             + cos_value
             + exp_value
+            + expm1_value
             + floor_value
             + log_value
+            + log1p_value
             + tir.convert(convert_value, dtype=tir.DataType.F32)
             + reciprocal_value
             + sin_value

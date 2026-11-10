@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// TensorIRArtifactCodec - serializes/deserializes a TensorIRArtifact to/from
-// a single self-describing FlatBuffer.
+/// TensorIRArtifactCodec - serializes/deserializes a TensorIRArtifact to/from
+/// a single self-describing FlatBuffer.
 
 #ifndef TENSOR_IR_ARTIFACT_TENSORIRARTIFACTCODEC_H
 #define TENSOR_IR_ARTIFACT_TENSORIRARTIFACTCODEC_H

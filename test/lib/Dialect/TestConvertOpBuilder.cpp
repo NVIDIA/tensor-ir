@@ -13,9 +13,9 @@ using namespace mlir::nv_tensor_ir;
 
 namespace {
 
-// Test pass that exercises the ConvertOp builder taking an element type.
-// The pass runs on a whole module, materialises the builder call once, and
-// leaves a module attribute behind so the FileCheck test can assert success.
+/// Test pass that exercises the ConvertOp builder taking an element type.
+/// The pass runs on a whole module, materialises the builder call once, and
+/// leaves a module attribute behind so the FileCheck test can assert success.
 struct TestConvertOpBuilderPass
     : public PassWrapper<TestConvertOpBuilderPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestConvertOpBuilderPass);

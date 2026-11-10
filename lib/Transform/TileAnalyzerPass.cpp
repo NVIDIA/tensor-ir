@@ -67,12 +67,12 @@ generateFallbackTile(ArrayRef<DimSize> iterShape,
 
 /// Information about the iteration space extracted from layout attributes.
 struct IterationSpaceInfo {
-  SmallVector<DimSize>
-      shape; ///< Common iteration space shape (shared by all sources)
-  SmallVector<SmallVector<DimSize>>
-      allStrides; ///< Per-source strides (one per input tensor)
-  SmallVector<DimSize>
-      allElementSizeBytes; ///< Per-source element sizes in bytes
+  /// Common iteration space shape (shared by all sources)
+  SmallVector<DimSize> shape;
+  /// Per-source strides (one per input tensor)
+  SmallVector<SmallVector<DimSize>> allStrides;
+  /// Per-source element sizes in bytes
+  SmallVector<DimSize> allElementSizeBytes;
 
   /// Dimensions with a fixed tile size (e.g. concat dim → 1).
   llvm::DenseMap<size_t, DimSize> fixedTileDims;

@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===----------------------------------------------------------------------===//
-// Builds a KernelMetadata from a TensorIR GraphOp and CUDA Tile ABI options.
-//===----------------------------------------------------------------------===//
+/// Builds a KernelMetadata from a TensorIR GraphOp and CUDA Tile ABI options.
 
 #include "tensor_ir/Compiler/CudaTile/KernelMetadataExtraction.h"
 

@@ -60,9 +60,7 @@
 namespace mlir::nv_tensor_ir {
 namespace tiling_analysis {
 
-/**
- * @brief Tiling configuration.
- */
+/// Tiling configuration.
 class TilingConfig {
 public:
   /// Returns the tiling config, if the tile sizes are valid.
@@ -88,9 +86,7 @@ private:
   friend class EvaluationLayoutIterator;
 };
 
-/**
- * @brief Tiling evaluation result.
- */
+/// Tiling evaluation result.
 struct TilingEvaluation {
   /// Number of execution blocks.
   int64_t blockCount = 1;
@@ -123,23 +119,14 @@ struct TilingEvaluation {
                                        const TilingEvaluation &eval);
 };
 
-/**
- * @brief Tiling evaluator implementation.
- */
+/// Tiling evaluator implementation.
 class TilingEvaluator {
 public:
-  /**
-   * @brief Construct a new TilingEvaluator object.
-   * @param graph The graph to evaluate.
-   * @param archInfo The architecture information.
-   */
+  /// Construct a new TilingEvaluator object.
   static FailureOr<TilingEvaluator> create(GraphOp graph,
                                            const ArchInfo &archInfo);
 
-  /**
-   * @brief Evaluate the tiling configuration for the current graph.
-   * @param config The tiling configuration.
-   */
+  /// Evaluate the tiling configuration for the current graph.
   FailureOr<TilingEvaluation> evaluate(const TilingConfig &config);
 
   /// Basic getters.
@@ -147,30 +134,31 @@ public:
   const ArchInfo &getArchInfo() const { return archInfo; }
   LayoutSourceAttrInterface getInputLayout() const { return inputLayout; }
   LayoutSourceAttrInterface getOutputLayout() const { return outputLayout; }
+  ArrayRef<int64_t> getFixedTileSizes() const { return fixedTileSizes; }
 
 private:
   TilingEvaluator(GraphOp graph, ArchInfo archInfo,
                   LayoutSourceAttrInterface inputLayout,
                   LayoutSourceAttrInterface outputLayout,
+                  SmallVector<int64_t> fixedTileSizes,
                   DenseMap<LayoutSourceAttrInterface, Operation *> pivots,
                   DenseMap<Operation *, SmallVector<int>> liveSizes)
       : graph(graph), archInfo(archInfo), inputLayout(inputLayout),
-        outputLayout(outputLayout), pivots(std::move(pivots)),
-        liveSizes(std::move(liveSizes)) {}
+        outputLayout(outputLayout), fixedTileSizes(std::move(fixedTileSizes)),
+        pivots(std::move(pivots)), liveSizes(std::move(liveSizes)) {}
 
   GraphOp graph;
   ArchInfo archInfo;
   LayoutSourceAttrInterface inputLayout;
   LayoutSourceAttrInterface outputLayout;
+  SmallVector<int64_t> fixedTileSizes;
   DenseMap<LayoutSourceAttrInterface, Operation *> pivots;
   DenseMap<Operation *, SmallVector<int>> liveSizes;
 
   friend class EvaluationLayoutIterator;
 };
 
-/**
- * @brief Layout tree iterator (base class).
- */
+/// Layout tree iterator (base class).
 class LayoutIterator {
 public:
   LogicalResult dispatch(LayoutSourceAttrInterface layout);

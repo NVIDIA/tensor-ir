@@ -18,6 +18,8 @@
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Conversion/PtrToLLVM/PtrToLLVM.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/IR/ValueBoundsOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/IR/ValueBoundsOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
@@ -73,6 +75,7 @@ using namespace mlir;
 void nv_tensor_ir::registerDialects(DialectRegistry &registry) {
   // clang-format off
   registry.insert<
+    affine::AffineDialect,
     arith::ArithDialect,
     bufferization::BufferizationDialect,
     func::FuncDialect,
@@ -123,6 +126,7 @@ void nv_tensor_ir::registerDialects(DialectRegistry &registry) {
   tensor::registerBufferizableOpInterfaceExternalModels(registry);
 
   // Register external operation interface models for the upstream dialects.
+  affine::registerValueBoundsOpInterfaceExternalModels(registry);
   arith::registerValueBoundsOpInterfaceExternalModels(registry);
   gpu::registerIndexedAccessOpInterfaceExternalModels(registry);
   gpu::registerValueBoundsOpInterfaceExternalModels(registry);
@@ -146,6 +150,6 @@ void nv_tensor_ir::registerPasses() {
   cuda_tile::registerCudaTilePasses();
 
   registerHostToLLVMPipeline();
-  registerTensorToLinalgConversionPass();
+  registerTensorToLinalgPasses();
   registerLinalgPipeline();
 }

@@ -1,28 +1,28 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Grid formation (FormGridPass) deliberately tiles only the parallel iteration
-// space, leaving reduction and matrix-product contracting dimensions coarse.
-// This pass makes those contracting domains explicit and executable on GPU
-// hardware.
-//
-// Contraction strip-mining:
-//    - Evaluates the reduction/contraction shape against `reduction_tile_size`
-//      (default 128 elements).
-//    - When the contracting domain exceeds the tile size, creates an scf.for
-//      nest whose induction variables step through contracting coordinates.
-//    - Initializes accumulators using neutral reduction identities and carries
-//      partial tile accumulators through scf.for `iter_args`.
-//    - Clones upstream producer DAGs (LoadOps, PointwiseOps, IotaOps, Constants)
-//      with smaller tile shapes, updating contracting coordinate indices to use
-//      the loop induction variables.
-//    - Handles out-of-bounds contraction elements using hardware-neutral load
-//      padding (Zero, NegInf, PosInf) when safe, or falls back to explicit
-//      tile masking (IotaOp + CmpOp + BinarySelectOp).
-//    - Applies reduction prologues (abs, square, zero-filtering) and epilogues
-//      (sqrt for norm2, division for avg).
-//    - Lifts user-defined reduction bodies (arithmetic on scalars) to elementwise
-//      operations on tiles.
+/// Grid formation (FormGridPass) deliberately tiles only the parallel iteration
+/// space, leaving reduction and matrix-product contracting dimensions coarse.
+/// This pass makes those contracting domains explicit and executable on GPU
+/// hardware.
+///
+/// Contraction strip-mining:
+///    - Evaluates the reduction/contraction shape against `reduction_tile_size`
+///      (default 128 elements).
+///    - When the contracting domain exceeds the tile size, creates an scf.for
+///      nest whose induction variables step through contracting coordinates.
+///    - Initializes accumulators using neutral reduction identities and carries
+///      partial tile accumulators through scf.for `iter_args`.
+///    - Clones upstream producer DAGs (LoadOps, PointwiseOps, IotaOps, Constants)
+///      with smaller tile shapes, updating contracting coordinate indices to use
+///      the loop induction variables.
+///    - Handles out-of-bounds contraction elements using hardware-neutral load
+///      padding (Zero, NegInf, PosInf) when safe, or falls back to explicit
+///      tile masking (IotaOp + CmpOp + BinarySelectOp).
+///    - Applies reduction prologues (abs, square, zero-filtering) and epilogues
+///      (sqrt for norm2, division for avg).
+///    - Lifts user-defined reduction bodies (arithmetic on scalars) to elementwise
+///      operations on tiles.
 
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Transform/Passes.h" // IWYU pragma: keep
@@ -321,7 +321,7 @@ static TilePaddingAttr getReductionLoadPadding(OpBuilder &builder,
 /// cannot be used, this creates a 1D coordinate tensor using IotaOp, offsets it
 /// by `coordinate * tile`, compares against `extent` with CmpOp(lt), and
 /// expands/broadcasts across the contracting tile shape. Combines with previous
-/// dimension masks via LogicalAndOp.
+/// dimension masks via AndOp.
 static Value updateContractionMask(OpBuilder &builder, Location loc,
                                    Value combined, int64_t extent, int64_t tile,
                                    size_t dimension,
@@ -369,7 +369,7 @@ static Value updateContractionMask(OpBuilder &builder, Location loc,
           mask);
     }
   }
-  return combined ? LogicalAndOp::create(builder, loc, combined, mask) : mask;
+  return combined ? AndOp::create(builder, loc, combined, mask) : mask;
 }
 
 /// Reshape a contraction mask to match the full rank of a source operand by
@@ -437,34 +437,33 @@ struct ReductionTilingPlan {
 };
 } // namespace
 
-/// Validate contracting dimensions and derive the reduction tiling plan.
-///
-/// Verifies that contracting dimensions are ordered and unique with positive
-/// static extents, then calls calculateReductionTileShape to determine the
-/// strip-mined contraction tile shape.
+/// Project reduction loop ranges to the first operand and choose tile extents.
 static FailureOr<ReductionTilingPlan>
-createReductionTilingPlan(Operation *op, RankedTensorType inputType,
-                          ArrayRef<int32_t> dimensions,
+createReductionTilingPlan(IterationDomainOpInterface op,
                           int64_t reductionTileSize) {
+  SmallVector<int64_t> dimensions = op.getReductionDims();
   if (dimensions.empty()) {
     return op->emitError("reduction has no contracting dimensions");
   }
 
+  auto inputType = cast<RankedTensorType>(op->getOperand(0).getType());
+  AffineMap inputMap = op.getMatchingIndexingMap(&op->getOpOperand(0));
+  SmallVector<int64_t> loopRanges = op.getStaticLoopRanges();
   ReductionTilingPlan plan;
   plan.operandTileShape.assign(inputType.getShape().begin(),
                                inputType.getShape().end());
-  for (auto [index, dimension] : llvm::enumerate(dimensions)) {
-    if (dimension < 0 || dimension >= inputType.getRank() ||
-        (index != 0 && dimensions[index - 1] >= dimension)) {
-      return op->emitError(
-          "strip mining requires ordered unique contracting dimensions");
+  for (int64_t loop : dimensions) {
+    std::optional<unsigned> dimension =
+        inputMap.getResultPosition(getAffineDimExpr(loop, op.getContext()));
+    if (!dimension) {
+      return op->emitError("first operand must cover every reduction loop");
     }
-    int64_t extent = inputType.getDimSize(dimension);
+    int64_t extent = loopRanges[loop];
     if (ShapedType::isDynamic(extent) || extent <= 0) {
       return op->emitError(
           "strip mining requires positive static contracting extents");
     }
-    plan.dimensions.push_back(dimension);
+    plan.dimensions.push_back(*dimension);
     plan.reductionShape.push_back(extent);
   }
   plan.contractionTileShape =
@@ -496,11 +495,10 @@ struct ContractionLoopNest {
 /// Loops iterate from 0 to ceil(extent / tile) with step 1. Initial carried
 /// values (accumulators) flow through iter_args. Optionally constructs the
 /// in-bounds contraction mask inside the loop nest.
-static ContractionLoopNest
-createContractionLoopNest(OpBuilder &builder, Location loc,
-                          ArrayRef<int64_t> reductionShape,
-                          ArrayRef<int64_t> contractionTileShape,
-                          ValueRange initialValues, bool buildMask) {
+static ContractionLoopNest createContractionLoopNest(
+    OpBuilder &builder, Location loc, ArrayRef<int64_t> reductionShape,
+    ArrayRef<int64_t> contractionTileShape, ValueRange initialValues,
+    bool buildMask, Value lowerBound = {}, Value upperBound = {}) {
   ContractionLoopNest result;
   result.coordinates.resize(reductionShape.size());
   result.carried.assign(initialValues.begin(), initialValues.end());
@@ -511,11 +509,15 @@ createContractionLoopNest(OpBuilder &builder, Location loc,
     int64_t extent = reductionShape[index];
     int64_t tile = contractionTileShape[index];
     Value coordinate;
-    if (extent > tile) {
-      Value upper = arith::ConstantIndexOp::create(
-          builder, loc, llvm::divideCeil(extent, tile));
+    if (extent > tile || lowerBound) {
+      Value upper = upperBound;
+      if (!upper) {
+        upper = arith::ConstantIndexOp::create(builder, loc,
+                                               llvm::divideCeil(extent, tile));
+      }
+      Value lower = lowerBound ? lowerBound : zero;
       auto loop =
-          scf::ForOp::create(builder, loc, zero, upper, one, result.carried);
+          scf::ForOp::create(builder, loc, lower, upper, one, result.carried);
       result.loops.push_back(loop);
       coordinate = loop.getInductionVar();
       result.coordinates[index] = coordinate;
@@ -840,7 +842,11 @@ private:
       return result;
     }
 
-    if (!op->hasTrait<OpTrait::Elementwise>() || op->getNumRegions() != 0) {
+    // FormGrid lowers floating-point iotas through a signless tensor cast
+    // and arith.uitofp. The latter is elementwise; allow the cast as well.
+    if ((!op->hasTrait<OpTrait::Elementwise>() &&
+         !isa<UnrealizedConversionCastOp>(op)) ||
+        op->getNumRegions() != 0) {
       return op->emitError(
           "strip mining cannot clone this contraction producer");
     }
@@ -914,8 +920,7 @@ static void eraseDeadProducerOps(RewriterBase &rewriter, ValueRange values) {
   }
 }
 
-/// Check whether an upstream operand DAG contains another contraction operation
-/// (ReduceOp, ReduceUDOp, or MatmulOp).
+/// Check whether an upstream operand DAG contains another reduction domain.
 ///
 /// When nested contractions exist, the inner contraction must be strip-mined
 /// first. Deferring the outer contraction avoids cloning its loop nest across
@@ -925,7 +930,8 @@ static bool hasNestedContraction(Value value, DenseSet<Operation *> &seen) {
   if (!op || !seen.insert(op).second) {
     return false;
   }
-  if (isa<ReduceOp, ReduceUDOp, MatmulOp>(op)) {
+  if (auto domain = dyn_cast<IterationDomainOpInterface>(op);
+      domain && domain.hasReductionLoops()) {
     return true;
   }
   return llvm::any_of(op->getOperands(), [&](Value operand) {
@@ -1098,11 +1104,8 @@ static LogicalResult stripMineReduction(RewriterBase &builder, ReduceOp reduce,
     return success();
   }
   // 1. Plan strip-mining and check whether contraction fits in a single tile.
-  auto inputType = cast<RankedTensorType>(reduce.getInput().getType());
-  SmallVector<int32_t> dimensions(reduce.getDimensions().begin(),
-                                  reduce.getDimensions().end());
-  FailureOr<ReductionTilingPlan> planOr = createReductionTilingPlan(
-      reduce, inputType, dimensions, reductionTileSize);
+  FailureOr<ReductionTilingPlan> planOr =
+      createReductionTilingPlan(reduce, reductionTileSize);
   if (failed(planOr)) {
     return failure();
   }
@@ -1131,6 +1134,7 @@ static LogicalResult stripMineReduction(RewriterBase &builder, ReduceOp reduce,
   builder.setInsertionPoint(reduce);
   Location loc = reduce.getLoc();
   ArrayRef<int64_t> tileShape = plan.operandTileShape;
+  auto inputType = cast<RankedTensorType>(reduce.getInput().getType());
   auto tileType = RankedTensorType::get(tileShape, inputType.getElementType());
   Attribute identity = getIdentity(builder, reduce.getReductionMode(),
                                    inputType.getElementType());
@@ -1237,11 +1241,8 @@ static LogicalResult stripMineReduction(RewriterBase &builder,
   if (reduce.getInputs().empty()) {
     return reduce.emitError("user-defined reduction has no inputs");
   }
-  auto inputType = cast<RankedTensorType>(reduce.getInputs().front().getType());
-  SmallVector<int32_t> dimensions(reduce.getDimensions().begin(),
-                                  reduce.getDimensions().end());
-  FailureOr<ReductionTilingPlan> planOr = createReductionTilingPlan(
-      reduce, inputType, dimensions, reductionTileSize);
+  FailureOr<ReductionTilingPlan> planOr =
+      createReductionTilingPlan(reduce, reductionTileSize);
   if (failed(planOr)) {
     return failure();
   }
@@ -1402,8 +1403,21 @@ static LogicalResult stripMineMatmul(RewriterBase &builder, MatmulOp matmul,
   // 2. Calculate contraction tile shape for dimension K.
   SmallVector<int64_t> contractionTileShape =
       calculateReductionTileShape(contractionShape, contractionTileSize);
+  auto lhsInfo = matmul.getA().getDefiningOp<TrmmTileInfoOp>();
+  auto rhsInfo = matmul.getB().getDefiningOp<TrmmTileInfoOp>();
+  Value lhsInput = lhsInfo ? lhsInfo.getInput() : matmul.getA();
+  Value rhsInput = rhsInfo ? rhsInfo.getInput() : matmul.getB();
   if (contractionTileShape == contractionShape) {
+    Value oldLhs = matmul.getA();
+    Value oldRhs = matmul.getB();
+    builder.modifyOpInPlace(matmul, [&] {
+      matmul.getAMutable().assign(lhsInput);
+      matmul.getBMutable().assign(rhsInput);
+      matmul->removeAttr("left_triangle");
+      matmul->removeAttr("right_triangle");
+    });
     removeMatmulFormationAttrs(builder, matmul);
+    eraseDeadProducerOps(builder, ValueRange{oldLhs, oldRhs});
     return success();
   }
 
@@ -1434,8 +1448,8 @@ static LogicalResult stripMineMatmul(RewriterBase &builder, MatmulOp matmul,
     }
     return operand;
   };
-  Value lhsSource = unwrapFormationReshape(matmul.getA());
-  Value rhsSource = unwrapFormationReshape(matmul.getB());
+  Value lhsSource = unwrapFormationReshape(lhsInput);
+  Value rhsSource = unwrapFormationReshape(rhsInput);
 
   // 4. Initialize result accumulator tensor with zeros.
   builder.setInsertionPoint(matmul);
@@ -1465,10 +1479,62 @@ static LogicalResult stripMineMatmul(RewriterBase &builder, MatmulOp matmul,
     }
   }
 
+  Value lowerBound;
+  Value upperBound;
+  bool hasLeftTriangle = matmul.getLeftTriangle().has_value();
+  bool hasRightTriangle = matmul.getRightTriangle().has_value();
+  if (hasLeftTriangle || hasRightTriangle) {
+    if (contractionShape.size() != 1 || (hasLeftTriangle && !lhsInfo) ||
+        (hasRightTriangle && !rhsInfo)) {
+      return matmul.emitError(
+          "triangular matmul requires global tile formation metadata "
+          "and an unfragmented K dimension");
+    }
+    Value tileK = arith::ConstantIndexOp::create(builder, loc,
+                                                 contractionTileShape.front());
+    Value countK = arith::ConstantIndexOp::create(
+        builder, loc,
+        llvm::divideCeil(contractionShape.front(),
+                         contractionTileShape.front()));
+    lowerBound = arith::ConstantIndexOp::create(builder, loc, 0);
+    upperBound = countK;
+    bool hasLowerBound = false;
+    auto restrictBounds = [&](TrmmTileInfoOp info, bool restrictLower) {
+      if (restrictLower) {
+        Value firstK =
+            arith::DivUIOp::create(builder, loc, info.getOffset(), tileK);
+        Value begin = arith::MinUIOp::create(builder, loc, firstK, countK);
+        if (hasLowerBound) {
+          lowerBound = arith::MaxUIOp::create(builder, loc, lowerBound, begin);
+        } else {
+          lowerBound = begin;
+          hasLowerBound = true;
+        }
+      } else {
+        Value span =
+            arith::ConstantIndexOp::create(builder, loc, info.getSpan());
+        Value end = arith::AddIOp::create(builder, loc, info.getOffset(), span);
+        Value endK = arith::CeilDivUIOp::create(builder, loc, end, tileK);
+        upperBound = arith::MinUIOp::create(builder, loc, endK, upperBound);
+      }
+    };
+    if (hasLeftTriangle) {
+      restrictBounds(lhsInfo, matmul.getLeftTriangle() == Triangle::Upper);
+    }
+    if (hasRightTriangle) {
+      restrictBounds(rhsInfo, matmul.getRightTriangle() == Triangle::Lower);
+    }
+    // Opposing triangular bounds can have an empty intersection. Emit a
+    // zero-trip loop with equal bounds, preserving its zero accumulator.
+    if (hasLeftTriangle && hasRightTriangle) {
+      lowerBound = arith::MinUIOp::create(builder, loc, lowerBound, upperBound);
+    }
+  }
+
   // 5. Build scf.for loop nest over contracting K dimensions.
   ContractionLoopNest loopNest = createContractionLoopNest(
       builder, loc, contractionShape, contractionTileShape, ValueRange{carried},
-      maskNeeded);
+      maskNeeded, lowerBound, upperBound);
   DenseMap<unsigned, Value> lhsCoordinates =
       mapContractionCoordinates(lhsContractingDims, loopNest.coordinates);
   DenseMap<unsigned, Value> rhsCoordinates =

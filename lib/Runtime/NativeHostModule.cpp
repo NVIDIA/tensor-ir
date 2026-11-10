@@ -14,8 +14,8 @@
 
 namespace tensor_ir::rt {
 
-// Shared by all modules, with no platform plugins or process-symbol search.
-// Our objects have no imports and never unwind across the host ABI.
+/// Shared by all modules, with no platform plugins or process-symbol search.
+/// Our objects have no imports and never unwind across the host ABI.
 class NativeHostLoader {
 public:
   NativeHostLoader() {

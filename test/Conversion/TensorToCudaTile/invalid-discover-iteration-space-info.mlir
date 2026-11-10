@@ -1,5 +1,5 @@
-// RUN: tensor_ir-opt -discover-iteration-space-info -verify-diagnostics %s
-// RUN: tensor_ir-opt --discover-iteration-space-info --convert-tensor-to-cuda-tile="codegen-strategy=affine_map" --verify-diagnostics %s
+// RUN: tensor_ir-opt -discover-iteration-space-info -split-input-file -verify-diagnostics %s
+// RUN: tensor_ir-opt --discover-iteration-space-info --convert-tensor-to-cuda-tile="codegen-strategy=affine_map" -split-input-file --verify-diagnostics %s
 
 // This file is to test that there are no crashes when the discover-iteration-space-info pass
 // encounters a pattern that it does not support.

@@ -23,9 +23,9 @@ inline constexpr const char *kResolvedTileSizeAttrName =
 
 namespace tensor_to_cuda_tile {
 
-// Default alignment in CUDA is 256B, but we cannot assume that the pointers
-// are aligned. The TensorIR must include the "alignment" attribute to enable
-// vectorized loads/stores in the CUDA Tile lowering.
+/// Default alignment in CUDA is 256B, but we cannot assume that the pointers
+/// are aligned. The TensorIR must include the "alignment" attribute to enable
+/// vectorized loads/stores in the CUDA Tile lowering.
 constexpr int64_t kDefaultPointerAlignment = 1;
 
 /// Conversion state interface that provides tile values and shapes in the

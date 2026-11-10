@@ -12,7 +12,8 @@ enum Persistence : uint8 {
   Static = 1,
 }
 
-// Mirrors tensor_ir::rt::ElementType.
+/// Mirrors tensor_ir::rt::ElementType. Append-only: ordinals are part of the
+/// artifact wire format.
 enum ElementType : uint8 {
   Bool = 0,
   F16,
@@ -29,15 +30,17 @@ enum ElementType : uint8 {
   UI16,
   UI32,
   UI64,
+  F4E2M1FN = 15,
+  F8E8M0FNU = 16,
 }
 
 table TensorArgDesc {
   element_type: ElementType;
-  // Per-dim size/stride; a runtime-determined dim is marked with
-  // TensorArgDesc::kDynamic (not necessarily "static"). shape's length is
-  // the rank; strides, when present, must have the same length.
+  /// Per-dim size/stride; a runtime-determined dim is marked with
+  /// TensorArgDesc::kDynamic (not necessarily "static"). shape's length is
+  /// the rank; strides, when present, must have the same length.
   shape: [int64];
-  // Absent (not just empty) means no explicit strides were provided.
+  /// Absent (not just empty) means no explicit strides were provided.
   strides: [int64];
 }
 
@@ -60,14 +63,15 @@ table KernelMetadata {
   persistence: Persistence;
   sm_count: int32;
   occupancy: int32;
-  static_grid: GridDimensions;  // absent -> runtime-computed grid
-  // True when the device code waits on the preceding grid (griddepcontrol), so
-  // launching it with programmatic stream serialization is safe.
+  /// absent -> runtime-computed grid
+  static_grid: GridDimensions;
+  /// True when the device code waits on the preceding grid (griddepcontrol), so
+  /// launching it with programmatic stream serialization is safe.
   uses_pdl: bool;
 }
 
 table Entrypoint {
-  // Symbol exported by host_module when native host code is present.
+  /// Symbol exported by host_module when native host code is present.
   name: string (required);
   num_inputs: int32;
   args: [ArgDesc];
@@ -83,16 +87,16 @@ table Cubin {
 
 table TileIRBytecode {
   bytes: [ubyte] (required);
-  // Absent means the version is unknown (e.g. a bytecode file loaded from
-  // disk outside the normal compile path). A reader can't safely assemble
-  // this into a cubin without knowing the version.
+  /// Absent means the version is unknown (e.g. a bytecode file loaded from
+  /// disk outside the normal compile path). A reader can't safely assemble
+  /// this into a cubin without knowing the version.
   version: BcVersion;
 }
 
 union DeviceModule { Cubin, TileIRBytecode }
 
-// Represents an encoding of host functions
-// (e.g. elf).
+/// Represents an encoding of host functions
+/// (e.g. elf).
 table HostModule {
   abi_version: uint32;
   bytes: [ubyte] (required);
@@ -100,32 +104,35 @@ table HostModule {
 }
 
 table TensorIRArtifact {
-  // Readers reject any version they don't exactly match; there is no
-  // cross-version compatibility. Field additions alone don't need a version
-  // bump, but any change to what an existing field means does.
+  /// Readers reject any version they don't exactly match; there is no
+  /// cross-version compatibility. Field additions alone don't need a version
+  /// bump, but any change to what an existing field means does.
   version: uint32;
   module_name: string (required);
   arch: SmTarget;
 
-  // The device image/module. All referenced device entrypoints (`kernels`)
-  // must be contained in this image.
+  /// The device image/module. All referenced device entrypoints (`kernels`)
+  /// must be contained in this image.
   device_module: DeviceModule (required);
 
-  // The list of device entrypoints. Each contains a function
-  // name and other information about the kernel.
-  // NOTE: The index within this list is the kernel ordinal.
+  /// The list of device entrypoints. Each contains a function
+  /// name and other information about the kernel.
+  /// NOTE: The index within this list is the kernel ordinal.
   kernels: [KernelMetadata] (required);
 
-  // Optional relocatable native host module.
+  /// Optional relocatable native host module.
   host_module: HostModule;
 
-  // The list of invocable functions in this module. Each
-  // corresponds to one 'nv_tensor_ir.graph' from the input
-  // program.
-  //
-  // Currently each entrypoint launches one kernel, but this
-  // will evolve in the future.
+  /// The list of invocable functions in this module. Each
+  /// corresponds to one 'nv_tensor_ir.graph' from the input
+  /// program.
+  ///
+  /// Currently each entrypoint launches one kernel, but this
+  /// will evolve in the future.
   entrypoints: [Entrypoint] (required);
+
+  /// LLVM optimization remark YAML. Empty when no records were captured.
+  remarks_yaml: string;
 }
 
 root_type TensorIRArtifact;

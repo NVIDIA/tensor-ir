@@ -1,21 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===- CudaTileInsertGdcWait.cpp - Conservative PDL wait insertion --------===//
-//
-// Makes a CUDA Tile kernel safe to launch with programmatic dependent launch
-// (PDL) without any user annotation. A single `gdc_wait_tko` is inserted
-// before the first global-memory access of the entry, and its token is
-// threaded into (or joined with the existing token of) every global-memory
-// operation the wait dominates. No `gdc_launch_dependents_tko` is emitted:
-// dependents are triggered implicitly when the grid exits.
-//
-// Entries that already contain an explicit `gdc_wait_tko`, or that perform no
-// global-memory access, are left unchanged. An explicit
-// `gdc_launch_dependents_tko` does not count: it releases dependent grids but
-// does not order this kernel's own memory accesses after the preceding grid.
-//
-//===----------------------------------------------------------------------===//
+/// Makes a CUDA Tile kernel safe to launch with programmatic dependent launch
+/// (PDL) without any user annotation. A single `gdc_wait_tko` is inserted
+/// before the first global-memory access of the entry, and its token is
+/// threaded into (or joined with the existing token of) every global-memory
+/// operation the wait dominates. No `gdc_launch_dependents_tko` is emitted:
+/// dependents are triggered implicitly when the grid exits.
+///
+/// Entries that already contain an explicit `gdc_wait_tko`, or that perform no
+/// global-memory access, are left unchanged. An explicit
+/// `gdc_launch_dependents_tko` does not count: it releases dependent grids but
+/// does not order this kernel's own memory accesses after the preceding grid.
 
 #include "tensor_ir/Transform/Passes.h"
 

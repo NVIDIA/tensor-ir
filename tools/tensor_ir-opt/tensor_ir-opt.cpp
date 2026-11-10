@@ -3,6 +3,7 @@
 
 #include "tensor_ir/Compiler/CudaTile/Pipelines.h"
 #include "tensor_ir/Options/Options.h"
+#include "tensor_ir/Options/OptionsDetail.h"
 #include "tensor_ir/Registration/Registration.h"
 #include "tensor_ir/Support/TIROverrideOptions.h"
 
@@ -20,62 +21,21 @@
 using namespace llvm;
 using namespace mlir;
 
-namespace {
+#include "tensor_ir/Options/PipelineOptions.h.inc"
 
-struct TestTensorToCudaTileOptions
-    : public PassPipelineOptions<TestTensorToCudaTileOptions> {
-  PassOptions::Option<std::string> bytecodeVersion{
-      *this, "bytecode-version", llvm::cl::desc("CUDA Tile bytecode target."),
-      llvm::cl::init("default")};
-  PassOptions::ListOption<int32_t> tileSize{
-      *this, "tile-size", llvm::cl::desc("A list of integers for tile size"),
-      llvm::cl::list_init<int32_t>({})};
-  PassOptions::Option<int64_t> reductionTileSize{
-      *this, "reduction-tile-size",
-      llvm::cl::desc(
-          "Tile size for contracting dimensions in layout propagation"),
-      llvm::cl::init(nv_tensor_ir::CudaTileOptions().reductionTileSize)};
-  PassOptions::Option<nv_tensor_ir::PersistenceMode> persistence{
-      *this, "persistence", llvm::cl::desc("Kernel persistence mode."),
-      llvm::cl::init(nv_tensor_ir::PersistenceMode::None),
-      llvm::cl::values(clEnumValN(nv_tensor_ir::PersistenceMode::None, "none",
-                                  "Normal kernel launch."),
-                       clEnumValN(nv_tensor_ir::PersistenceMode::Static,
-                                  "static", "Static persistent kernel."))};
-  PassOptions::Option<int32_t> smCount{
-      *this, "sm-count",
-      llvm::cl::desc("Runtime SM count for persistent kernels."),
-      llvm::cl::init(0)};
-  PassOptions::Option<int32_t> occupancy{
-      *this, "occupancy",
-      llvm::cl::desc("Target occupancy for persistent kernels."),
-      llvm::cl::init(1)};
-};
-
-nv_tensor_ir::CompilerInvocation
-getCudaTileConversionOptions(const TestTensorToCudaTileOptions &opts) {
-  nv_tensor_ir::CompilerInvocation options;
-  options.codegen.tileSize.assign(opts.tileSize.begin(), opts.tileSize.end());
-  options.cudaTile.bytecodeVersion = opts.bytecodeVersion;
-  options.cudaTile.reductionTileSize = opts.reductionTileSize;
-  options.cudaTile.persistenceMode = opts.persistence;
-  options.cudaTile.smCount = opts.smCount;
-  options.cudaTile.occupancy = opts.occupancy;
+static nv_tensor_ir::Status buildTensorToCudaTileConversionPassPipeline(
+    OpPassManager &pm,
+    const nv_tensor_ir::LayoutPropagationPipelineOptions &opts) {
+  TIR_ASSIGN_OR_RETURN(auto options, opts.getCompilerInvocation());
   options.cudaTile.codegenStrategy =
       nv_tensor_ir::CudaTileCodegenStrategy::LayoutPropagation;
-  return options;
-}
-
-nv_tensor_ir::Status buildTensorToCudaTileConversionPassPipeline(
-    OpPassManager &pm, const TestTensorToCudaTileOptions &opts) {
-  nv_tensor_ir::CompilerInvocation options = getCudaTileConversionOptions(opts);
   return nv_tensor_ir::buildTensorToCudaTileConversionPipeline(pm, options);
 }
 
 template <typename Options>
-void registerCheckedPipeline(StringRef name, StringRef description,
-                             nv_tensor_ir::Status (*builder)(OpPassManager &,
-                                                             const Options &)) {
+static void registerCheckedPipeline(
+    StringRef name, StringRef description,
+    nv_tensor_ir::Status (*builder)(OpPassManager &, const Options &)) {
   registerPassPipeline(
       name, description,
       [builder](OpPassManager &pm, StringRef text,
@@ -95,8 +55,6 @@ void registerCheckedPipeline(StringRef name, StringRef description,
       });
 }
 
-} // namespace
-
 namespace mlir::nv_tensor_ir::test {
 void registerTestLoweringPipelines() {
 
@@ -110,7 +68,7 @@ void registerTestLoweringPipelines() {
   // 4. TileReductionsPass: Materializes contraction/persistence loops
   // 5. OutlineKernelPass: Outlines the mapped forall body
   // 6. TensorToCudaTileConversion: Converts the explicit program to CudaTile
-  registerCheckedPipeline<TestTensorToCudaTileOptions>(
+  registerCheckedPipeline<LayoutPropagationPipelineOptions>(
       "layout-propagation-pipeline",
       "Pipeline to convert TensorIR to CudaTile using layout propagation",
       buildTensorToCudaTileConversionPassPipeline);

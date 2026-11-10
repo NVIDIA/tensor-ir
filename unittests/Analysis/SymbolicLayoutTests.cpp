@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===----------------------------------------------------------------------===//
-// Unit tests for the symbolic layout algebra underpinning graph normalization.
-// Verifies algebraic primitives directly in isolation from compiler passes.
-//===----------------------------------------------------------------------===//
+/// Unit tests for the symbolic layout algebra underpinning graph normalization.
+/// Verifies algebraic primitives directly in isolation from compiler passes.
 
 #include "tensor_ir/Analysis/SymbolicLayout.h"
 

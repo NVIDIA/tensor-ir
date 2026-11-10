@@ -12,6 +12,7 @@
 
 #include "NativeHostModule.h"
 #include "gtest/gtest.h"
+#include <limits>
 
 using namespace tensor_ir::rt;
 using namespace mlir::nv_tensor_ir;
@@ -247,4 +248,106 @@ TEST(NativeHostModuleTest, AcceptsEquivalentSingletonStrides) {
     strides[0] = -1;
     EXPECT_FALSE(packNativeHostArgs(*metadata, {&value, 1}).ok());
   }
+}
+
+TEST(NativeHostModuleTest, PacksDynamicTensorAndScalarInHostAbiOrder) {
+  constexpr int64_t dynamic = TensorArgDesc::kDynamic;
+  int64_t compiledStrides[] = {dynamic, 1};
+  KernelMetadataBuilder builder;
+  builder.args.push_back(
+      TensorArgDesc::create(ElementType::F32, {dynamic, 3}, compiledStrides)
+          .value());
+  builder.args.push_back(ScalarArgDesc::create(ElementType::SI32).value());
+  auto metadata = KernelMetadata::create(std::move(builder));
+  ASSERT_TRUE(metadata.ok());
+
+  float storage[10] = {};
+  int64_t shape[] = {2, 3}, strides[] = {7, 1};
+  int32_t scalar = 42;
+  Any args[] = {TensorView{storage, 2, shape, strides},
+                Any::makeScalarAny(ElementType::SI32, &scalar)};
+  auto packed = packNativeHostArgs(*metadata, {args, 2});
+  ASSERT_TRUE(packed.ok()) << packed.status().message();
+  // Host ABI includes static metadata too: pointer, all sizes, all strides,
+  // then the next graph argument. This is not the specialized device layout.
+  EXPECT_EQ(*packed, (llvm::SmallVector<int64_t>{
+                         reinterpret_cast<intptr_t>(storage), 2, 3, 7, 1, 42}));
+}
+
+TEST(NativeHostModuleTest, InfersContiguousStridesFromDynamicShape) {
+  KernelMetadataBuilder builder;
+  builder.args.push_back(
+      TensorArgDesc::create(ElementType::F32, {TensorArgDesc::kDynamic, 3})
+          .value());
+  auto metadata = KernelMetadata::create(std::move(builder));
+  ASSERT_TRUE(metadata.ok());
+  float storage[6] = {};
+  int64_t shape[] = {2, 3};
+  Any value(TensorView{storage, 2, shape, nullptr});
+  auto packed = packNativeHostArgs(*metadata, {&value, 1});
+  ASSERT_TRUE(packed.ok()) << packed.status().message();
+  // Contiguous rows contain three elements; adjacent columns are one apart.
+  EXPECT_EQ(*packed, (llvm::SmallVector<int64_t>{
+                         reinterpret_cast<intptr_t>(storage), 2, 3, 3, 1}));
+}
+
+TEST(NativeHostModuleTest, RankZeroTensorNeedsOnlyItsDataPointer) {
+  KernelMetadataBuilder builder;
+  builder.args.push_back(TensorArgDesc::create(ElementType::F32, {}).value());
+  auto metadata = KernelMetadata::create(std::move(builder));
+  ASSERT_TRUE(metadata.ok());
+  float storage = 1;
+  Any value(TensorView{&storage, 0, nullptr, nullptr});
+  auto packed = packNativeHostArgs(*metadata, {&value, 1});
+  ASSERT_TRUE(packed.ok()) << packed.status().message();
+  EXPECT_EQ(*packed,
+            (llvm::SmallVector<int64_t>{reinterpret_cast<intptr_t>(&storage)}));
+}
+
+TEST(NativeHostModuleTest, RejectsMissingShapeForNonzeroRank) {
+  KernelMetadataBuilder builder;
+  builder.args.push_back(TensorArgDesc::create(ElementType::F32, {2}).value());
+  auto metadata = KernelMetadata::create(std::move(builder));
+  ASSERT_TRUE(metadata.ok());
+  float storage[2] = {};
+  Any value(TensorView{storage, 1, nullptr, nullptr});
+  EXPECT_EQ(packNativeHostArgs(*metadata, {&value, 1}).status().code(),
+            StatusCode::kInvalidArgument);
+}
+
+TEST(NativeHostModuleTest, RejectsNegativeDynamicExtent) {
+  KernelMetadataBuilder builder;
+  builder.args.push_back(
+      TensorArgDesc::create(ElementType::F32, {TensorArgDesc::kDynamic})
+          .value());
+  auto metadata = KernelMetadata::create(std::move(builder));
+  ASSERT_TRUE(metadata.ok());
+  float storage = 0;
+  int64_t shape = -1;
+  Any value(TensorView{&storage, 1, &shape, nullptr});
+  EXPECT_EQ(packNativeHostArgs(*metadata, {&value, 1}).status().code(),
+            StatusCode::kInvalidArgument);
+}
+
+TEST(NativeHostModuleTest, RejectsOverflowWhileInferringContiguousStrides) {
+  constexpr int64_t dynamic = TensorArgDesc::kDynamic;
+  KernelMetadataBuilder builder;
+  builder.args.push_back(
+      TensorArgDesc::create(ElementType::F32, {1, dynamic, 2}).value());
+  auto metadata = KernelMetadata::create(std::move(builder));
+  ASSERT_TRUE(metadata.ok());
+  // No tensor memory is accessed while packing metadata. The outer stride is
+  // twice shape[1]: max - 1 fits, while twice (max / 2 + 1) does not.
+  float storage = 0;
+  constexpr int64_t max = std::numeric_limits<int64_t>::max();
+  int64_t shape[] = {1, max / 2, 2};
+  Any value(TensorView{&storage, 3, shape, nullptr});
+  auto packed = packNativeHostArgs(*metadata, {&value, 1});
+  ASSERT_TRUE(packed.ok()) << packed.status().message();
+  EXPECT_EQ(*packed,
+            (llvm::SmallVector<int64_t>{reinterpret_cast<intptr_t>(&storage), 1,
+                                        max / 2, 2, max - 1, 2, 1}));
+  ++shape[1];
+  EXPECT_EQ(packNativeHostArgs(*metadata, {&value, 1}).status().code(),
+            StatusCode::kInvalidArgument);
 }

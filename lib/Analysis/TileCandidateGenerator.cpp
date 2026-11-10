@@ -934,14 +934,19 @@ TileCandidateGenerator::generateCandidates(
           auto swapped = bestNearSquare->tileShape;
           int32_t hi = -1, lo = -1;
           size_t hiIdx = 0, loIdx = 0;
+          // Constrained axes are fixed by the caller; never swap them.
           for (size_t i = 0; i < swapped.size(); ++i) {
+            if (constraints.count(i)) {
+              continue;
+            }
             if (swapped[i] > hi) {
               hi = swapped[i];
               hiIdx = i;
             }
           }
           for (size_t i = 0; i < swapped.size(); ++i) {
-            if (i != hiIdx && (lo == -1 || swapped[i] < lo)) {
+            if (i != hiIdx && !constraints.count(i) &&
+                (lo == -1 || swapped[i] < lo)) {
               lo = swapped[i];
               loIdx = i;
             }
@@ -1667,6 +1672,10 @@ void TileCandidateGenerator::distributeBudget(
   }
 }
 
+/// Allow small tile sizes for the skinny matmul dimensions to reach the minimum
+/// size needed for effective tensor core usage.
+constexpr int64_t kAllowSmallTileSizeThreshold = 16;
+
 bool TileCandidateGenerator::isValidTile(llvm::ArrayRef<int32_t> tile,
                                          llvm::ArrayRef<DimSize> shape) const {
   if (tile.size() != shape.size()) {
@@ -1679,9 +1688,11 @@ bool TileCandidateGenerator::isValidTile(llvm::ArrayRef<int32_t> tile,
     if (!llvm::isPowerOf2_32(static_cast<uint32_t>(tile[i]))) {
       return false;
     }
+
     int64_t maxTile =
         shape[i] > 1 ? llvm::bit_ceil(static_cast<uint64_t>(shape[i])) : 1;
-    if (static_cast<int64_t>(tile[i]) > maxTile) {
+    if (static_cast<int64_t>(tile[i]) >
+        std::max(maxTile, kAllowSmallTileSizeThreshold)) {
       return false;
     }
   }

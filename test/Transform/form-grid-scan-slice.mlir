@@ -72,7 +72,7 @@ nv_tensor_ir.graph @streaming_metadata(
     attributes {tile_size = array<i32: 1, 8>} {
   %initial_carry = neg %initial : tensor<2x8xf32>
   %final, %history, %totals = scan_slice(%initial_carry, %values, %scales)
-      scan_dimensions = [0, 1] output_dimensions = [1, 0] {reverse = true}
+      <scan_dimensions = [0, 1], output_dimensions = [1, 0], reverse = true>
       : (tensor<2x8xf32>, tensor<5x2x8xf32>, tensor<2x5xf32>) {
     ^bb0(%carry: tensor<2x8xf32>, %value: tensor<2x8xf32>, %scale: tensor<2xf32>):
       %column = reshape %scale : tensor<2xf32> -> tensor<2x1xf32>
@@ -126,7 +126,7 @@ nv_tensor_ir.graph @composite_carry(%a: tensor<2x8xf32>,
     %b: tensor<2x8xf32>, %values: tensor<5x2x8xf32>) -> tensor<2x8xf32>
     attributes {tile_size = array<i32: 1, 8>} {
   %initial = add %a, %b : tensor<2x8xf32>
-  %final = scan_slice(%initial, %values) scan_dimensions = [0] output_dimensions = []
+  %final = scan_slice(%initial, %values) <scan_dimensions = [0], output_dimensions = []>
       : (tensor<2x8xf32>, tensor<5x2x8xf32>) {
     ^bb0(%carry: tensor<2x8xf32>, %value: tensor<2x8xf32>):
       %next = add %carry, %value : tensor<2x8xf32>
@@ -159,7 +159,7 @@ nv_tensor_ir.graph @composite_carry(%a: tensor<2x8xf32>,
 nv_tensor_ir.graph @unit_reshape_scan_slice(%initial: tensor<2x8xf32>, %values: tensor<5x2x8xf32>)
     -> (tensor<2x8xf32>, tensor<5x2x1xf32>)
     attributes {tile_size = array<i32: 1, 8>} {
-  %final, %history = scan_slice(%initial, %values) scan_dimensions = [0] output_dimensions = [0]
+  %final, %history = scan_slice(%initial, %values) <scan_dimensions = [0], output_dimensions = [0]>
       : (tensor<2x8xf32>, tensor<5x2x8xf32>) {
     ^bb0(%carry: tensor<2x8xf32>, %value: tensor<2x8xf32>):
       %expanded_carry = reshape %carry : tensor<2x8xf32> -> tensor<2x1x8xf32>
@@ -197,7 +197,7 @@ nv_tensor_ir.graph @unit_reshape_scan_slice(%initial: tensor<2x8xf32>, %values: 
 //       CHECK: nv_tensor_ir.store %[[LOOP]],
 nv_tensor_ir.graph @native_slice_rank(%initial: tensor<2x8xf32>, %values: tensor<5x2x1x8xf32>)
     -> tensor<2x8xf32> attributes {tile_size = array<i32: 1, 8>} {
-  %final = scan_slice(%initial, %values) scan_dimensions = [0] output_dimensions = []
+  %final = scan_slice(%initial, %values) <scan_dimensions = [0], output_dimensions = []>
       : (tensor<2x8xf32>, tensor<5x2x1x8xf32>) {
     ^bb0(%carry: tensor<2x8xf32>, %value: tensor<2x1x8xf32>):
       %flat = reshape %value : tensor<2x1x8xf32> -> tensor<2x8xf32>
@@ -230,7 +230,7 @@ nv_tensor_ir.graph @native_slice_rank(%initial: tensor<2x8xf32>, %values: tensor
 //       CHECK: nv_tensor_ir.store %[[LOOP]],
 nv_tensor_ir.graph @native_slice_last_axis(%initial: tensor<2x8xf32>, %values: tensor<2x1x8x5xf32>)
     -> tensor<2x8xf32> attributes {tile_size = array<i32: 1, 8>} {
-  %final = scan_slice(%initial, %values) scan_dimensions = [3] output_dimensions = []
+  %final = scan_slice(%initial, %values) <scan_dimensions = [3], output_dimensions = []>
       : (tensor<2x8xf32>, tensor<2x1x8x5xf32>) {
     ^bb0(%carry: tensor<2x8xf32>, %value: tensor<2x1x8xf32>):
       %flat = reshape %value : tensor<2x1x8xf32> -> tensor<2x8xf32>

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// TableGen schema for component options and their generated API adapters.
+/// TableGen schema for component options and their generated API adapters.
 
 include "mlir/IR/Constraints.td"
 include "mlir/IR/EnumAttr.td"
@@ -184,7 +184,7 @@ class ShapeOption<string cppName, string flag, string helpStr,
 class ComponentOptions<string name> {
   string componentName = name;
   string clCategory = "";
-  // Empty for tool-local components omitted from CompilerInvocation.
+  /// Empty for tool-local components omitted from CompilerInvocation.
   string invocationMember = "";
   list<Option> options = [];
   /// Optional qualified cross-field validator returning an error string.
@@ -194,6 +194,20 @@ class ComponentOptions<string name> {
 /// Components stored in CompilerInvocation, each exactly once, in stable order.
 class CompilerInvocationOptions<list<ComponentOptions> comps> {
   list<ComponentOptions> components = comps;
+}
+
+/// Selects a component option for a pipeline, with an optional default override.
+class PipelineOption<ComponentOptions owner, string name, string default = ""> {
+  string invocationMember = owner.invocationMember;
+  list<Option> matches = !filter(opt, owner.options, !eq(opt.varName, name));
+  assert !eq(!size(matches), 1), "unknown option field '" # name # "' in component '" # owner.componentName # "'";
+  assert !ne(invocationMember, ""), "pipeline component '" # owner.componentName # "' must have an invocationMember";
+  string defaultValue = default;
+}
+
+/// Generates a PassPipelineOptions struct and its CompilerInvocation adapter.
+class PipelineOptions<list<PipelineOption> opts> {
+  list<PipelineOption> options = opts;
 }
 
 #endif // TENSORIR_OPTIONS_OPTIONS_BASE

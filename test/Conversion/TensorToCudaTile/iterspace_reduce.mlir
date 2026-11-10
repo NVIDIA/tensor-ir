@@ -3,7 +3,7 @@
 // ============================================================================
 // TEST 1: Reduce with single small dimension (no blocks)
 // ============================================================================
-// CHECK-LABEL: @test_reduce_1dim_small
+// CHECK-LABEL: entry @test_reduce_1dim_small(
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[VAL:.*]]: tile<f32>, %[[ACC:.*]]: tile<f32>)
@@ -25,7 +25,7 @@ nv_tensor_ir.graph @test_reduce_1dim_small(
 // ============================================================================
 // TEST 2: Reduce with single large dimension
 // ============================================================================
-// CHECK-LABEL: @test_reduce_1dim_large
+// CHECK-LABEL: entry @test_reduce_1dim_large(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C128:.*]] = constant <i32: 128>
@@ -56,7 +56,7 @@ nv_tensor_ir.graph @test_reduce_1dim_large(
 // ============================================================================
 // TEST 3: Reduce with two small dimensions
 // ============================================================================
-// CHECK-LABEL: @test_reduce_2dim_small
+// CHECK-LABEL: entry @test_reduce_2dim_small(
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x8x8xf32>
 // CHECK: %[[MERGED:.*]] = reshape %[[INPUT]] : tile<32x8x8xf32> -> tile<32x64xf32>
 // CHECK: %[[RESULT:.*]] = reduce %[[MERGED]] dim=1 identities=[0.000000e+00 : f32]
@@ -79,7 +79,7 @@ nv_tensor_ir.graph @test_reduce_2dim_small(
 // ============================================================================
 // TEST 4: Reduce with two mixed dimensions (small and large)
 // ============================================================================
-// CHECK-LABEL: @test_reduce_2dim_mixed
+// CHECK-LABEL: entry @test_reduce_2dim_mixed(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C512:.*]] = constant <i32: 512>
@@ -111,7 +111,7 @@ nv_tensor_ir.graph @test_reduce_2dim_mixed(
 // ============================================================================
 // TEST 5: Reduce with two large dimensions
 // ============================================================================
-// CHECK-LABEL: @test_reduce_2dim_large
+// CHECK-LABEL: entry @test_reduce_2dim_large(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C16:.*]] = constant <i32: 16>
@@ -147,7 +147,7 @@ nv_tensor_ir.graph @test_reduce_2dim_large(
 // ============================================================================
 // TEST 6: Nested reduce with small dimensions
 // ============================================================================
-// CHECK-LABEL: @test_reduce_nested_small
+// CHECK-LABEL: entry @test_reduce_nested_small(
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16x16xf32>
 // CHECK: %[[REDUCE1:.*]] = reduce %[[INPUT]] dim=2 identities=[0.000000e+00 : f32] : tile<32x16x16xf32> -> tile<32x16xf32>
 // CHECK:   (%[[VAL1:.*]]: tile<f32>, %[[ACC1:.*]]: tile<f32>)
@@ -175,7 +175,7 @@ nv_tensor_ir.graph @test_reduce_nested_small(
 // ============================================================================
 // TEST 7: Nested reduce with large dimensions
 // ============================================================================
-// CHECK-LABEL: @test_reduce_nested_large
+// CHECK-LABEL: entry @test_reduce_nested_large(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
@@ -212,7 +212,7 @@ nv_tensor_ir.graph @test_reduce_nested_large(
 // ============================================================================
 // TEST 8: Softmax reduction [exp(X) / sum(exp(X))]
 // ============================================================================
-// CHECK-LABEL: @test_reduce_softmax
+// CHECK-LABEL: entry @test_reduce_softmax(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0.000000e+00 : f32]
 // CHECK: %[[RESHAPE:.*]] = reshape %[[REDUCE]] : tile<32xf32> -> tile<32x1xf32>
 // CHECK: %[[BCAST:.*]] = broadcast %[[RESHAPE]] : tile<32x1xf32> -> tile<32x128xf32>
@@ -236,7 +236,7 @@ nv_tensor_ir.graph @test_reduce_softmax(
 // ============================================================================
 // TEST 9: Full reduction (edge case)
 // ============================================================================
-// CHECK-LABEL: @test_reduce_full
+// CHECK-LABEL: entry @test_reduce_full(
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<1x128xf32>
 // CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1 identities=[0.000000e+00 : f32] : tile<1x128xf32> -> tile<1xf32>
 // CHECK: store_view_tko weak %[[RESULT]]
@@ -258,7 +258,7 @@ nv_tensor_ir.graph @test_reduce_full(
 // operand-to-iteration-space relation maps the sole reduce operand to space 0, so
 // its tile is loaded from the reduction's iteration space and feeds the reduce.
 // ============================================================================
-// CHECK-LABEL: @reduce_add
+// CHECK-LABEL: entry @reduce_add(
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[VAL:.*]]: tile<f32>, %[[ACC:.*]]: tile<f32>)

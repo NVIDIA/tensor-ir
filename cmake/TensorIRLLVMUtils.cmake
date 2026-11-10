@@ -1,4 +1,4 @@
-# Fetch and configure the LLVM project revision required by CUDA Tile.
+# Fetch and configure the LLVM project revision pinned by TensorIR.
 #
 # TensorIR records a compatible CUDA Tile and LLVM pair. This module configures
 # the LLVM revision as an excluded FetchContent dependency and exposes MLIR's

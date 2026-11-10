@@ -10,8 +10,8 @@
 //       NORM: iteration_space: #nv_tensor_ir.matmul_source<"(2,3,2,2,4):(48,16,8,4,1)"
 // GRID-LABEL: func.func @batch_factor_order_dispatch
 //       GRID: scf.forall (%[[CTA:.*]]) in (6)
-//       GRID: %[[B0:.*]] = arith.remui %[[CTA]],
-//       GRID: %[[B1:.*]] = arith.divui %[[CTA]],
+//       GRID: %[[B1:.*]] = arith.remui %[[CTA]],
+//       GRID: %[[B0:.*]] = arith.divui %[[CTA]],
 //       GRID: %[[LHS:.*]] = nv_tensor_ir.load {{.*}} tile_indices [%[[B0]], %[[B1]], 0, 0]
 //  GRID-SAME: memref<2x3x2x4x{{.*}}, strided<[96, 16, 4, 1]
 //       GRID: %[[RHS:.*]] = nv_tensor_ir.load {{.*}} tile_indices [%[[B0]], %[[B1]], 0, 0]
@@ -68,8 +68,8 @@ nv_tensor_ir.graph @permuted_batch_reduction(
 //       NORM: iteration_space: #nv_tensor_ir.matmul_source<"(3,2,2,2,4):(16,48,8,4,1)"
 // GRID-LABEL: func.func @packed_batch_matmul_dispatch
 //       GRID: scf.forall (%[[CTA:.*]]) in (6)
-//       GRID: %[[PACKED:.*]] = arith.remui %[[CTA]],
-//       GRID: %[[BATCH:.*]] = arith.divui %[[CTA]],
+//       GRID: %[[BATCH:.*]] = arith.remui %[[CTA]],
+//       GRID: %[[PACKED:.*]] = arith.divui %[[CTA]],
 //       GRID: %[[PRODUCT:.*]] = nv_tensor_ir.matmul(
 //       GRID: %[[SHAPED:.*]] = nv_tensor_ir.reshape %[[PRODUCT]]
 //       GRID: %[[OUT:.*]] = nv_tensor_ir.transpose %[[SHAPED]] permutation = [1, 0, 2, 3]

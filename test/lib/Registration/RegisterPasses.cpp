@@ -9,6 +9,7 @@ void registerTestConvertOpBuilderPass();
 void registerTestSideEffectsPass();
 void registerTestControlFlowInterfacePass();
 void registerTestLayoutPropagationPasses();
+void registerTestShapeOraclePass();
 void registerTestTileAnalyzerPass();
 void registerTestTilingEnumeratorPass();
 void registerTestTilingEvaluatorPass();
@@ -22,6 +23,7 @@ void registerAllPasses() {
   ::mlir::test::registerTestSideEffectsPass();
   ::mlir::test::registerTestControlFlowInterfacePass();
   ::mlir::test::registerTestLayoutPropagationPasses();
+  ::mlir::test::registerTestShapeOraclePass();
   ::mlir::test::registerTestTileAnalyzerPass();
   ::mlir::test::registerTestTilingEnumeratorPass();
   ::mlir::test::registerTestTilingEvaluatorPass();

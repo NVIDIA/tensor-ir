@@ -230,3 +230,18 @@ nv_tensor_ir.graph @high_rank_matmul(
 
 // REMOVE-LABEL: nv_tensor_ir.graph @high_rank_matmul
 // REMOVE-NOT: nv_tensor_ir.iter_space_map
+
+// -----
+
+// DISCOVER-LABEL: nv_tensor_ir.graph @matmul_projected_output
+// DISCOVER-SAME: nv_tensor_ir.iter_space_map = affine_map<(d0, d1, d2) -> (d0, d2)>
+// DISCOVER-SAME: nv_tensor_ir.iter_space_map = affine_map<(d0, d1, d2) -> (d2, d1)>
+nv_tensor_ir.graph @matmul_projected_output(%a: tensor<10x15xf32>, %b: tensor<15x20xf32>) -> tensor<10x20xf32> {
+  // DISCOVER: matmul
+  // DISCOVER-SAME: nv_tensor_ir.iter_space_map = affine_map<(d0, d1, d2) -> (d0, d2)>
+  %r = matmul(%a, %b) {nv_tensor_ir.iter_space_map = affine_map<(d0, d1, d2) -> (d0, d2)>} : (tensor<10x15xf32>, tensor<15x20xf32>) -> tensor<10x20xf32>
+  results %r : tensor<10x20xf32>
+}
+
+// REMOVE-LABEL: nv_tensor_ir.graph @matmul_projected_output
+// REMOVE-NOT: nv_tensor_ir.iter_space_map

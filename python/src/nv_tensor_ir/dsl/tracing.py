@@ -8,8 +8,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
+import sys
 
 from .dtypes import DataType, is_float_dtype, is_integer_dtype, normalize_dtype
+from .tensor_spec import _contiguous_stride
 
 
 class NodeKind(Enum):
@@ -19,6 +21,7 @@ class NodeKind(Enum):
     SPLAT = auto()
     UNARY = auto()
     BINARY = auto()
+    TERNARY = auto()
     CONVERT = auto()
     CMP = auto()
     MOVEMENT = auto()
@@ -39,18 +42,25 @@ class UnaryOp(TraceOpEnum):
     ABS = "abs"
     CEIL = "ceil"
     COS = "cos"
+    COSH = "cosh"
     ELU_FWD = "elu_fwd"
     EXP = "exp"
+    EXP2 = "exp2"
+    EXPM1 = "expm1"
     FLOOR = "floor"
     GELU_APPROX_TANH_FWD = "gelu_approx_tanh_fwd"
     LOG = "log"
+    LOG2 = "log2"
+    LOG1P = "log1p"
     LOGICAL_NOT = "not"
     NEG = "neg"
+    NEG_I = "negi"
     RECIPROCAL = "reciprocal"
     RELU_FWD = "relu_fwd"
     RSQRT = "rsqrt"
     SIGMOID_FWD = "sigmoid_fwd"
     SIN = "sin"
+    SINH = "sinh"
     SOFTPLUS_FWD = "softplus_fwd"
     SQRT = "sqrt"
     SWISH_FWD = "swish_fwd"
@@ -62,16 +72,24 @@ class BinaryOp(TraceOpEnum):
     ADD = "add"
     ADD_SQUARE = "add_square"
     ATAN2 = "atan2"
+    XOR = "xor"
     DIV = "div"
-    LOGICAL_AND = "and"
-    LOGICAL_OR = "or"
+    AND = "and"
+    OR = "or"
     MAX = "max"
     MIN = "min"
     MOD = "mod"
     MUL = "mul"
+    MUL_HIGH = "mul_high"
     POW = "pow"
     REM = "rem"
+    SHIFT_LEFT = "shift_left"
+    SHIFT_RIGHT = "shift_right"
     SUB = "sub"
+
+
+class TernaryOp(TraceOpEnum):
+    FMA = "fma"
 
 
 class MovementOp(TraceOpEnum):
@@ -124,6 +142,12 @@ class ScalarInfo:
         object.__setattr__(self, "dtype", normalize_dtype(self.dtype))
 
 
+@dataclass(frozen=True)
+class Location:
+    filename: str
+    lineno: int
+
+
 @dataclass
 class TraceNode:
     kind: NodeKind
@@ -131,6 +155,7 @@ class TraceNode:
     value_info: TensorInfo | ScalarInfo
     args: tuple[int, ...] = ()
     kwargs: dict[str, object] = field(default_factory=dict)
+    loc: Location | None = None
 
     @property
     def op_name(self) -> str:
@@ -138,11 +163,14 @@ class TraceNode:
 
 
 class TraceGraph:
-    def __init__(self):
+    def __init__(self, src_file=None, begin_loc=None, end_loc=None):
         self.nodes: list[TraceNode] = []
         self.input_ids: list[int] = []
         self.output_ref_ids: list[int] = []
         self.result_ids: list[int] = []
+        self.src_file: str | None = src_file
+        self.begin_loc: Location | None = begin_loc
+        self.end_loc: Location | None = end_loc
 
     def add_input(self, value_info: TensorInfo) -> TracedTensor:
         node_id = len(self.nodes)
@@ -163,6 +191,20 @@ class TraceGraph:
         self.output_ref_ids.append(node_id)
         return TracedTensor(self, node_id)
 
+    def _get_location(self):
+        if self.src_file is None:
+            return None
+        depth = 1
+        frame = sys._getframe(depth)
+        found = False
+        while frame is not None:
+            curr_filename = frame.f_code.co_filename
+            if curr_filename == self.src_file:
+                found = True
+                break
+            frame = frame.f_back
+        return Location(frame.f_code.co_filename, frame.f_lineno) if found else None
+
     def add_node(
         self,
         kind: NodeKind,
@@ -174,6 +216,7 @@ class TraceGraph:
         node_id = len(self.nodes)
         op_name = trace_op_name(op)
         value_info = replace(value_info, name=f"{op_name}_{node_id}")
+        loc = self._get_location()
         self.nodes.append(
             TraceNode(
                 kind,
@@ -181,6 +224,7 @@ class TraceGraph:
                 value_info=value_info,
                 args=args,
                 kwargs=kwargs or {},
+                loc=loc,
             )
         )
         return TracedTensor(self, node_id)
@@ -284,31 +328,73 @@ class TracedTensor:
     def tensor_info(self) -> TensorInfo:
         return self._graph.nodes[self._id].value_info
 
-    def __add__(self, other: TracedTensor) -> TracedTensor:
+    def __add__(self, other: TracedTensor | TracedScalar) -> TracedTensor:
         return _binary(self, other, BinaryOp.ADD)
 
-    def __sub__(self, other: TracedTensor) -> TracedTensor:
+    def __radd__(self, other: TracedTensor | TracedScalar) -> TracedTensor:
+        return _binary(other, self, BinaryOp.ADD)
+
+    def __sub__(self, other: TracedTensor | TracedScalar) -> TracedTensor:
         return _binary(self, other, BinaryOp.SUB)
 
-    def __mul__(self, other: TracedTensor) -> TracedTensor:
+    def __rsub__(self, other: TracedTensor | TracedScalar) -> TracedTensor:
+        return _binary(other, self, BinaryOp.SUB)
+
+    def __mul__(self, other: TracedTensor | TracedScalar) -> TracedTensor:
         return _binary(self, other, BinaryOp.MUL)
 
-    def __truediv__(self, other: TracedTensor) -> TracedTensor:
+    def __rmul__(self, other: TracedTensor | TracedScalar) -> TracedTensor:
+        return _binary(other, self, BinaryOp.MUL)
+
+    def __truediv__(self, other: TracedTensor | TracedScalar) -> TracedTensor:
         return _binary(self, other, BinaryOp.DIV)
 
-    def __mod__(self, other: TracedTensor) -> TracedTensor:
+    def __rtruediv__(self, other: TracedTensor | TracedScalar) -> TracedTensor:
+        return _binary(other, self, BinaryOp.DIV)
+
+    def __mod__(self, other: TracedTensor | TracedScalar) -> TracedTensor:
         return _binary(self, other, BinaryOp.MOD)
 
+    def __rmod__(self, other: TracedTensor | TracedScalar) -> TracedTensor:
+        return _binary(other, self, BinaryOp.MOD)
+
+    def __and__(self, other: TracedTensor) -> TracedTensor:
+        return _binary(self, other, BinaryOp.AND)
+
+    def __or__(self, other: TracedTensor) -> TracedTensor:
+        return _binary(self, other, BinaryOp.OR)
+
+    def __xor__(self, other: TracedTensor) -> TracedTensor:
+        return _binary(self, other, BinaryOp.XOR)
+
+    def __lshift__(self, other: TracedTensor) -> TracedTensor:
+        return _binary(self, other, BinaryOp.SHIFT_LEFT)
+
+    def __rshift__(self, other: TracedTensor) -> TracedTensor:
+        return _binary(self, other, BinaryOp.SHIFT_RIGHT)
+
     def __pow__(
-        self, other: TracedTensor, modulo: object | None = None
+        self, other: TracedTensor | TracedScalar, modulo: object | None = None
     ) -> TracedTensor:
         if modulo is not None:
             raise TypeError("TensorIR DSL pow does not support a modulo argument")
         return _binary(self, other, BinaryOp.POW)
 
+    def __rpow__(
+        self, other: TracedTensor | TracedScalar, modulo: object | None = None
+    ) -> TracedTensor:
+        if modulo is not None:
+            raise TypeError("TensorIR DSL pow does not support a modulo argument")
+        return _binary(other, self, BinaryOp.POW)
+
     def __neg__(self) -> TracedTensor:
+        is_integer = is_integer_dtype(self.tensor_info.dtype)
         return self._graph.add_node(
-            NodeKind.UNARY, UnaryOp.NEG, (self._id,), self.tensor_info
+            NodeKind.UNARY,
+            UnaryOp.NEG_I if is_integer else UnaryOp.NEG,
+            (self._id,),
+            self.tensor_info,
+            kwargs={"overflow": "none"} if is_integer else {},
         )
 
     def __gt__(self, other: TracedTensor) -> TracedTensor:
@@ -409,25 +495,35 @@ def _astype(x: TracedTensor, dtype: DataType) -> TracedTensor:
     )
 
 
-def _promote_and_broadcast_to(rhs: TracedScalar, lhs: TracedTensor) -> TracedTensor:
-    """Broadcast a runtime scalar into a tensor matching ``lhs``'s shape,
-    converting the scalar's own dtype to ``lhs``'s when they differ."""
-    _check_same_graph(lhs, rhs, "splat")
-    info = lhs.tensor_info
-    return _astype(_splat_to(rhs, info.shape, info.stride), info.dtype)
+def _promote_and_broadcast_to(
+    scalar: TracedScalar, tensor: TracedTensor
+) -> TracedTensor:
+    """Broadcast a runtime scalar into a tensor matching ``tensor``'s shape,
+    converting the scalar's own dtype to ``tensor``'s when they differ."""
+    _check_same_graph(tensor, scalar, "splat")
+    info = tensor.tensor_info
+    return _astype(_splat_to(scalar, info.shape, info.stride), info.dtype)
 
 
 def _binary(
-    lhs: TracedTensor, rhs: TracedTensor | TracedScalar, op: BinaryOp
+    lhs: TracedTensor | TracedScalar, rhs: TracedTensor | TracedScalar, op: BinaryOp
 ) -> TracedTensor:
+    if isinstance(lhs, TracedScalar):
+        lhs = _promote_and_broadcast_to(scalar=lhs, tensor=rhs)
     if isinstance(rhs, TracedScalar):
-        rhs = _promote_and_broadcast_to(rhs, lhs)
-    if not isinstance(rhs, TracedTensor):
+        rhs = _promote_and_broadcast_to(scalar=rhs, tensor=lhs)
+    if not (isinstance(rhs, TracedTensor) and isinstance(lhs, TracedTensor)):
         return NotImplemented
     op_name = op.value
     _check_same_graph(lhs, rhs, op_name)
     _check_binary_tensor_types(lhs.tensor_info, rhs.tensor_info, op)
-    return lhs._graph.add_node(NodeKind.BINARY, op, (lhs._id, rhs._id), lhs.tensor_info)
+    return lhs._graph.add_node(
+        NodeKind.BINARY,
+        op,
+        (lhs._id, rhs._id),
+        lhs.tensor_info,
+        kwargs={"overflow": "none"} if op == BinaryOp.SHIFT_LEFT else {},
+    )
 
 
 def _cmp(lhs: TracedTensor, rhs: TracedTensor, comparator: str) -> TracedTensor:
@@ -483,23 +579,23 @@ def _matmul_result_info(
 
 
 def _matmul(
-    lhs: TracedTensor, rhs: TracedTensor, result_dtype: object | None = None
+    lhs: TracedTensor,
+    rhs: TracedTensor,
+    result_dtype: object | None = None,
+    left_triangle: str | None = None,
+    right_triangle: str | None = None,
 ) -> TracedTensor:
+    if left_triangle is not None and left_triangle not in ("upper", "lower"):
+        raise ValueError("left_triangle must be 'upper', 'lower', or None")
+    if right_triangle is not None and right_triangle not in ("upper", "lower"):
+        raise ValueError("right_triangle must be 'upper', 'lower', or None")
     return lhs._graph.add_node(
         NodeKind.MATMUL,
         "matmul",
         (lhs._id, rhs._id),
         _matmul_result_info(lhs, rhs, result_dtype),
+        kwargs={"left_triangle": left_triangle, "right_triangle": right_triangle},
     )
-
-
-def _contiguous_stride(shape: tuple[int, ...]) -> tuple[int, ...]:
-    stride: list[int] = []
-    running = 1
-    for dim in reversed(shape):
-        stride.append(running)
-        running *= dim
-    return tuple(reversed(stride))
 
 
 _INTEGER_CMP_PREDICATES = {"eq", "neq", "gt", "ge", "lt", "le"}
@@ -562,6 +658,15 @@ def _check_binary_tensor_types(
     ):
         _check_same_tensor_shape(lhs, rhs, op.value)
         return
+    bitwise_ops = {
+        BinaryOp.AND,
+        BinaryOp.OR,
+        BinaryOp.XOR,
+        BinaryOp.SHIFT_LEFT,
+        BinaryOp.SHIFT_RIGHT,
+    }
+    if op in bitwise_ops and not is_integer_dtype(lhs.dtype):
+        raise TypeError(f"tir.{op.value} expects integer tensor operands")
     _check_same_tensor_type(lhs, rhs, op.value)
 
 

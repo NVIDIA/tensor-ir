@@ -66,7 +66,7 @@ module @shape_module {
     %reshape = nv_tensor_ir.reshape %broadcast : tensor<2x4xf32> -> tensor<4x2xf32>
     %transpose = nv_tensor_ir.transpose %reshape permutation = [1, 0]
         : tensor<4x2xf32> -> tensor<2x4xf32>
-    %slice = nv_tensor_ir.slice %transpose starts = [0, 1] limits = [2, 3] strides = [1, 1]
+    %slice = nv_tensor_ir.slice %transpose starts = [0, 2] limits = [2, 4] strides = [1, 1]
         : tensor<2x4xf32> -> tensor<2x2xf32>
     %concat = nv_tensor_ir.concatenate %slice, %slice dimension = 0
         : (tensor<2x2xf32>, tensor<2x2xf32>) -> tensor<4x2xf32>
@@ -229,3 +229,24 @@ module @user_defined_reduction_module {
 // CHECK: %[[F16_RHS:.*]] = ftof {{.*}} : tile<f16> -> tile<f32>
 // CHECK: %[[F16_DIV:.*]] = divf %[[F16_LHS]], %[[F16_RHS]] rounding<full>
 // CHECK: ftof %[[F16_DIV]] : tile<f32> -> tile<f16>
+
+// -----
+
+// Both splats retrieve the same converted scalar constant. Its SSA use list
+// does not account for uses through the dialect conversion's value mapping.
+// Erasing it while converting either splat can cause a double erasure.
+module attributes {gpu.container_module} {
+  gpu.module @kernels {
+    func.func @shared_splat_constant() attributes {gpu.kernel} {
+      %c = nv_tensor_ir.constant 0 : si32
+      %a = nv_tensor_ir.splat %c : tensor<2xsi32>
+      %b = nv_tensor_ir.splat %c : tensor<4xsi32>
+      return
+    }
+  }
+}
+
+// CHECK-LABEL: entry @shared_splat_constant()
+// CHECK: constant <i32: 0> : tile<2xi32>
+// CHECK-NEXT: {{.*}}constant <i32: 0> : tile<4xi32>
+// CHECK-NEXT: return

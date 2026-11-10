@@ -16,6 +16,7 @@ add_tensor_ir_library(NVTensorIRTransform
   Bufferize.cpp
   CudaTileInsertGdcWait.cpp
   DiscoverIterationSpaceInfo.cpp
+  EraseShapeAssumptions.cpp
   FormGrid.cpp
   StaticPersistence.cpp
   TileReductions.cpp

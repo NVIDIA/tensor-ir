@@ -14,6 +14,10 @@ def ExpRoundingModeAttr
   let assemblyFormat = "`<` $value `>`";
 }
 
+def TriangleAttr : EnumAttr<TensorIR_Dialect, Triangle, "triangle"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+
 def TilePaddingAttr
     : EnumAttr<TensorIR_Dialect, TilePadding, "tile_padding"> {
   let summary = "Padding value for partially out-of-bounds tile loads";
@@ -21,6 +25,15 @@ def TilePaddingAttr
 }
 
 def ReductionModeAttr : EnumAttr<TensorIR_Dialect, ReductionMode, "reduction_mode"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+
+def RoundingModeAttr : EnumAttr<TensorIR_Dialect, RoundingMode, "rounding_mode"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+
+def IntegerOverflowAttr
+    : EnumAttr<TensorIR_Dialect, IntegerOverflow, "overflow"> {
   let assemblyFormat = "`<` $value `>`";
 }
 

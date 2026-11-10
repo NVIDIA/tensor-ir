@@ -31,10 +31,14 @@ typedef int32_t (*TensorIRLaunchFnV1)(void *userData, uint32_t kernelOrdinal,
 
 /// Host runtime context and dispatch table passed into the native entry point.
 typedef struct TensorIRHostRuntimeV1 {
-  uint32_t structSize;       // sizeof(TensorIRHostRuntimeV1)
-  uint32_t abiVersion;       // TENSOR_IR_HOST_ABI_VERSION_1
-  void *userData;            // Opaque pointer to runtime execution context
-  TensorIRLaunchFnV1 launch; // Runtime callback for kernel launching
+  /// sizeof(TensorIRHostRuntimeV1)
+  uint32_t structSize;
+  /// TENSOR_IR_HOST_ABI_VERSION_1
+  uint32_t abiVersion;
+  /// Opaque pointer to runtime execution context
+  void *userData;
+  /// Runtime callback for kernel launching
+  TensorIRLaunchFnV1 launch;
 } TensorIRHostRuntimeV1;
 
 /// Function pointer signature of the exported host entry function.

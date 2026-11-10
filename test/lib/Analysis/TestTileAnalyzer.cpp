@@ -15,7 +15,7 @@ using namespace mlir::nv_tensor_ir;
 
 namespace {
 
-// Test pass that exercises TileAnalyzer::getTileExplanation
+/// Test pass that exercises TileAnalyzer::getTileExplanation
 struct TestTileAnalyzerPass
     : public PassWrapper<TestTileAnalyzerPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestTileAnalyzerPass);

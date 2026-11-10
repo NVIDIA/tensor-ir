@@ -5,7 +5,7 @@
 
 // Signed integer exponents use fpowi starting with bytecode 13.4.
 
-// CHECK-LABEL: @test_pow_op
+// CHECK-LABEL: entry @test_pow_op(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xf32>]]
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE]]
 // CHECK: fpowf %[[ARG0]], %[[ARG1]] : [[TILE]]
@@ -17,7 +17,7 @@ nv_tensor_ir.graph @test_pow_op(%arg0: tensor<128xf32>,
 
 // -----
 
-// CHECK-LABEL: @test_pow_exp_sint
+// CHECK-LABEL: entry @test_pow_exp_sint(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xf32>]]
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE_EXP:tile<[0-9]+xi32>]]
 // V13_4-NOT: itof
@@ -32,7 +32,7 @@ nv_tensor_ir.graph @test_pow_exp_sint(%arg0: tensor<128xf32>,
 
 // -----
 
-// CHECK-LABEL: @test_pow_exp_uint
+// CHECK-LABEL: entry @test_pow_exp_uint(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xf32>]]
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE_EXP:tile<[0-9]+xi32>]]
 // CHECK: %[[EXP:.*]] = itof %[[ARG1]] unsigned : [[TILE_EXP]] -> [[TILE]]
@@ -45,7 +45,7 @@ nv_tensor_ir.graph @test_pow_exp_uint(%arg0: tensor<128xf32>,
 
 // -----
 
-// CHECK-LABEL: @test_pow_exp_i64
+// CHECK-LABEL: entry @test_pow_exp_i64(
 // CHECK: %[[EXP:.*]] = itof %{{.*}} signed : tile<{{[0-9]+}}xi64> -> [[TILE:tile<[0-9]+xf32>]]
 // CHECK: fpowf %{{.*}}, %[[EXP]] : [[TILE]]
 nv_tensor_ir.graph @test_pow_exp_i64(%arg0: tensor<128xf32>,
@@ -56,7 +56,7 @@ nv_tensor_ir.graph @test_pow_exp_i64(%arg0: tensor<128xf32>,
 
 // -----
 
-// CHECK-LABEL: @test_pow_exp_si8
+// CHECK-LABEL: entry @test_pow_exp_si8(
 // V13_3: %[[EXP:.*]] = itof %{{.*}} signed : [[EXP_TILE:tile<[0-9]+xi8>]] -> [[TILE:tile<[0-9]+xf32>]]
 // V13_3: fpowf %{{.*}}, %[[EXP]] : [[TILE]]
 // V13_4-NOT: itof
@@ -69,7 +69,7 @@ nv_tensor_ir.graph @test_pow_exp_si8(%arg0: tensor<128xf32>,
 
 // -----
 
-// CHECK-LABEL: @test_pow_exp_si16
+// CHECK-LABEL: entry @test_pow_exp_si16(
 // V13_3: %[[EXP:.*]] = itof %{{.*}} signed : [[EXP_TILE:tile<[0-9]+xi16>]] -> [[TILE:tile<[0-9]+xf32>]]
 // V13_3: fpowf %{{.*}}, %[[EXP]] : [[TILE]]
 // V13_4-NOT: itof

@@ -1,24 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef TENSOR_IR_ANALYSIS_POLYEXPRS_H
-#define TENSOR_IR_ANALYSIS_POLYEXPRS_H
-
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/DynamicAPInt.h"
-#include "llvm/ADT/iterator.h"
-#include "llvm/Support/raw_ostream.h"
-
-#include <cassert>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <optional>
-#include <vector>
-
-namespace mlir::nv_tensor_ir {
-
-/// \file
 /// Multi-variate integer polynomial analysis and symbol evaluation context for
 /// TensorIR.
 ///
@@ -45,9 +27,33 @@ namespace mlir::nv_tensor_ir {
 ///
 /// Symbol Definitions & Normalization:
 /// - `PolyExprContext` acts as an acyclic symbol table mapping variable IDs to
-///   defining polynomials.
+///   defining polynomials, and holds a reduction basis of polynomials known to
+///   be zero.
 /// - Normalization recursively substitutes symbol definitions using binary
-///   exponentiation, memoizing intermediate expressions for reuse across terms.
+///   exponentiation, memoizing intermediate expressions for reuse across terms,
+///   and then reduces the result modulo the reduction basis.
+/// - A frozen context accepts no further definitions or basis elements, so
+///   normalized forms, and the identities of interned normalized expressions,
+///   stay fixed.
+
+#ifndef TENSOR_IR_ANALYSIS_POLYEXPRS_H
+#define TENSOR_IR_ANALYSIS_POLYEXPRS_H
+
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMapInfo.h"
+#include "llvm/ADT/DynamicAPInt.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/iterator.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <vector>
+
+namespace mlir::nv_tensor_ir {
 
 /// Unique 32-bit identifier for an indeterminate symbol variable \f$x_i\f$.
 using VariableId = std::uint32_t;
@@ -75,10 +81,10 @@ struct Power {
 /// empty, `offsets = {0}`, and `powers` is empty).
 template <class ExactInteger>
 struct SparsePolynomialStorage {
-  // Term i has one coefficient and powers[offsets[i] ... offsets[i + 1]).
-  // Equal adjacent offsets represent a constant term's empty monomial.
+  /// Term i has one coefficient and powers[offsets[i] ... offsets[i + 1]).
+  /// Equal adjacent offsets represent a constant term's empty monomial.
   std::vector<ExactInteger> coefficients;
-  // The trailing offset makes this size coefficients.size() + 1, even for zero.
+  /// The trailing offset makes this size coefficients.size() + 1, even for zero.
   std::vector<Offset> offsets{0};
   std::vector<Power> powers;
 };
@@ -90,7 +96,8 @@ class PolyExprImpl;
 /// The context must outlive its handles. A default-constructed handle is invalid;
 /// use operator bool to test validity. Invalid is distinct from the zero polynomial.
 /// Equality compares interned identity, without substituting symbol definitions;
-/// use PolyExprContext::areEqual for semantic equality under current definitions.
+/// use PolyExprContext::areEqual for semantic equality under the definitions
+/// and the reduction basis of the context.
 class PolyExpr {
 public:
   using Storage = SparsePolynomialStorage<llvm::DynamicAPInt>;
@@ -186,8 +193,19 @@ public:
   std::optional<llvm::DynamicAPInt> getConstantValue() const;
   std::optional<int64_t> getConstantInt64() const;
   bool isOne() const;
+  /// Sorted, unique variables of the stored terms, without substituting
+  /// definitions. Empty for an invalid handle.
+  llvm::SmallVector<VariableId> getVariables() const;
+  /// Divides the stored polynomial by the gcd of its coefficients and makes
+  /// its leading coefficient positive, without substituting definitions.
+  /// Zero and invalid handles are returned unchanged.
+  PolyExpr getPrimitivePart() const;
 
-  /// Substitutes definitions; returns invalid on normalization failure.
+  /// Opaque pointer identifying the interned polynomial.
+  const void *getAsOpaquePointer() const { return impl; }
+
+  /// Substitutes definitions and reduces modulo the reduction basis; returns
+  /// invalid on normalization failure.
   PolyExpr normalize() const;
   /// Prints with definitions substituted and arbitrary-precision coefficients,
   /// or <invalid> for an invalid handle or failed normalization.
@@ -229,8 +247,13 @@ private:
 /// PolyExprContext provides:
 /// - Unique storage (hash-consing) for `PolyExprImpl` instances.
 /// - An acyclic symbol definition registry mapping `VariableId -> PolyExpr`.
-/// - Recursive normalization (substitution) with memoization.
-/// - Semantic equivalence testing modulo symbol definitions.
+/// - A reduction basis of polynomials known to evaluate to zero.
+/// - Recursive normalization (substitution, then reduction) with memoization.
+/// - Three-valued semantic queries modulo definitions and the basis.
+///
+/// Symbols range over non-negative integers. Definitions precede basis
+/// elements, and both precede `freeze()`; adding either afterwards is a
+/// programming error.
 ///
 /// Thread Safety: Not thread-safe. Concurrent access must be synchronized externally.
 class PolyExprContext {
@@ -243,6 +266,7 @@ public:
   /// Add a definition once. Return false for redefinition, an invalid handle, a foreign context or
   /// a cycle, leaving existing definitions and normalization caches unchanged.
   /// References to symbols that have not yet been defined are allowed.
+  /// Requires an unfrozen context with an empty reduction basis.
   ///
   /// Cycle detection traverses the transitive dependency graph prior to mutating
   /// internal state, ensuring atomic rejection. Successfully adding a definition
@@ -251,17 +275,40 @@ public:
   /// Returns the bound definition for `variable`, or an invalid handle if undefined.
   PolyExpr getDefinition(VariableId variable) const;
 
-  /// Recursively substitute definitions, caching intermediate expressions.
+  /// Adds `zero`, a polynomial that evaluates to zero, to the reduction basis.
+  /// The basis keeps the primitive part of `zero` after normalization, with a
+  /// positive leading coefficient. Normalization then rewrites every term
+  /// whose monomial and coefficient are multiples of the leading term of a
+  /// basis element. Reduction is sound but not complete: without a completion
+  /// of the basis, polynomials that are equal modulo the basis may keep
+  /// different normal forms. A `zero` that already normalizes to zero adds
+  /// nothing. Returns false, leaving the basis unchanged, for an invalid or
+  /// foreign handle, a normalization failure, or a `zero` that normalizes to
+  /// a nonzero constant. Requires an unfrozen context. Successfully adding an
+  /// element invalidates the normalization cache.
+  bool addReduction(PolyExpr zero);
+
+  /// Fixes the definitions and the reduction basis. Afterwards normalization
+  /// is a function of the expression alone.
+  void freeze();
+  bool isFrozen() const;
+
+  /// Recursively substitute definitions, caching intermediate expressions, and
+  /// reduce the result modulo the reduction basis.
   /// Return an invalid handle on exponent or offset overflow (including intermediates)
-  /// or an invalid/foreign handle. Adding a definition invalidates this cache.
+  /// or an invalid/foreign handle. Adding a definition or a basis element
+  /// invalidates this cache.
   ///
   /// Uses exponentiation by squaring to evaluate powers of substituted expressions.
   PolyExpr normalize(PolyExpr expression);
-  /// Tests whether `lhs` and `rhs` are semantically equivalent under current definitions.
-  /// Evaluates pointer equality as a fast path. If unequal, normalizes both expressions
-  /// and compares canonical normalized pointers.
-  /// Returns `std::nullopt` if normalization overflows or an operand is invalid or has a foreign context.
+  /// Three-valued equality modulo definitions and the reduction basis: true
+  /// when `lhs - rhs` normalizes to zero, false when it normalizes to a
+  /// nonzero constant, and `std::nullopt` otherwise. Identical handles are
+  /// equal without normalizing. Also `std::nullopt` if normalization overflows
+  /// or an operand is invalid or has a foreign context.
   std::optional<bool> areEqual(PolyExpr lhs, PolyExpr rhs);
+  /// Three-valued test of `expression == 1`, as areEqual.
+  std::optional<bool> isOne(PolyExpr expression);
 
 private:
   friend class PolyExpr;
@@ -270,6 +317,7 @@ private:
   bool addDefinitionImpl(VariableId variable, const PolyExprImpl &definition);
   const PolyExprImpl *getDefinitionImpl(VariableId variable) const;
   const PolyExprImpl *normalizeImpl(const PolyExprImpl &expression);
+  const PolyExprImpl *reduceImpl(const PolyExprImpl &expression);
   std::optional<bool> areEqualImpl(const PolyExprImpl &lhs,
                                    const PolyExprImpl &rhs);
   struct Impl;
@@ -277,5 +325,17 @@ private:
 };
 
 } // namespace mlir::nv_tensor_ir
+
+namespace llvm {
+template <>
+struct DenseMapInfo<mlir::nv_tensor_ir::PolyExpr> {
+  using PolyExpr = mlir::nv_tensor_ir::PolyExpr;
+  static unsigned getHashValue(PolyExpr expression) {
+    return DenseMapInfo<const void *>::getHashValue(
+        expression.getAsOpaquePointer());
+  }
+  static bool isEqual(PolyExpr lhs, PolyExpr rhs) { return lhs == rhs; }
+};
+} // namespace llvm
 
 #endif // TENSOR_IR_ANALYSIS_POLYEXPRS_H

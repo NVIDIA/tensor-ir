@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// This file is TensorIR's only raw CUDA API boundary. Driver entry points are
-// always resolved from the installed driver. CUDA Runtime entry points either
-// use the same dynamic dispatch or bind to cudart_static at build time. Public
-// callers see only the Status-based functions declared in CudaApi.h.
+/// This file is TensorIR's only raw CUDA API boundary. Driver entry points are
+/// always resolved from the installed driver. CUDA Runtime entry points either
+/// use the same dynamic dispatch or bind to cudart_static at build time. Public
+/// callers see only the Status-based functions declared in CudaApi.h.
 
 #include "tensor_ir/Support/CudaApi.h"
 

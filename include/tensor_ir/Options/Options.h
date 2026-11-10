@@ -15,6 +15,7 @@
 #include "llvm/Support/LogicalResult.h" // IWYU pragma: keep
 #include "llvm/Support/raw_ostream.h"   // IWYU pragma: keep
 
+#include <array>
 #include <optional> // IWYU pragma: keep
 #include <string>   // IWYU pragma: keep
 #include <vector>   // IWYU pragma: keep
@@ -27,6 +28,16 @@ class OptionCategory;
 #include "tensor_ir/Options/CompilerOptions.h.inc"
 
 namespace mlir::nv_tensor_ir {
+
+/// Effective categories in passed, missed, failed, analysis order.
+/// Per-kind Inherit uses the global category; explicit None wins.
+struct RemarkFilters {
+  std::array<RemarkCategory, 4> categories{};
+  bool isEnabled() const;
+};
+
+[[nodiscard]] StatusOr<RemarkFilters>
+resolveRemarkFilters(const OptimizationRemarkOptions &options);
 
 struct CompilerInvocation : CompilerInvocationComponents {
   /// Parses the target stored in `deviceTarget.kernelTarget`.

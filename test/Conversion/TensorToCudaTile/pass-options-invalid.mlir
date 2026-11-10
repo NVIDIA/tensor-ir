@@ -15,6 +15,12 @@
 // RUN: tensor_ir-opt %t/static-persistence-sm-count.mlir \
 // RUN:   -convert-tensor-to-cuda-tile="codegen-strategy=affine_map \
 // RUN:     persistence=static sm-count=0" -verify-diagnostics
+// RUN: tensor_ir-opt %t/outlined-static-persistence-cga.mlir \
+// RUN:   -convert-tensor-to-cuda-tile="codegen-strategy=layout_propagation \
+// RUN:     num-ctas=2" -verify-diagnostics
+// RUN: tensor_ir-opt %t/target-bytecode-version.mlir \
+// RUN:   -convert-tensor-to-cuda-tile="target-bytecode-version=invalid" \
+// RUN:   -verify-diagnostics
 // RUN: tensor_ir-opt %t/already-converted.mlir \
 // RUN:   -convert-tensor-to-cuda-tile -verify-diagnostics
 // RUN: tensor_ir-opt %t/outlined-affine-input.mlir \
@@ -64,6 +70,27 @@ module {}
 //--- static-persistence-sm-count.mlir
 
 // expected-error @unknown {{Static persistent kernels require sm_count >= 1}}
+module {}
+
+//--- outlined-static-persistence-cga.mlir
+
+module {
+  gpu.module @kernels {
+  func.func @persistent_kernel() attributes {gpu.kernel} {
+    %block = gpu.block_id x
+    %grid = gpu.grid_dim x
+    %total = arith.constant 4 : index
+    // expected-error @+1 {{static persistent kernels are incompatible with CGA clusters (num-ctas > 1)}}
+    scf.for %tile = %block to %total step %grid {
+    }
+    return
+  }
+  }
+}
+
+//--- target-bytecode-version.mlir
+
+// expected-error @below {{target-bytecode-version: bytecode-version: unsupported CUDA Tile bytecode version (got 'invalid')}}
 module {}
 
 //--- already-converted.mlir

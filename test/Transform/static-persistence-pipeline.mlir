@@ -1,7 +1,7 @@
 // RUN: tensor_ir-opt %s --split-input-file \
 // RUN:   --pass-pipeline='builtin.module(nv_tensor_ir.graph(materialize-default-strides,tile-selection),tir-bufferize,func.func(tir-form-grid,tir-tile-reductions,tir-static-persistence{sm-count=2 occupancy=1}))' \
 // RUN:   | FileCheck %s
-// RUN: tensor_ir-opt %s --split-input-file --layout-propagation-pipeline="sm-count=2 occupancy=1 persistence=static" \
+// RUN: tensor_ir-opt %s --split-input-file --layout-propagation-pipeline="sm-count=2 occupancy=1 persistence-mode=static" \
 // RUN:   | FileCheck %s --check-prefix=LOWERED
 
 // Static persistence caps the physical grid and visits logical tile IDs with

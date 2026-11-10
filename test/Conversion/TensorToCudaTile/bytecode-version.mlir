@@ -36,3 +36,27 @@ module {
     results %result : tensor<128xf32>
   }
 }
+
+// -----
+
+// V13_3-LABEL: entry @negi_no_signed_wrap
+// V13_3: negi {{.*}} overflow<no_signed_wrap>
+// expected-error @+1 {{requires CUDA Tile bytecode version 13.2 or newer, but target-bytecode-version is 13.1}}
+module {
+  nv_tensor_ir.graph @negi_no_signed_wrap(%a: tensor<128xsi32>) -> tensor<128xsi32> {
+    %result = negi %a overflow <no_signed_wrap> : tensor<128xsi32>
+    results %result : tensor<128xsi32>
+  }
+}
+
+// -----
+
+// V13_3-LABEL: entry @negi_no_wrap
+// V13_3: negi {{.*}} overflow<no_wrap>
+// expected-error @+1 {{requires CUDA Tile bytecode version 13.2 or newer, but target-bytecode-version is 13.1}}
+module {
+  nv_tensor_ir.graph @negi_no_wrap(%a: tensor<128xsi32>) -> tensor<128xsi32> {
+    %result = negi %a overflow <no_wrap> : tensor<128xsi32>
+    results %result : tensor<128xsi32>
+  }
+}

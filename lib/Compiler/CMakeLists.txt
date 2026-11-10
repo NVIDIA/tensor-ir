@@ -6,6 +6,7 @@ add_tensor_ir_library(NVTensorIRLinalgPipelines
 
   LINK_LIBS PUBLIC
     MLIRAffineToStandard
+    MLIRArithTransforms
     MLIRBufferizationTransforms
     MLIRConvertToLLVMPass
     MLIRFuncDialect
@@ -37,15 +38,6 @@ add_tensor_ir_library(NVTensorIRCudaTilePipelines
     NVTensorIR::Transform
 )
 
-
-# Assembles TileIR bytecode into a cubin via 'tileiras'; shared by Compiler
-# and Runtime.
-add_tensor_ir_library(NVTensorIRTileIRAssembly
-  CudaTile/TileIRAssembly.cpp
-  PARTIAL_SOURCES_INTENDED
-
-  LINK_LIBS PUBLIC
-)
 
 add_tensor_ir_library(NVTensorIRCompiler STATIC
   Compiler.cpp

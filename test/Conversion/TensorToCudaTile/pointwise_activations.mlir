@@ -5,7 +5,7 @@
 // Other floating point types are verified in the E2E test.
 
 // Test RELU(x) = max(0, x)
-// CHECK-LABEL: @relu_f32
+// CHECK-LABEL: entry @relu_f32(
 // CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<([0-9]+x)+f32>]]
 // CHECK-DAG: %[[ZERO:.*]] = constant <f32: 0.000000e+00> : [[TILE]]
 // CHECK-DAG: %[[RESULT:.*]] = maxf %[[ZERO]], %[[ARG0]] propagate_nan : [[TILE]]
@@ -18,7 +18,7 @@ nv_tensor_ir.graph @relu_f32(%arg0: tensor<32x64xf32>) -> (tensor<32x64xf32>) {
 // -----
 
 // Test SIGMOID(x) = 1 / (1 + exp(-x))
-// CHECK-LABEL: @sigmoid_f32
+// CHECK-LABEL: entry @sigmoid_f32(
 // CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<([0-9]+x)+f32>]]
 // CHECK-DAG: %[[ONE:.*]] = constant <f32: 1.000000e+00> : [[TILE]]
 // CHECK-DAG: %[[NEG:.*]] = negf %[[ARG0]] : [[TILE]]
@@ -34,7 +34,7 @@ nv_tensor_ir.graph @sigmoid_f32(%arg0: tensor<32x64xf32>) -> (tensor<32x64xf32>)
 // -----
 
 // Test ERF(x) via Abramowitz-Stegun approximation (experimental=false).
-// CHECK-LABEL: @erf_f32
+// CHECK-LABEL: entry @erf_f32(
 // CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<([0-9]+x)+f32>]]
 // CHECK-DAG: %[[C0:.*]] = constant <f32: 0.327591091> : [[TILE]]
 // CHECK-DAG: %[[C1:.*]] = constant <f32: 0.254829586> : [[TILE]]
@@ -75,7 +75,7 @@ nv_tensor_ir.graph @erf_f32(%arg0: tensor<32x64xf32>) -> (tensor<32x64xf32>) {
 // -----
 
 // Test GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2))) with approximated erf.
-// CHECK-LABEL: @gelu_fwd_f32
+// CHECK-LABEL: entry @gelu_fwd_f32(
 // CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<([0-9]+x)+f32>]]
 // CHECK-DAG: %[[SQRT2:.*]] = constant <f32: 1.414{{[0-9]+}}> : [[TILE]]
 // CHECK-DAG: %[[ONE:.*]] = constant <f32: 1.000000e+00> : [[TILE]]
@@ -125,7 +125,7 @@ nv_tensor_ir.graph @gelu_fwd_f32(%arg0: tensor<32x64xf32>) -> (tensor<32x64xf32>
 // -----
 
 // Test GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
-// CHECK-LABEL: @gelu_approx_tanh_f32
+// CHECK-LABEL: entry @gelu_approx_tanh_f32(
 // CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<([0-9]+x)+f32>]]
 // CHECK-DAG: %[[CST1:.*]] = constant <f32: 0.797884583> : [[TILE]]
 // CHECK-DAG: %[[CST2:.*]] = constant <f32: 4.471500e-02> : [[TILE]]
@@ -149,7 +149,7 @@ nv_tensor_ir.graph @gelu_approx_tanh_f32(%arg0: tensor<32x64xf32>) -> (tensor<32
 // -----
 
 // Test SOFTPLUS(x) = 1/β * log(1 + exp(β * x))
-// CHECK-LABEL: @softplus_f32
+// CHECK-LABEL: entry @softplus_f32(
 // CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<([0-9]+x)+f32>]]
 // CHECK-DAG: %[[ONE:.*]] = constant <f32: 1.000000e+00> : [[TILE]]
 // CHECK-DAG: %[[TWO:.*]] = constant <f32: 2.000000e+00> : [[TILE]]
@@ -168,7 +168,7 @@ nv_tensor_ir.graph @softplus_f32(%arg0: tensor<32x64xf32>) -> (tensor<32x64xf32>
 // -----
 
 // Test SWISH(x) = x / (1 + exp(-β * x))
-// CHECK-LABEL: @swish_f32
+// CHECK-LABEL: entry @swish_f32(
 // CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<([0-9]+x)+f32>]]
 // CHECK-DAG: %[[TWO:.*]] = constant <f32: 2.000000e+00> : [[TILE]]
 // CHECK-DAG: %[[MUL:.*]] = mulf %[[ARG0]], %[[TWO]] : [[TILE]]
@@ -187,7 +187,7 @@ nv_tensor_ir.graph @swish_f32(%arg0: tensor<32x64xf32>) -> (tensor<32x64xf32>) {
 // -----
 
 // Test ELU(x) = {x if x > 0; β * (exp(x) - 1) if x ≤ 0}
-// CHECK-LABEL: @elu_f32
+// CHECK-LABEL: entry @elu_f32(
 // CHECK-DAG: %[[TWO:.*]] = constant <f32: 2.000000e+00> : [[TILE:tile<([0-9]+x)+f32>]]
 // CHECK-DAG: %[[ONE:.*]] = constant <f32: 1.000000e+00> : [[TILE]]
 // CHECK-DAG: %[[ZERO:.*]] = constant <f32: 0.000000e+00> : [[TILE]]

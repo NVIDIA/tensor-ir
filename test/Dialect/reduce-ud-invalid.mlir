@@ -104,3 +104,44 @@ nv_tensor_ir.graph @reduceUDSecondCurrentValueType(
       -> tensor<8x1xf32>, tensor<8x1xf16>
   results %result#0, %result#1 : tensor<8x1xf32>, tensor<8x1xf16>
 }
+
+// -----
+
+nv_tensor_ir.graph @reduceUDIdentityCount(
+  %input: tensor<16x32xf32>
+) -> tensor<16x1xf32> {
+  // expected-error@below{{expects number of identities to match number of results, but got 0 identities and 1 results}}
+  %reduce = reduce_ud(%input)<dimensions = [1], identity = []>
+      (%acc: f32, %value: f32) {
+    %sum = arith.addf %acc, %value : f32
+    nv_tensor_ir.yield %sum : f32
+  } : tensor<16x32xf32> -> tensor<16x1xf32>
+  results %reduce : tensor<16x1xf32>
+}
+
+// -----
+
+nv_tensor_ir.graph @reduceUDBlockArgumentCount(
+  %input: tensor<16x32xf32>
+) -> tensor<16x1xf32> {
+  // expected-error@below{{expects body region to have exactly 2 arguments (lhs_i, rhs_i), but got 1 arguments}}
+  %reduce = reduce_ud(%input)<dimensions = [1], identity = [0.000000e+00 : f32]>
+      (%acc: f32) {
+    nv_tensor_ir.yield %acc : f32
+  } : tensor<16x32xf32> -> tensor<16x1xf32>
+  results %reduce : tensor<16x1xf32>
+}
+
+// -----
+
+nv_tensor_ir.graph @reduceUDYieldType(
+  %input: tensor<16x32xf32>
+) -> tensor<16x1xf32> {
+  // expected-error@below{{expects yield operand 0 type to match identity type, but got yield type: 'i32' and identity type: 'f32'}}
+  %reduce = reduce_ud(%input)<dimensions = [1], identity = [0.000000e+00 : f32]>
+      (%acc: f32, %value: f32) {
+    %zero = arith.constant 0 : i32
+    nv_tensor_ir.yield %zero : i32
+  } : tensor<16x32xf32> -> tensor<16x1xf32>
+  results %reduce : tensor<16x1xf32>
+}

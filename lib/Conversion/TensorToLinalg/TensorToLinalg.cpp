@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-/// \file
 /// Lower the public, portable TensorIR operation subset to tensor-semantics
 /// Linalg and Tensor operations.
 
@@ -11,12 +10,14 @@
 
 #include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -88,9 +89,9 @@ static Value castFrom(ScalarBuilder &scalar, Value input, Type outputType,
                                        : scalar.scast(input, outputType);
 }
 
-// Model MMA with widened products. Integer accumulation uses MmaIOp's default
-// signed saturation; floating-point arithmetic is a portable reference, not a
-// bit-exact reproduction of hardware MMA's intermediate precision or ordering.
+/// Model MMA with widened products. Integer accumulation uses MmaIOp's default
+/// signed saturation; floating-point arithmetic is a portable reference, not a
+/// bit-exact reproduction of hardware MMA's intermediate precision or ordering.
 static Value buildMmaScalar(OpBuilder &builder, Location loc, Value lhs,
                             Value rhs, Value accumulator, Type lhsType,
                             Type rhsType) {
@@ -161,7 +162,7 @@ static Value buildSelectPositive(ScalarBuilder &scalar, Value input,
   return scalar.select(predicate, positive, nonPositive);
 }
 
-// Scalar callback factories defer IR emission until their TypeSwitch case matches.
+/// Scalar callback factories defer IR emission until their TypeSwitch case matches.
 template <typename Builder>
 static auto unaryScalar(ScalarBuilder &scalar, ValueRange values,
                         Value (Builder::*method)(Value)) {
@@ -198,6 +199,11 @@ static FailureOr<Value> buildPointwiseScalar(Operation *operation,
       .Case<AddOp>(binaryScalar(scalar, values, &ScalarBuilder::add))
       .Case<SubOp>(binaryScalar(scalar, values, &ScalarBuilder::sub))
       .Case<MulOp>(binaryScalar(scalar, values, &ScalarBuilder::mul))
+      .Case<MulHighOp>(binaryScalar(scalar, values, &ScalarBuilder::mulHigh))
+      .Case<FmaOp>([&](FmaOp op) {
+        return FailureOr<Value>(
+            scalar.fma(values[0], values[1], values[2], op.getFtz()));
+      })
       .Case<DivOp>(binaryScalar(scalar, values, div))
       .Case<RemOp>(binaryScalar(scalar, values, rem))
       .Case<MinOp>(binaryScalar(scalar, values, min))
@@ -216,12 +222,27 @@ static FailureOr<Value> buildPointwiseScalar(Operation *operation,
       })
       .Case<CeilOp>(unaryScalar(scalar, values, &ScalarBuilder::ceil))
       .Case<CosOp>(unaryScalar(scalar, values, &ScalarBuilder::cos))
+      .Case<CoshOp>(unaryScalar(scalar, values, &ScalarBuilder::cosh))
+      .Case<Exp2Op>([&](Exp2Op op) {
+        return FailureOr<Value>(scalar.exp2(values[0], op.getFtz()));
+      })
       .Case<ExpOp>(unaryScalar(scalar, values, &ScalarBuilder::exp))
       .Case<FloorOp>(unaryScalar(scalar, values, &ScalarBuilder::floor))
       .Case<LogOp>(unaryScalar(scalar, values, &ScalarBuilder::log))
+      .Case<Log2Op>(unaryScalar(scalar, values, &ScalarBuilder::log2))
+      .Case<NegIOp>([&](NegIOp op) {
+        Value zero = scalar.constant(values[0].getType(), 0);
+        auto overflow = op.getOverflow() == IntegerOverflow::NONE
+                            ? arith::IntegerOverflowFlags::none
+                            : arith::IntegerOverflowFlags::nsw;
+        Value result =
+            arith::SubIOp::create(builder, loc, zero, values[0], overflow);
+        return FailureOr<Value>(result);
+      })
       .Case<NegOp>(unaryScalar(scalar, values, &ScalarBuilder::neg))
       .Case<RsqrtOp>(unaryScalar(scalar, values, &ScalarBuilder::rsqrt))
       .Case<SinOp>(unaryScalar(scalar, values, &ScalarBuilder::sin))
+      .Case<SinhOp>(unaryScalar(scalar, values, &ScalarBuilder::sinh))
       .Case<SqrtOp>(unaryScalar(scalar, values, &ScalarBuilder::sqrt))
       .Case<TanOp>(unaryScalar(scalar, values, &ScalarBuilder::tan))
       .Case<ErfOp>(unaryScalar(scalar, values, &ScalarBuilder::erf))
@@ -239,8 +260,17 @@ static FailureOr<Value> buildPointwiseScalar(Operation *operation,
         Value result = (scalar.*pow)(values[0], exponent);
         return FailureOr<Value>(result);
       })
-      .Case<LogicalAndOp>(binaryScalar(scalar, values, &ScalarBuilder::_and))
-      .Case<LogicalOrOp>(binaryScalar(scalar, values, &ScalarBuilder::_or))
+      .Case<AndOp>(binaryScalar(scalar, values, &ScalarBuilder::_and))
+      .Case<OrOp>(binaryScalar(scalar, values, &ScalarBuilder::_or))
+      .Case<XorOp>(binaryScalar(scalar, values, &ScalarBuilder::_xor))
+      .Case<ShiftLeftOp>([&](ShiftLeftOp op) {
+        return FailureOr<Value>(
+            scalar.shl(values[0], values[1], op.getOverflow()));
+      })
+      .Case<ShiftRightOp>(binaryScalar(scalar, values,
+                                       inputType.isSignedInteger()
+                                           ? &ScalarBuilder::sshr
+                                           : &ScalarBuilder::ushr))
       .Case<LogicalNotOp>([&](auto) {
         Value one = scalar.constant(resultType, 1);
         Value result = scalar._xor(values[0], one);
@@ -663,22 +693,6 @@ public:
   }
 };
 
-SmallVector<OpFoldResult> getMixedResultShape(OpBuilder &builder, Location loc,
-                                              RankedTensorType resultType,
-                                              ValueRange dynamicSizes) {
-  SmallVector<OpFoldResult> shape;
-  auto dynamicSize = dynamicSizes.begin();
-  for (int64_t size : resultType.getShape()) {
-    if (ShapedType::isDynamic(size)) {
-      assert(dynamicSize != dynamicSizes.end());
-      shape.push_back(*dynamicSize++);
-    } else {
-      shape.push_back(builder.getIndexAttr(size));
-    }
-  }
-  return shape;
-}
-
 class ReshapeOpConversion : public OpConversionPattern<ReshapeOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -702,15 +716,10 @@ public:
         return success();
       }
       if (adaptor.getDynamicSizes().size() == resultType.getNumDynamicDims()) {
-        SmallVector<OpFoldResult> outputShape = getMixedResultShape(
-            rewriter, op.getLoc(), resultType, adaptor.getDynamicSizes());
+        SmallVector<OpFoldResult> outputShape = getMixedValues(
+            resultType.getShape(), adaptor.getDynamicSizes(), rewriter);
         rewriter.replaceOpWithNewOp<tensor::ExpandShapeOp>(
             op, resultType, adaptor.getInput(), *reassociation, outputShape);
-        return success();
-      }
-      if (resultType.hasStaticShape()) {
-        rewriter.replaceOpWithNewOp<tensor::ExpandShapeOp>(
-            op, resultType, adaptor.getInput(), *reassociation);
         return success();
       }
     }
@@ -719,17 +728,10 @@ public:
       return rewriter.notifyMatchFailure(
           op, "non-reassociative dynamic reshape requires dynamic_dims");
     }
-    SmallVector<Value> shapeElements;
-    auto dynamicSize = adaptor.getDynamicSizes().begin();
-    for (int64_t size : resultType.getShape()) {
-      if (ShapedType::isDynamic(size)) {
-        shapeElements.push_back(*dynamicSize++);
-      } else {
-        Value shapeElement =
-            arith::ConstantIndexOp::create(rewriter, op.getLoc(), size);
-        shapeElements.push_back(shapeElement);
-      }
-    }
+    SmallVector<OpFoldResult> mixedShape = getMixedValues(
+        resultType.getShape(), adaptor.getDynamicSizes(), rewriter);
+    SmallVector<Value> shapeElements =
+        getValueOrCreateConstantIndexOp(rewriter, op.getLoc(), mixedShape);
     Value shape =
         tensor::FromElementsOp::create(rewriter, op.getLoc(), shapeElements);
     rewriter.replaceOpWithNewOp<tensor::ReshapeOp>(op, resultType,
@@ -889,369 +891,194 @@ static Value buildReductionScalar(OpBuilder &builder, Location loc,
   return scalar.add(accumulator, input);
 }
 
-static FailureOr<Value> mapReducedTensor(
-    ConversionPatternRewriter &rewriter, Location loc, Value input,
-    function_ref<Value(OpBuilder &, Location, Value)> scalarBuilder) {
-  auto resultType = cast<RankedTensorType>(input.getType());
-  FailureOr<Value> empty = createEmptyTensor(rewriter, loc, resultType, input);
-  if (failed(empty)) {
-    return failure();
-  }
-  return createParallelGeneric(
-      rewriter, loc, ValueRange{input}, *empty,
-      [&](OpBuilder &builder, Location bodyLoc, ValueRange args) {
-        return scalarBuilder(builder, bodyLoc, args.front());
-      });
-}
-
-struct ReductionShape {
-  SmallVector<int64_t> shape;
+static SmallVector<Value>
+getDynamicResultSizes(OpBuilder &builder, IterationDomainOpInterface domain,
+                      RankedTensorType resultType, ValueRange inputs,
+                      unsigned resultNumber = 0) {
+  auto inputMaps = domain.getIndexingMapsArray();
+  AffineMap resultMap = domain.getResultIndexingMaps()[resultNumber];
+  Location loc = domain.getLoc();
   SmallVector<Value> dynamicSizes;
-};
-
-static ReductionShape getReductionShape(OpBuilder &builder, Location loc,
-                                        RankedTensorType inputType, Value input,
-                                        ArrayRef<int64_t> reductionDims) {
-  ReductionShape reduced;
-  for (auto [dim, size] : llvm::enumerate(inputType.getShape())) {
-    if (llvm::is_contained(reductionDims, dim)) {
-      continue;
-    }
-    reduced.shape.push_back(size);
-    if (ShapedType::isDynamic(size)) {
-      Value dynamicSize = getDim(builder, loc, input, dim);
-      reduced.dynamicSizes.push_back(dynamicSize);
-    }
-  }
-  return reduced;
-}
-
-static Value createReductionInit(OpBuilder &builder, Location loc,
-                                 RankedTensorType resultType,
-                                 const ReductionShape &reduced,
-                                 function_ref<Value()> buildIdentity) {
-  auto reducedType = RankedTensorType::get(
-      reduced.shape, resultType.getElementType(), resultType.getEncoding());
-  FailureOr<Value> empty =
-      createEmptyTensor(builder, loc, reducedType, reduced.dynamicSizes);
-  assert(succeeded(empty) && "constructed all reduced dynamic dimensions");
-  Value identity = buildIdentity();
-  return linalg::FillOp::create(builder, loc, identity, *empty).getResult(0);
-}
-
-static Value broadcastReductionResult(OpBuilder &builder, Location loc,
-                                      RankedTensorType resultType, Value input,
-                                      Value reduced,
-                                      ArrayRef<int64_t> reductionDims) {
-  if (reduced.getType() == resultType) {
-    return reduced;
-  }
-  SmallVector<Value> dynamicSizes;
-  for (auto [dim, size] : llvm::enumerate(resultType.getShape())) {
+  for (auto [dimension, size] : llvm::enumerate(resultType.getShape())) {
     if (!ShapedType::isDynamic(size)) {
       continue;
     }
-    if (llvm::is_contained(reductionDims, dim)) {
-      Value dynamicSize = arith::ConstantIndexOp::create(builder, loc, 1);
-      dynamicSizes.push_back(dynamicSize);
-    } else {
-      Value dynamicSize = getDim(builder, loc, input, dim);
-      dynamicSizes.push_back(dynamicSize);
+    Value extent;
+    for (auto [input, map] : llvm::zip(inputs, inputMaps)) {
+      auto inputDimension =
+          map.getResultPosition(resultMap.getResult(dimension));
+      if (!inputDimension) {
+        continue;
+      }
+      extent = getDim(builder, loc, input, *inputDimension);
+      break;
     }
+    assert(extent && "dynamic result dimension must be supplied by an operand");
+    dynamicSizes.push_back(extent);
   }
-  FailureOr<Value> empty =
-      createEmptyTensor(builder, loc, resultType, dynamicSizes);
-  assert(succeeded(empty) && "constructed all result dynamic dimensions");
-  auto broadcast =
-      linalg::BroadcastOp::create(builder, loc, reduced, *empty, reductionDims);
-  return broadcast.getResult().front();
+  return dynamicSizes;
 }
 
 namespace {
-class ReduceOpConversion : public OpConversionPattern<ReduceOp> {
+class ReductionOpConversion
+    : public OpInterfaceConversionPattern<IterationDomainOpInterface> {
 public:
-  using OpConversionPattern::OpConversionPattern;
+  using OpInterfaceConversionPattern::OpInterfaceConversionPattern;
 
   LogicalResult
-  matchAndRewrite(ReduceOp op, OpAdaptor adaptor,
+  matchAndRewrite(IterationDomainOpInterface op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    ReductionMode mode = op.getReductionMode();
-    if (mode == ReductionMode::customize) {
+    auto builtin = dyn_cast<ReduceOp>(op.getOperation());
+    auto custom = dyn_cast<ReduceUDOp>(op.getOperation());
+    if (!builtin && !custom) {
+      return failure();
+    }
+    ReductionMode mode =
+        builtin ? builtin.getReductionMode() : ReductionMode::customize;
+    if (builtin && mode == ReductionMode::customize) {
       return rewriter.notifyMatchFailure(
           op, "custom reductions use nv_tensor_ir.reduce_ud");
     }
-
-    auto inputType = cast<RankedTensorType>(adaptor.getInput().getType());
-    auto resultType =
-        cast<RankedTensorType>(getTypeConverter()->convertType(op.getType()));
+    Type sourceType =
+        cast<RankedTensorType>(op->getResult(0).getType()).getElementType();
     if (mode == ReductionMode::norm2 &&
-        !isa<FloatType>(inputType.getElementType())) {
+        !isa<FloatType>(cast<RankedTensorType>(operands.front().getType())
+                            .getElementType())) {
       return rewriter.notifyMatchFailure(op,
                                          "norm2 requires floating-point input");
     }
-    SmallVector<int64_t> dimensions =
-        llvm::to_vector_of<int64_t>(op.getDimensions());
-    llvm::sort(dimensions);
-    ReductionShape reduced = getReductionShape(rewriter, op.getLoc(), inputType,
-                                               adaptor.getInput(), dimensions);
-    Value init =
-        createReductionInit(rewriter, op.getLoc(), resultType, reduced, [&]() {
-          return createReductionIdentity(rewriter, op.getLoc(),
-                                         op.getType().getElementType(), mode);
-        });
-    auto reduce = linalg::ReduceOp::create(
-        rewriter, op.getLoc(), ValueRange{adaptor.getInput()}, ValueRange{init},
-        dimensions, [&](OpBuilder &builder, Location loc, ValueRange args) {
-          Value result =
-              buildReductionScalar(builder, loc, mode, args[0], args[1],
-                                   op.getInput().getType().getElementType());
-          linalg::YieldOp::create(builder, loc, result);
-        });
 
-    Value result = broadcastReductionResult(rewriter, op.getLoc(), resultType,
-                                            adaptor.getInput(),
-                                            reduce.getResult(0), dimensions);
-
-    if (mode == ReductionMode::norm2) {
-      FailureOr<Value> mapped = mapReducedTensor(
-          rewriter, op.getLoc(), result,
-          [](OpBuilder &builder, Location loc, Value value) -> Value {
-            ScalarBuilder scalar(builder, loc);
-            return scalar.sqrt(value);
-          });
-      assert(succeeded(mapped) && "result shape is available");
-      result = *mapped;
-    } else if (mode == ReductionMode::avg) {
-      Value count = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 1);
-      for (int64_t dim : dimensions) {
-        Value extent = getDim(rewriter, op.getLoc(), adaptor.getInput(), dim);
-        count = arith::MulIOp::create(rewriter, op.getLoc(), count, extent);
-      }
-      Type sourceElementType = op.getType().getElementType();
-      ScalarBuilder scalar(rewriter, op.getLoc());
-      Value typedCount = scalar.scast(count, sourceElementType);
-      FailureOr<Value> mapped =
-          mapReducedTensor(rewriter, op.getLoc(), result,
-                           [&](OpBuilder &builder, Location loc, Value value) {
-                             ScalarBuilder scalar(builder, loc);
-                             return isUnsignedInteger(sourceElementType)
-                                        ? scalar.udiv(value, typedCount)
-                                        : scalar.sdiv(value, typedCount);
-                           });
-      assert(succeeded(mapped) && "result shape is available");
-      result = *mapped;
-    }
-
-    rewriter.replaceOp(op, result);
-    return success();
-  }
-};
-
-class ReduceUDOpConversion : public OpConversionPattern<ReduceUDOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(ReduceUDOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    SmallVector<int64_t> dimensions =
-        llvm::to_vector_of<int64_t>(op.getDimensions());
-    llvm::sort(dimensions);
-    auto inputType =
-        cast<RankedTensorType>(adaptor.getInputs().front().getType());
-    SmallVector<int64_t> shape(inputType.getShape());
-    for (Value input : adaptor.getInputs()) {
-      auto type = cast<RankedTensorType>(input.getType());
-      for (auto [dim, size] : llvm::enumerate(type.getShape())) {
+    // Refine compatible input shapes to the same static dimensions for Linalg.
+    SmallVector<Value> inputs(operands);
+    SmallVector<int64_t> shape(
+        cast<RankedTensorType>(inputs.front().getType()).getShape());
+    for (Value input : llvm::drop_begin(inputs)) {
+      for (auto [dim, size] : llvm::enumerate(
+               cast<RankedTensorType>(input.getType()).getShape())) {
         if (!ShapedType::isDynamic(size)) {
           shape[dim] = size;
         }
       }
     }
-
-    // The verifier merges compatible input shapes to determine the result
-    // shape. Linalg requires identical input shapes, including dynamic dims.
-    SmallVector<Value> inputs;
-    for (Value input : adaptor.getInputs()) {
+    for (Value &input : inputs) {
       auto type = cast<RankedTensorType>(input.getType());
       auto mergedType = type.clone(shape);
       if (type != mergedType) {
         input =
             tensor::CastOp::create(rewriter, op.getLoc(), mergedType, input);
       }
-      inputs.push_back(input);
     }
-    ReductionShape reduced = getReductionShape(
-        rewriter, op.getLoc(), cast<RankedTensorType>(inputs.front().getType()),
-        inputs.front(), dimensions);
-
     SmallVector<Value> inits;
-    for (auto [result, identityAttr] :
-         llvm::zip_equal(op.getResults(), op.getIdentity())) {
+    SmallVector<Type> resultTypes;
+    for (OpResult result : op->getResults()) {
       auto resultType = cast<RankedTensorType>(
           getTypeConverter()->convertType(result.getType()));
-      Value init = createReductionInit(
-          rewriter, op.getLoc(), resultType, reduced, [&]() -> Value {
-            return arith::ConstantOp::create(
-                rewriter, op.getLoc(),
-                getSignlessConstant(cast<TypedAttr>(identityAttr)));
-          });
+      SmallVector<Value> dynamicSizes = getDynamicResultSizes(
+          rewriter, op, resultType, inputs, result.getResultNumber());
+      Value empty = tensor::EmptyOp::create(rewriter, op.getLoc(), resultType,
+                                            dynamicSizes);
+      Value identity;
+      if (builtin) {
+        identity =
+            createReductionIdentity(rewriter, op.getLoc(), sourceType, mode);
+      } else {
+        identity = arith::ConstantOp::create(
+            rewriter, op.getLoc(),
+            getSignlessConstant(cast<TypedAttr>(
+                custom.getIdentity()[result.getResultNumber()])));
+      }
+      Value init =
+          linalg::FillOp::create(rewriter, op.getLoc(), identity, empty)
+              .getResult(0);
       inits.push_back(init);
+      resultTypes.push_back(resultType);
     }
-
-    auto reduce = linalg::ReduceOp::create(
-        rewriter, op.getLoc(), inputs, inits, dimensions,
+    auto reduce = linalg::GenericOp::create(
+        rewriter, op.getLoc(), resultTypes, inputs, inits,
+        op.getIterationDomainMaps(), op.getLoopIteratorTypes(),
         [&](OpBuilder &builder, Location loc, ValueRange args) {
-          Block &source = op.getBody().front();
-          unsigned resultCount = op.getNumResults();
-          IRMapping mapping;
-          for (unsigned i = 0; i < resultCount; ++i) {
-            mapping.map(source.getArgument(i), args[resultCount + i]);
-            mapping.map(source.getArgument(resultCount + i), args[i]);
+          SmallVector<Value> yielded;
+          if (builtin) {
+            Value result = buildReductionScalar(
+                builder, loc, mode, args[0], args[1],
+                builtin.getInput().getType().getElementType());
+            yielded.push_back(result);
+          } else {
+            Block &source = custom.getBody().front();
+            unsigned count = custom.getNumResults();
+            IRMapping mapping;
+            mapping.map(source.getArguments().take_front(count),
+                        args.drop_front(count));
+            mapping.map(source.getArguments().drop_front(count),
+                        args.take_front(count));
+            for (Operation &nested : source.without_terminator()) {
+              builder.clone(nested, mapping);
+            }
+            for (Value value : source.getTerminator()->getOperands()) {
+              yielded.push_back(mapping.lookup(value));
+            }
           }
-          for (Operation &nested : source.without_terminator()) {
-            builder.clone(nested, mapping);
-          }
-          auto yield = cast<YieldOp>(source.getTerminator());
-          SmallVector<Value> yielded =
-              llvm::map_to_vector(yield.getOperands(), [&](Value value) {
-                return mapping.lookup(value);
-              });
           linalg::YieldOp::create(builder, loc, yielded);
         });
-
-    SmallVector<Value> replacements;
-    for (auto [index, result] : llvm::enumerate(op.getResults())) {
-      auto resultType = cast<RankedTensorType>(
-          getTypeConverter()->convertType(result.getType()));
-      Value resultValue = broadcastReductionResult(
-          rewriter, op.getLoc(), resultType, inputs.front(),
-          reduce.getResult(index), dimensions);
-      replacements.push_back(resultValue);
+    SmallVector<Value> results(reduce.getResults());
+    if (mode == ReductionMode::norm2 || mode == ReductionMode::avg) {
+      Value divisor;
+      if (mode == ReductionMode::avg) {
+        Value count = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 1);
+        for (int64_t dimension : op.getReductionDims()) {
+          Value extent =
+              getDim(rewriter, op.getLoc(), inputs.front(), dimension);
+          count = arith::MulIOp::create(rewriter, op.getLoc(), count, extent);
+        }
+        ScalarBuilder scalar(rewriter, op.getLoc());
+        divisor = scalar.scast(count, sourceType);
+      }
+      auto resultType = cast<RankedTensorType>(results.front().getType());
+      FailureOr<Value> empty =
+          createEmptyTensor(rewriter, op.getLoc(), resultType, results.front());
+      assert(succeeded(empty) && "result supplies its own dynamic dimensions");
+      results.front() = createParallelGeneric(
+          rewriter, op.getLoc(), ValueRange{results.front()}, *empty,
+          [&](OpBuilder &builder, Location loc, ValueRange args) {
+            ScalarBuilder scalar(builder, loc);
+            if (mode == ReductionMode::norm2) {
+              return scalar.sqrt(args.front());
+            }
+            return isUnsignedInteger(sourceType)
+                       ? scalar.udiv(args.front(), divisor)
+                       : scalar.sdiv(args.front(), divisor);
+          });
     }
-    rewriter.replaceOp(op, replacements);
+    rewriter.replaceOp(op, results);
     return success();
   }
 };
 
-// Dynamic batch dimensions can be either unit or full-sized at runtime. Expand
-// them before the contraction so its affine maps need no runtime conditionals.
-static Value broadcastContractionInput(OpBuilder &builder, Location loc,
-                                       Value input, AffineMap inputMap,
-                                       RankedTensorType resultType,
-                                       ArrayRef<int64_t> resultPositions,
-                                       unsigned numBatchDims,
-                                       ArrayRef<Value> resultExtents) {
-  auto inputType = cast<RankedTensorType>(input.getType());
-  SmallVector<int64_t> shape(inputType.getShape());
-  SmallVector<int64_t> batchPositions(inputType.getRank(), -1);
-  for (auto [dim, expr] : llvm::enumerate(inputMap.getResults())) {
-    int64_t resultDim =
-        resultPositions[cast<AffineDimExpr>(expr).getPosition()];
-    if (resultDim >= 0 && resultDim < numBatchDims &&
-        inputType.isDynamicDim(dim)) {
-      batchPositions[dim] = resultDim;
-      shape[dim] = resultType.getDimSize(resultDim);
-    }
-  }
-  if (llvm::all_of(batchPositions, [](int64_t dim) { return dim < 0; })) {
-    return input;
-  }
-
-  Value one = arith::ConstantIndexOp::create(builder, loc, 1);
-  SmallVector<Value> dynamicSizes;
-  SmallVector<Value> isUnit(inputType.getRank());
-  for (auto [dim, size] : llvm::enumerate(shape)) {
-    if (batchPositions[dim] >= 0) {
-      Value extent = getDim(builder, loc, input, dim);
-      isUnit[dim] = arith::CmpIOp::create(
-          builder, loc, arith::CmpIPredicate::eq, extent, one);
-      if (ShapedType::isDynamic(size)) {
-        dynamicSizes.push_back(resultExtents[batchPositions[dim]]);
-      }
-    } else if (ShapedType::isDynamic(size)) {
-      Value extent = getDim(builder, loc, input, dim);
-      dynamicSizes.push_back(extent);
-    }
-  }
-  auto broadcastType = RankedTensorType::get(shape, inputType.getElementType(),
-                                             inputType.getEncoding());
-  return tensor::GenerateOp::create(
-      builder, loc, broadcastType, dynamicSizes,
-      [&](OpBuilder &bodyBuilder, Location bodyLoc, ValueRange indices) {
-        Value zero = arith::ConstantIndexOp::create(bodyBuilder, bodyLoc, 0);
-        SmallVector<Value> sourceIndices(indices);
-        for (auto [dim, predicate] : llvm::enumerate(isUnit)) {
-          if (predicate) {
-            sourceIndices[dim] = arith::SelectOp::create(
-                bodyBuilder, bodyLoc, predicate, zero, indices[dim]);
-          }
-        }
-        Value element = tensor::ExtractOp::create(bodyBuilder, bodyLoc, input,
-                                                  sourceIndices);
-        tensor::YieldOp::create(bodyBuilder, bodyLoc, element);
-      });
-}
-
-class ContractionOpConversion : public OpConversionPattern<ContractionOp> {
+template <typename OpTy>
+class ContractionOpConversion : public OpConversionPattern<OpTy> {
 public:
-  using OpConversionPattern::OpConversionPattern;
+  using OpConversionPattern<OpTy>::OpConversionPattern;
+  using typename OpConversionPattern<OpTy>::OpAdaptor;
 
   LogicalResult
-  matchAndRewrite(ContractionOp op, OpAdaptor adaptor,
+  matchAndRewrite(OpTy op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto resultType =
-        cast<RankedTensorType>(getTypeConverter()->convertType(op.getType()));
+    auto resultType = cast<RankedTensorType>(
+        this->getTypeConverter()->convertType(op.getType()));
     Value inputs[] = {adaptor.getA(), adaptor.getB()};
     RankedTensorType inputTypes[] = {op.getA().getType(), op.getB().getType()};
-    if (inputTypes[0].getElementType() != inputTypes[1].getElementType()) {
+    if (std::is_same_v<OpTy, ContractionOp> &&
+        inputTypes[0].getElementType() != inputTypes[1].getElementType()) {
       return rewriter.notifyMatchFailure(
           op, "contraction inputs must have the same element type");
     }
 
-    SmallVector<AffineMap> maps{op.getLhsIndexingMap(), op.getRhsIndexingMap(),
-                                op.getResultIndexingMap()};
-    unsigned numDims = maps[2].getNumDims();
-    unsigned numBatchDims = op.getNumBatchDims();
-    SmallVector<int64_t> inputPositions[2] = {
-        SmallVector<int64_t>(numDims, -1), SmallVector<int64_t>(numDims, -1)};
-    for (unsigned input = 0; input < 2; ++input) {
-      for (auto [dim, expr] : llvm::enumerate(maps[input].getResults())) {
-        inputPositions[input][cast<AffineDimExpr>(expr).getPosition()] = dim;
-      }
+    SmallVector<AffineMap> maps = op.getIterationDomainMaps();
+    if (op.getAcc()) {
+      maps.erase(maps.begin() + 2);
     }
-    SmallVector<int64_t> resultPositions(numDims, -1);
-    SmallVector<utils::IteratorType> iterators(numDims,
-                                               utils::IteratorType::reduction);
-    SmallVector<Value> resultExtents(resultType.getRank());
-    SmallVector<Value> dynamicSizes;
-    for (auto [dim, expr] : llvm::enumerate(maps[2].getResults())) {
-      unsigned domainDim = cast<AffineDimExpr>(expr).getPosition();
-      resultPositions[domainDim] = dim;
-      iterators[domainDim] = utils::IteratorType::parallel;
-      if (!resultType.isDynamicDim(dim)) {
-        continue;
-      }
-      int64_t aDim = inputPositions[0][domainDim];
-      int64_t bDim = inputPositions[1][domainDim];
-      Value extent;
-      if (aDim < 0 || (bDim >= 0 && inputTypes[0].getDimSize(aDim) == 1)) {
-        extent = getDim(rewriter, op.getLoc(), inputs[1], bDim);
-      } else if (bDim < 0 || inputTypes[1].getDimSize(bDim) == 1) {
-        extent = getDim(rewriter, op.getLoc(), inputs[0], aDim);
-      } else {
-        Value aExtent = getDim(rewriter, op.getLoc(), inputs[0], aDim);
-        Value bExtent = getDim(rewriter, op.getLoc(), inputs[1], bDim);
-        Value one = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 1);
-        Value isUnit = arith::CmpIOp::create(
-            rewriter, op.getLoc(), arith::CmpIPredicate::eq, aExtent, one);
-        // Select rather than max: broadcasting a unit extent to zero is empty.
-        extent = arith::SelectOp::create(rewriter, op.getLoc(), isUnit, bExtent,
-                                         aExtent);
-      }
-      resultExtents[dim] = extent;
-      dynamicSizes.push_back(extent);
-    }
+    SmallVector<Value> dynamicSizes =
+        getDynamicResultSizes(rewriter, op, resultType, inputs);
 
     Value init = adaptor.getAcc();
     if (!init) {
@@ -1263,25 +1090,25 @@ public:
       init = linalg::FillOp::create(rewriter, op.getLoc(), zero, *empty)
                  .getResult(0);
     }
-    for (unsigned input = 0; input < 2; ++input) {
-      inputs[input] = broadcastContractionInput(
-          rewriter, op.getLoc(), inputs[input], maps[input], resultType,
-          resultPositions, numBatchDims, resultExtents);
-      SmallVector<AffineExpr> expressions(maps[input].getResults());
-      for (auto [dim, expr] : llvm::enumerate(expressions)) {
-        int64_t resultDim =
-            resultPositions[cast<AffineDimExpr>(expr).getPosition()];
-        if (resultDim >= 0 && resultDim < numBatchDims &&
-            inputTypes[input].getDimSize(dim) == 1) {
-          expressions[dim] = rewriter.getAffineConstantExpr(0);
+    if constexpr (std::is_same_v<OpTy, MatmulOp>) {
+      // Named matmuls support at most one batch dimension and floating-point
+      // accumulation. Integer MMA requires the scalar saturation semantics.
+      if (!isa<IntegerType>(inputTypes[0].getElementType()) &&
+          !isa<IntegerType>(resultType.getElementType()) &&
+          resultType.getRank() <= 3) {
+        if (resultType.getRank() == 2) {
+          rewriter.replaceOpWithNewOp<linalg::MatmulOp>(op, ValueRange(inputs),
+                                                        ValueRange{init});
+        } else {
+          rewriter.replaceOpWithNewOp<linalg::BatchMatmulOp>(
+              op, ValueRange(inputs), ValueRange{init});
         }
+        return success();
       }
-      maps[input] =
-          AffineMap::get(numDims, 0, expressions, rewriter.getContext());
     }
     auto generic = linalg::GenericOp::create(
         rewriter, op.getLoc(), TypeRange{resultType}, ValueRange(inputs),
-        ValueRange{init}, maps, iterators,
+        ValueRange{init}, maps, op.getLoopIteratorTypes(),
         [&](OpBuilder &builder, Location loc, ValueRange args) {
           Value sum = buildMmaScalar(builder, loc, args[0], args[1], args[2],
                                      inputTypes[0].getElementType(),
@@ -1293,110 +1120,16 @@ public:
   }
 };
 
-class MatmulOpConversion : public OpConversionPattern<MatmulOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(MatmulOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto resultType =
-        cast<RankedTensorType>(getTypeConverter()->convertType(op.getType()));
-    Value init = adaptor.getAcc();
-    if (!init) {
-      SmallVector<Value> dynamicSizes;
-      auto aType = cast<RankedTensorType>(adaptor.getA().getType());
-      auto bType = cast<RankedTensorType>(adaptor.getB().getType());
-      for (auto [unsignedDim, size] : llvm::enumerate(resultType.getShape())) {
-        if (!ShapedType::isDynamic(size)) {
-          continue;
-        }
-        int64_t dim = static_cast<int64_t>(unsignedDim);
-        Value source;
-        int64_t sourceDim;
-        if (dim == resultType.getRank() - 2) {
-          source = adaptor.getA();
-          sourceDim = aType.getRank() - 2;
-        } else if (dim == resultType.getRank() - 1) {
-          source = adaptor.getB();
-          sourceDim = bType.getRank() - 1;
-        } else {
-          source = adaptor.getA();
-          sourceDim = dim;
-        }
-        dynamicSizes.push_back(
-            getDim(rewriter, op.getLoc(), source, sourceDim));
-      }
-      FailureOr<Value> empty =
-          createEmptyTensor(rewriter, op.getLoc(), resultType, dynamicSizes);
-      assert(succeeded(empty) && "constructed all dynamic dimensions");
-      ScalarBuilder scalar(rewriter, op.getLoc());
-      Value zero = scalar.constant(resultType.getElementType(), 0);
-      init = linalg::FillOp::create(rewriter, op.getLoc(), zero, *empty)
-                 .getResult(0);
-    }
-
-    Type inputElementType = op.getA().getType().getElementType();
-    if (isa<IntegerType>(inputElementType) ||
-        isa<IntegerType>(resultType.getElementType()) ||
-        resultType.getRank() > 3) {
-      // Named matmul supports at most one batch dimension and uses wrapping
-      // integer addition. Use a scalar region for higher ranks and MMA's
-      // signed saturating accumulator.
-      unsigned rank = resultType.getRank();
-      SmallVector<AffineExpr> dims;
-      for (unsigned i = 0; i <= rank; ++i) {
-        dims.push_back(rewriter.getAffineDimExpr(i));
-      }
-      SmallVector<AffineExpr> aDims(dims.begin(), dims.begin() + rank - 1);
-      aDims.push_back(dims[rank]);
-      SmallVector<AffineExpr> bDims(dims.begin(), dims.begin() + rank - 2);
-      bDims.append({dims[rank], dims[rank - 1]});
-      SmallVector<AffineMap> maps{
-          AffineMap::get(rank + 1, 0, aDims, rewriter.getContext()),
-          AffineMap::get(rank + 1, 0, bDims, rewriter.getContext()),
-          AffineMap::get(rank + 1, 0, ArrayRef(dims).take_front(rank),
-                         rewriter.getContext())};
-      SmallVector<utils::IteratorType> iterators(rank,
-                                                 utils::IteratorType::parallel);
-      iterators.push_back(utils::IteratorType::reduction);
-      auto matmul = linalg::GenericOp::create(
-          rewriter, op.getLoc(), TypeRange{resultType},
-          ValueRange{adaptor.getA(), adaptor.getB()}, ValueRange{init}, maps,
-          iterators, [&](OpBuilder &builder, Location loc, ValueRange args) {
-            Value sum = buildMmaScalar(builder, loc, args[0], args[1], args[2],
-                                       inputElementType,
-                                       op.getB().getType().getElementType());
-            linalg::YieldOp::create(builder, loc, sum);
-          });
-      rewriter.replaceOp(op, matmul.getResults());
-      return success();
-    }
-
-    if (resultType.getRank() == 2) {
-      auto matmul = linalg::MatmulOp::create(
-          rewriter, op.getLoc(), ValueRange{adaptor.getA(), adaptor.getB()},
-          ValueRange{init});
-      rewriter.replaceOp(op, matmul.getResults());
-      return success();
-    }
-    auto matmul = linalg::BatchMatmulOp::create(
-        rewriter, op.getLoc(), ValueRange{adaptor.getA(), adaptor.getB()},
-        ValueRange{init});
-    rewriter.replaceOp(op, matmul.getResults());
-    return success();
-  }
-};
-
 using SupportedPointwiseOps =
     std::tuple<AbsOp, AddOp, AddSquareOp, Atan2Op, BinarySelectOp, CeilOp,
-               CmpOp, CosOp, DivOp, EluBwdOp, EluFwdOp, ErfOp, ExpOp, FloorOp,
-               GeluApproxTanhBwdOp, GeluApproxTanhFwdOp, GeluBwdOp, GeluFwdOp,
-               LogOp, LogicalAndOp, LogicalNotOp, LogicalOrOp, MaxOp, MinOp,
-               ModOp, MulOp, NegOp, PowOp, ReciprocalOp, ReluBwdOp, ReluFwdOp,
-               RemOp, RsqrtOp, SigmoidBwdOp, SigmoidFwdOp, SinOp, SoftplusBwdOp,
-               SoftplusFwdOp, SqrtOp, SubOp, SwishBwdOp, SwishFwdOp, TanOp,
-               TanhBwdOp, TanhFwdOp, ConvertOp>;
+               CmpOp, CosOp, CoshOp, DivOp, EluBwdOp, EluFwdOp, ErfOp, ExpOp,
+               Exp2Op, FloorOp, FmaOp, GeluApproxTanhBwdOp, GeluApproxTanhFwdOp,
+               GeluBwdOp, GeluFwdOp, LogOp, Log2Op, AndOp, LogicalNotOp, OrOp,
+               MaxOp, MinOp, ModOp, MulOp, MulHighOp, NegOp, NegIOp, PowOp,
+               ReciprocalOp, ReluBwdOp, ReluFwdOp, RemOp, RsqrtOp, SigmoidBwdOp,
+               SigmoidFwdOp, SinOp, SinhOp, SoftplusBwdOp, SoftplusFwdOp,
+               SqrtOp, SubOp, SwishBwdOp, SwishFwdOp, TanOp, TanhBwdOp,
+               TanhFwdOp, ConvertOp, XorOp, ShiftLeftOp, ShiftRightOp>;
 
 template <typename... OpTys>
 void addPointwisePatterns(RewritePatternSet &patterns,
@@ -1450,13 +1183,13 @@ public:
                             static_cast<SupportedPointwiseOps *>(nullptr));
 
     RewritePatternSet patterns(context);
-    patterns
-        .add<GraphOpConversion, ResultsOpConversion, ConstantOpConversion,
-             DimOpConversion, SplatOpConversion, BroadcastOpConversion,
-             ReshapeOpConversion, TransposeOpConversion, SliceOpConversion,
-             IotaOpConversion, MatmulOpConversion, ContractionOpConversion,
-             ConcatenateOpConversion, ReduceOpConversion, ReduceUDOpConversion>(
-            typeConverter, context);
+    patterns.add<GraphOpConversion, ResultsOpConversion, ConstantOpConversion,
+                 DimOpConversion, SplatOpConversion, BroadcastOpConversion,
+                 ReshapeOpConversion, TransposeOpConversion, SliceOpConversion,
+                 IotaOpConversion, ContractionOpConversion<MatmulOp>,
+                 ContractionOpConversion<ContractionOp>,
+                 ConcatenateOpConversion, ReductionOpConversion>(typeConverter,
+                                                                 context);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
         patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);

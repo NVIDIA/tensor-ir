@@ -5,6 +5,7 @@
 // RUN:   --pass-pipeline='builtin.module(convert-tensor-to-linalg,convert-tensor-to-linalg)' \
 // RUN:   | tensor_ir-opt --split-input-file --mlir-print-local-scope \
 // RUN:   | FileCheck %s --implicit-check-not=nv_tensor_ir. --implicit-check-not=unrealized_conversion_cast
+// RUN: tensor_ir-opt %s --split-input-file --tir-linalg-pipeline -o /dev/null
 
 // CHECK-LABEL: func.func @add_si32(
 nv_tensor_ir.graph @add_si32(%a: tensor<2xsi32>, %b: tensor<2xsi32>) -> tensor<2xsi32> {
@@ -391,38 +392,59 @@ nv_tensor_ir.graph @abs_si32(%a: tensor<2xsi32>) -> tensor<2xsi32> {
 // -----
 
 // CHECK-LABEL: func.func @reduce_min_si32(
-// CHECK-SAME: tensor<2x3xi32>
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3xi32>
 nv_tensor_ir.graph @reduce_min_si32(%a: tensor<2x3xsi32>) -> tensor<2x1xsi32> {
   %r = reduce(%a)<dimensions = [1], reduction_mode = <min>> : tensor<2x3xsi32> -> tensor<2x1xsi32>
   results %r : tensor<2x1xsi32>
 }
-// CHECK: arith.constant 2147483647 : i32
-// CHECK: linalg.reduce
-// CHECK: arith.minsi
+// CHECK: %[[ID:.*]] = arith.constant 2147483647 : i32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : i32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[A]] : tensor<2x3xi32>) outs(%[[INIT]] : tensor<2x1xi32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: i32, %[[ACC:[^:]+]]: i32):
+// CHECK: %[[SCALAR:.*]] = arith.minsi %[[ACC]], %[[IN]] : i32
+// CHECK: linalg.yield %[[SCALAR]] : i32
+// CHECK: return %[[R]] : tensor<2x1xi32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_max_si32(
-// CHECK-SAME: tensor<2x3xi32>
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3xi32>
 nv_tensor_ir.graph @reduce_max_si32(%a: tensor<2x3xsi32>) -> tensor<2x1xsi32> {
   %r = reduce(%a)<dimensions = [1], reduction_mode = <max>> : tensor<2x3xsi32> -> tensor<2x1xsi32>
   results %r : tensor<2x1xsi32>
 }
-// CHECK: arith.constant -2147483648 : i32
-// CHECK: linalg.reduce
-// CHECK: arith.maxsi
+// CHECK: %[[ID:.*]] = arith.constant -2147483648 : i32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : i32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[A]] : tensor<2x3xi32>) outs(%[[INIT]] : tensor<2x1xi32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: i32, %[[ACC:[^:]+]]: i32):
+// CHECK: %[[SCALAR:.*]] = arith.maxsi %[[ACC]], %[[IN]] : i32
+// CHECK: linalg.yield %[[SCALAR]] : i32
+// CHECK: return %[[R]] : tensor<2x1xi32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_avg_si32(
-// CHECK-SAME: tensor<2x3xi32>
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3xi32>
 nv_tensor_ir.graph @reduce_avg_si32(%a: tensor<2x3xsi32>) -> tensor<2x1xsi32> {
   %r = reduce(%a)<dimensions = [1], reduction_mode = <avg>> : tensor<2x3xsi32> -> tensor<2x1xsi32>
   results %r : tensor<2x1xsi32>
 }
-// CHECK: arith.constant 0 : i32
-// CHECK: linalg.reduce
-// CHECK: arith.divsi
+// CHECK: %[[ID:.*]] = arith.constant 0 : i32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : i32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[A]] : tensor<2x3xi32>) outs(%[[INIT]] : tensor<2x1xi32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: i32, %[[ACC:[^:]+]]: i32):
+// CHECK: %[[SCALAR:.*]] = arith.addi %[[ACC]], %[[IN]] : i32
+// CHECK: linalg.yield %[[SCALAR]] : i32
+// CHECK: %[[COUNT:.*]] = arith.index_cast
+// CHECK: %[[POST:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[R]] : tensor<2x1xi32>)
+// CHECK: ^bb0(%[[REDUCED:[^:]+]]: i32, %{{[^:]+}}: i32):
+// CHECK: %[[AVG:.*]] = arith.divsi %[[REDUCED]], %[[COUNT]] : i32
+// CHECK: linalg.yield %[[AVG]] : i32
+// CHECK: return %[[POST]] : tensor<2x1xi32>
 
 // -----
 
@@ -465,38 +487,59 @@ nv_tensor_ir.graph @abs_ui32(%a: tensor<2xui32>) -> tensor<2xui32> {
 // -----
 
 // CHECK-LABEL: func.func @reduce_min_ui32(
-// CHECK-SAME: tensor<2x3xi32>
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3xi32>
 nv_tensor_ir.graph @reduce_min_ui32(%a: tensor<2x3xui32>) -> tensor<2x1xui32> {
   %r = reduce(%a)<dimensions = [1], reduction_mode = <min>> : tensor<2x3xui32> -> tensor<2x1xui32>
   results %r : tensor<2x1xui32>
 }
-// CHECK: arith.constant -1 : i32
-// CHECK: linalg.reduce
-// CHECK: arith.minui
+// CHECK: %[[ID:.*]] = arith.constant -1 : i32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : i32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[A]] : tensor<2x3xi32>) outs(%[[INIT]] : tensor<2x1xi32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: i32, %[[ACC:[^:]+]]: i32):
+// CHECK: %[[SCALAR:.*]] = arith.minui %[[ACC]], %[[IN]] : i32
+// CHECK: linalg.yield %[[SCALAR]] : i32
+// CHECK: return %[[R]] : tensor<2x1xi32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_max_ui32(
-// CHECK-SAME: tensor<2x3xi32>
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3xi32>
 nv_tensor_ir.graph @reduce_max_ui32(%a: tensor<2x3xui32>) -> tensor<2x1xui32> {
   %r = reduce(%a)<dimensions = [1], reduction_mode = <max>> : tensor<2x3xui32> -> tensor<2x1xui32>
   results %r : tensor<2x1xui32>
 }
-// CHECK: arith.constant 0 : i32
-// CHECK: linalg.reduce
-// CHECK: arith.maxui
+// CHECK: %[[ID:.*]] = arith.constant 0 : i32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : i32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[A]] : tensor<2x3xi32>) outs(%[[INIT]] : tensor<2x1xi32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: i32, %[[ACC:[^:]+]]: i32):
+// CHECK: %[[SCALAR:.*]] = arith.maxui %[[ACC]], %[[IN]] : i32
+// CHECK: linalg.yield %[[SCALAR]] : i32
+// CHECK: return %[[R]] : tensor<2x1xi32>
 
 // -----
 
 // CHECK-LABEL: func.func @reduce_avg_ui32(
-// CHECK-SAME: tensor<2x3xi32>
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2x3xi32>
 nv_tensor_ir.graph @reduce_avg_ui32(%a: tensor<2x3xui32>) -> tensor<2x1xui32> {
   %r = reduce(%a)<dimensions = [1], reduction_mode = <avg>> : tensor<2x3xui32> -> tensor<2x1xui32>
   results %r : tensor<2x1xui32>
 }
-// CHECK: arith.constant 0 : i32
-// CHECK: linalg.reduce
-// CHECK: arith.divui
+// CHECK: %[[ID:.*]] = arith.constant 0 : i32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : i32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[A]] : tensor<2x3xi32>) outs(%[[INIT]] : tensor<2x1xi32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: i32, %[[ACC:[^:]+]]: i32):
+// CHECK: %[[SCALAR:.*]] = arith.addi %[[ACC]], %[[IN]] : i32
+// CHECK: linalg.yield %[[SCALAR]] : i32
+// CHECK: %[[COUNT:.*]] = arith.index_cast
+// CHECK: %[[POST:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[R]] : tensor<2x1xi32>)
+// CHECK: ^bb0(%[[REDUCED:[^:]+]]: i32, %{{[^:]+}}: i32):
+// CHECK: %[[AVG:.*]] = arith.divui %[[REDUCED]], %[[COUNT]] : i32
+// CHECK: linalg.yield %[[AVG]] : i32
+// CHECK: return %[[POST]] : tensor<2x1xi32>
 
 // -----
 
@@ -592,6 +635,7 @@ nv_tensor_ir.graph @signed_batch_matmul(%a: tensor<2x1x2xsi8>, %b: tensor<2x2x1x
   results %r : tensor<2x1x1xsi32>
 }
 // CHECK: linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d3, d2)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2)>]
 // CHECK-SAME: iterator_types = ["parallel", "parallel", "parallel", "reduction"]
 // CHECK: %[[A:.*]] = arith.extsi %{{.*}} : i8 to i33
 // CHECK: %[[B:.*]] = arith.extsi %{{.*}} : i8 to i33
@@ -605,15 +649,20 @@ nv_tensor_ir.graph @signed_batch_matmul(%a: tensor<2x1x2xsi8>, %b: tensor<2x2x1x
 // -----
 
 // CHECK-LABEL: func.func @integer_reduce_drop_dimensions(
+// CHECK-SAME: %[[A:[^:]+]]: tensor<2xi32>
 nv_tensor_ir.graph @integer_reduce_drop_dimensions(%a: tensor<2xui32>) -> tensor<ui32> {
   %r = reduce(%a)<dimensions = [0], reduction_mode = <min>> : tensor<2xui32> -> tensor<ui32>
   results %r : tensor<ui32>
 }
-// CHECK: arith.constant -1 : i32
-// CHECK: linalg.reduce
-// CHECK: arith.minui
+// CHECK: %[[ID:.*]] = arith.constant -1 : i32
+// CHECK: %[[INIT:.*]] = linalg.fill ins(%[[ID]] : i32)
+// CHECK: %[[R:.*]] = linalg.generic
+// CHECK-SAME: ins(%[[A]] : tensor<2xi32>) outs(%[[INIT]] : tensor<i32>)
+// CHECK: ^bb0(%[[IN:[^:]+]]: i32, %[[ACC:[^:]+]]: i32):
+// CHECK: %[[SCALAR:.*]] = arith.minui %[[ACC]], %[[IN]] : i32
+// CHECK: linalg.yield %[[SCALAR]] : i32
 // CHECK-NOT: linalg.broadcast
-// CHECK: return %{{.*}} : tensor<i32>
+// CHECK: return %[[R]] : tensor<i32>
 
 // -----
 
@@ -647,3 +696,123 @@ nv_tensor_ir.graph @pow_ui8(%a: tensor<2xui8>, %b: tensor<2xui8>) -> tensor<2xui
 // CHECK: arith.extui {{.*}} : i8 to i16
 // CHECK: math.ipowi {{.*}} : i16
 // CHECK: arith.trunci {{.*}} : i16 to i8
+
+// -----
+
+// CHECK-LABEL: func.func @integer_si8
+// CHECK: arith.subi
+// CHECK: arith.andi
+// CHECK: arith.ori
+// CHECK: arith.xori
+// CHECK: arith.minui
+// CHECK: arith.shli
+// CHECK: arith.cmpi ult
+// CHECK: arith.select
+// CHECK: arith.minui
+// CHECK: arith.shrsi
+nv_tensor_ir.graph @integer_si8(%a: tensor<2xsi8>, %b: tensor<2xsi8>) -> tensor<2xsi8> {
+  %0 = negi %a : tensor<2xsi8>
+  %1 = and %0, %b : tensor<2xsi8>
+  %2 = or %1, %b : tensor<2xsi8>
+  %3 = xor %2, %b : tensor<2xsi8>
+  %4 = shift_left %3, %b : tensor<2xsi8>
+  %5 = shift_right %4, %b : tensor<2xsi8>
+  results %5 : tensor<2xsi8>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @integer_ui64
+// CHECK: arith.subi
+// CHECK: arith.andi
+// CHECK: arith.ori
+// CHECK: arith.xori
+// CHECK: arith.minui
+// CHECK: arith.shli
+// CHECK: arith.cmpi ult
+// CHECK: arith.select
+// CHECK: arith.minui
+// CHECK: arith.shrui
+nv_tensor_ir.graph @integer_ui64(%a: tensor<2xui64>, %b: tensor<2xui64>) -> tensor<2xui64> {
+  %0 = negi %a : tensor<2xui64>
+  %1 = and %0, %b : tensor<2xui64>
+  %2 = or %1, %b : tensor<2xui64>
+  %3 = xor %2, %b : tensor<2xui64>
+  %4 = shift_left %3, %b : tensor<2xui64>
+  %5 = shift_right %4, %b : tensor<2xui64>
+  results %5 : tensor<2xui64>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @mul_high_ui8
+// CHECK: %[[LOW:.*]], %[[HIGH:.*]] = arith.mului_extended
+// CHECK: linalg.yield %[[HIGH]]
+nv_tensor_ir.graph @mul_high_ui8(%a: tensor<2xui8>, %b: tensor<2xui8>) -> tensor<2xui8> {
+  %r = mul_high %a, %b : tensor<2xui8>
+  results %r : tensor<2xui8>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @mul_high_ui64
+// CHECK: %[[LOW:.*]], %[[HIGH:.*]] = arith.mului_extended
+// CHECK: linalg.yield %[[HIGH]]
+nv_tensor_ir.graph @mul_high_ui64(%a: tensor<2xui64>, %b: tensor<2xui64>) -> tensor<2xui64> {
+  %r = mul_high %a, %b : tensor<2xui64>
+  results %r : tensor<2xui64>
+}
+
+// -----
+
+// CHECK-LABEL: @shift_overflow
+// CHECK: arith.shli %{{.*}}, %{{.*}} : i32
+// CHECK: arith.shli %{{.*}}, %{{.*}} overflow<nsw> : i32
+// CHECK: arith.shli %{{.*}}, %{{.*}} overflow<nuw> : i32
+// CHECK: arith.shli %{{.*}}, %{{.*}} overflow<nsw, nuw> : i32
+nv_tensor_ir.graph @shift_overflow(%a: tensor<4xsi32>, %b: tensor<4xsi32>)
+    -> (tensor<4xsi32>, tensor<4xsi32>, tensor<4xsi32>, tensor<4xsi32>) {
+  %none = shift_left %a, %b : tensor<4xsi32>
+  %nsw = shift_left %a, %b overflow <no_signed_wrap> : tensor<4xsi32>
+  %nuw = shift_left %a, %b overflow <no_unsigned_wrap> : tensor<4xsi32>
+  %nw = shift_left %a, %b overflow <no_wrap> : tensor<4xsi32>
+  results %none, %nsw, %nuw, %nw : tensor<4xsi32>, tensor<4xsi32>, tensor<4xsi32>, tensor<4xsi32>
+}
+
+// -----
+
+// CHECK-LABEL: @boolean_pointwise
+// CHECK: arith.xori %{{.*}}, %{{.*}} : i1
+// CHECK: arith.mului_extended %{{.*}}, %{{.*}} : i1
+// CHECK: arith.shli %{{.*}}, %{{.*}} : i1
+// CHECK: arith.shrui %{{.*}}, %{{.*}} : i1
+nv_tensor_ir.graph @boolean_pointwise(%a: tensor<4xi1>, %b: tensor<4xi1>)
+    -> (tensor<4xi1>, tensor<4xi1>, tensor<4xi1>, tensor<4xi1>) {
+  %xor = xor %a, %b : tensor<4xi1>
+  %high = mul_high %a, %b : tensor<4xi1>
+  %left = shift_left %a, %b : tensor<4xi1>
+  %right = shift_right %a, %b : tensor<4xi1>
+  results %xor, %high, %left, %right : tensor<4xi1>, tensor<4xi1>, tensor<4xi1>, tensor<4xi1>
+}
+
+// -----
+
+// CHECK-LABEL: @integer_negation
+// CHECK: arith.subi %{{.*}}, %{{.*}} : i32
+// CHECK: arith.subi %{{.*}}, %{{.*}} overflow<nsw> : i32
+// CHECK: arith.subi %{{.*}}, %{{.*}} overflow<nsw> : i32
+nv_tensor_ir.graph @integer_negation(%x: tensor<4xsi32>) -> tensor<4xsi32> {
+  %a = negi %x : tensor<4xsi32>
+  %b = negi %a overflow <no_signed_wrap> : tensor<4xsi32>
+  %c = negi %b overflow <no_wrap> : tensor<4xsi32>
+  results %c : tensor<4xsi32>
+}
+
+// -----
+
+// CHECK-LABEL: @boolean_negation
+// CHECK: arith.subi %{{.*}}, %{{.*}} : i1
+nv_tensor_ir.graph @boolean_negation(%x: tensor<4xi1>) -> tensor<4xi1> {
+  %r = negi %x : tensor<4xi1>
+  results %r : tensor<4xi1>
+}

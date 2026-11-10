@@ -230,6 +230,268 @@ namespace {
 #include "TensorOpsCanonicalization.inc"
 } // namespace
 
+static int64_t getDimSize(Value value, int64_t dimension) {
+  return cast<RankedTensorType>(value.getType()).getDimSize(dimension);
+}
+
+/// Returns whether concatenating `inputs` along `dimension` merges to the
+/// non-concatenation extents of `outputType`.
+static bool hasConcatenatedShape(ValueRange inputs, int64_t dimension,
+                                 RankedTensorType outputType) {
+  for (int64_t dim = 0, rank = outputType.getRank(); dim < rank; ++dim) {
+    if (dim == dimension) {
+      continue;
+    }
+    int64_t merged = ShapedType::kDynamic;
+    for (Value input : inputs) {
+      FailureOr<int64_t> next =
+          mergeEqualDimensions(merged, getDimSize(input, dim));
+      if (failed(next)) {
+        return false;
+      }
+      merged = *next;
+    }
+    if (merged != outputType.getDimSize(dim)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Returns `value`'s defining slice if it has unit stride and a non-negative
+/// extent `limit - start` along `dimension`.
+static SliceOp getUnitStrideSlice(Value value, int64_t dimension) {
+  auto slice = value.getDefiningOp<SliceOp>();
+  if (!slice || slice.getStrides()[dimension] != 1 ||
+      slice.getStarts()[dimension] > slice.getLimits()[dimension]) {
+    return {};
+  }
+  return slice;
+}
+
+/// Returns whether `rhs` continues `lhs` along `dimension`: both slice the
+/// same value, `rhs` starts where `lhs` ends, and the slices are identical
+/// along every other dimension.
+static bool isAdjacentSlice(SliceOp lhs, SliceOp rhs, int64_t dimension) {
+  if (lhs.getInput() != rhs.getInput()) {
+    return false;
+  }
+  for (int64_t dim = 0, rank = lhs.getStarts().size(); dim < rank; ++dim) {
+    if (dim == dimension) {
+      if (lhs.getLimits()[dim] != rhs.getStarts()[dim]) {
+        return false;
+      }
+      continue;
+    }
+    if (lhs.getStarts()[dim] != rhs.getStarts()[dim] ||
+        lhs.getLimits()[dim] != rhs.getLimits()[dim] ||
+        lhs.getStrides()[dim] != rhs.getStrides()[dim]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+namespace {
+/// concatenate(a, concatenate(b, c), d) -> concatenate(a, b, c, d) when both
+/// concatenates use the same dimension and the flattened input count is at
+/// most 64, bounding operand growth when nested concatenates are shared.
+struct FlattenNestedConcatenates : OpRewritePattern<ConcatenateOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(ConcatenateOp op,
+                                PatternRewriter &rewriter) const override {
+    SmallVector<Value> inputs;
+    constexpr size_t maxInputs = 64;
+    bool flattened = false;
+    for (Value input : op.getInputs()) {
+      auto inner = input.getDefiningOp<ConcatenateOp>();
+      bool canFlatten = inner && inner.getDimension() == op.getDimension();
+      size_t addedInputs = canFlatten ? inner.getInputs().size() : 1;
+      if (addedInputs > maxInputs - inputs.size()) {
+        return rewriter.notifyMatchFailure(op,
+                                           "flattened input count exceeds 64");
+      }
+      if (!canFlatten) {
+        inputs.push_back(input);
+        continue;
+      }
+      llvm::append_range(inputs, inner.getInputs());
+      flattened = true;
+    }
+    if (!flattened) {
+      return rewriter.notifyMatchFailure(
+          op, "no input is a concatenate along the same dimension");
+    }
+    rewriter.replaceOpWithNewOp<ConcatenateOp>(op, op.getOutput().getType(),
+                                               inputs, op.getDimension());
+    return success();
+  }
+};
+
+/// Removes inputs whose extent along the concatenation dimension is a static
+/// zero.
+struct DropZeroExtentConcatenateInputs : OpRewritePattern<ConcatenateOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(ConcatenateOp op,
+                                PatternRewriter &rewriter) const override {
+    int64_t dimension = op.getDimension();
+    SmallVector<Value> inputs =
+        llvm::filter_to_vector(op.getInputs(), [&](Value input) {
+          return getDimSize(input, dimension) != 0;
+        });
+    if (inputs.empty()) {
+      inputs.push_back(op.getInputs().front());
+    }
+    if (inputs.size() == op.getInputs().size()) {
+      return rewriter.notifyMatchFailure(op, "no zero-extent input to drop");
+    }
+    // A dropped input may be the only one with a static extent along another
+    // dimension; dropping it would make the result type less static.
+    if (!hasConcatenatedShape(inputs, dimension, op.getOutput().getType())) {
+      return rewriter.notifyMatchFailure(
+          op, "dropped inputs determine a static result extent");
+    }
+    rewriter.replaceOpWithNewOp<ConcatenateOp>(op, op.getOutput().getType(),
+                                               inputs, dimension);
+    return success();
+  }
+};
+
+/// concatenate(slice(x, [s0, s1)), slice(x, [s1, s2))) -> slice(x, [s0, s2))
+/// for consecutive inputs that are unit-stride slices of the same value along
+/// the concatenation dimension and identical slices along every other
+/// dimension.
+struct MergeAdjacentConcatenatedSlices : OpRewritePattern<ConcatenateOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(ConcatenateOp op,
+                                PatternRewriter &rewriter) const override {
+    int64_t dimension = op.getDimension();
+    OperandRange operands = op.getInputs();
+    SmallVector<Value> inputs;
+    bool merged = false;
+    for (size_t begin = 0, size = operands.size(); begin < size;) {
+      SliceOp first = getUnitStrideSlice(operands[begin], dimension);
+      SliceOp last = first;
+      size_t end = begin + 1;
+      while (first && end < size) {
+        SliceOp next = getUnitStrideSlice(operands[end], dimension);
+        if (!next || !isAdjacentSlice(last, next, dimension)) {
+          break;
+        }
+        last = next;
+        ++end;
+      }
+      if (end == begin + 1) {
+        inputs.push_back(operands[begin]);
+        ++begin;
+        continue;
+      }
+
+      SmallVector<int64_t> limits(first.getLimits());
+      limits[dimension] = last.getLimits()[dimension];
+      RankedTensorType firstType = first.getOutput().getType();
+      SmallVector<int64_t> shape(firstType.getShape());
+      shape[dimension] = limits[dimension] - first.getStarts()[dimension];
+      Location loc = rewriter.getFusedLoc({first.getLoc(), last.getLoc()});
+      auto slice = SliceOp::create(rewriter, loc, firstType.clone(shape),
+                                   first.getInput(), first.getStarts(), limits,
+                                   first.getStrides());
+      inputs.push_back(slice.getResult());
+      merged = true;
+      begin = end;
+    }
+    if (!merged) {
+      return rewriter.notifyMatchFailure(op, "no adjacent slices to merge");
+    }
+    rewriter.replaceOpWithNewOp<ConcatenateOp>(op, op.getOutput().getType(),
+                                               inputs, dimension);
+    return success();
+  }
+};
+
+/// slice(concatenate(a, b, c)) -> slice(b) when the slice reads one input, or
+/// concatenate(slice(a), slice(b)) when it reads a strict subset of the
+/// inputs.
+struct SliceConcatenateInputs : OpRewritePattern<SliceOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(SliceOp op,
+                                PatternRewriter &rewriter) const override {
+    auto concat = op.getInput().getDefiningOp<ConcatenateOp>();
+    if (!concat) {
+      return rewriter.notifyMatchFailure(op, "input is not a concatenate");
+    }
+    int64_t dimension = concat.getDimension();
+    RankedTensorType outputType = op.getOutput().getType();
+    int64_t count = outputType.getDimSize(dimension);
+    if (count == 0) {
+      return rewriter.notifyMatchFailure(op, "slice is empty");
+    }
+    int64_t start = op.getStarts()[dimension];
+    int64_t stride = op.getStrides()[dimension];
+    // The verifier bounds `count` by `limit`, so the last selected index fits.
+    int64_t last = start + (count - 1) * stride;
+
+    struct Piece {
+      Value input;
+      int64_t start;
+      int64_t count;
+    };
+    OperandRange inputs = concat.getInputs();
+    SmallVector<Piece> pieces;
+    int64_t offset = 0;
+    for (auto [index, input] : llvm::enumerate(inputs)) {
+      if (offset > last) {
+        break;
+      }
+      // Static slice bounds within the concatenate are a precondition, so the
+      // final input holds every selected index at or after its offset even
+      // when its extent is dynamic.
+      int64_t extent = getDimSize(input, dimension);
+      bool isFinal = index + 1 == inputs.size();
+      if (ShapedType::isDynamic(extent) && !isFinal) {
+        return rewriter.notifyMatchFailure(
+            op, "a dynamic input extent precedes the end of the slice");
+      }
+      int64_t pieceLast = isFinal ? last : std::min(last, offset + extent - 1);
+      int64_t lowest = std::max(offset, start);
+      int64_t first = start + static_cast<int64_t>(
+                                  llvm::divideCeil(lowest - start, stride)) *
+                                  stride;
+      if (first <= pieceLast) {
+        pieces.push_back(
+            {input, first - offset, (pieceLast - first) / stride + 1});
+      }
+      if (!isFinal) {
+        offset += extent;
+      }
+    }
+    if (pieces.size() != 1 && pieces.size() == inputs.size()) {
+      return rewriter.notifyMatchFailure(op, "slice reads every input");
+    }
+
+    SmallVector<Value> slices;
+    for (const Piece &piece : pieces) {
+      SmallVector<int64_t> starts(op.getStarts());
+      SmallVector<int64_t> limits(op.getLimits());
+      starts[dimension] = piece.start;
+      limits[dimension] = piece.start + (piece.count - 1) * stride + 1;
+      SmallVector<int64_t> shape(outputType.getShape());
+      shape[dimension] = piece.count;
+      auto slice =
+          SliceOp::create(rewriter, op.getLoc(), outputType.clone(shape),
+                          piece.input, starts, limits, op.getStrides());
+      slices.push_back(slice.getResult());
+    }
+    if (slices.size() == 1) {
+      rewriter.replaceOp(op, slices.front());
+      return success();
+    }
+    rewriter.replaceOpWithNewOp<ConcatenateOp>(op, outputType, slices,
+                                               dimension);
+    return success();
+  }
+};
+} // namespace
 void BroadcastOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                               MLIRContext *context) {
   results.add<MergeSequentialBroadcasts>(context);
@@ -252,7 +514,13 @@ void TransposeOp::getCanonicalizationPatterns(RewritePatternSet &results,
 
 void SliceOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                           MLIRContext *context) {
-  results.add<MergeSequentialSlices>(context);
+  results.add<MergeSequentialSlices, SliceConcatenateInputs>(context);
+}
+
+void ConcatenateOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                                MLIRContext *context) {
+  results.add<FlattenNestedConcatenates, DropZeroExtentConcatenateInputs,
+              MergeAdjacentConcatenatedSlices>(context);
 }
 
 OpFoldResult ConstantOp::fold(FoldAdaptor) { return getValueAttr(); }
@@ -328,6 +596,17 @@ OpFoldResult ReduceOp::fold(FoldAdaptor) {
   auto inputType = getInput().getType();
   auto outputType = getOutput().getType();
   if (inputType != outputType) {
+    return {};
+  }
+  // A unit reduction is its input only when the mode applies no prologue or
+  // epilogue to a single element.
+  switch (getReductionMode()) {
+  case ReductionMode::add:
+  case ReductionMode::mul:
+  case ReductionMode::min:
+  case ReductionMode::max:
+    break;
+  default:
     return {};
   }
 

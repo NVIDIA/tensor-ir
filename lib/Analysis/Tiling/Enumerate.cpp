@@ -22,22 +22,32 @@ namespace mlir::nv_tensor_ir {
 namespace tiling_analysis {
 
 /// Minimum tile size (1 warp, 1 value per thread).
-constexpr int kMinTileSizeBits = 5; // 2^5 = 32
+/// 2^5 = 32
+constexpr int kMinTileSizeBits = 5;
 /// Maximum tile size (8 warps, 128 values per thread).
-constexpr int kMaxTileSizeBits = 15; // 2^15 = 32768
+/// 2^15 = 32768
+constexpr int kMaxTileSizeBits = 15;
 
 /// Minimum reduction tile size.
-constexpr int kMinReductionTileSizeBits = 5; // 2^5 = 32
+/// 2^5 = 32
+constexpr int kMinReductionTileSizeBits = 5;
 /// Maximum tile size for dynamic dimensions.
-constexpr int kMaxDynamicTileSizeBits = 6; // 2^6 = 64
+/// 2^6 = 64
+constexpr int kMaxDynamicTileSizeBits = 6;
 
 /// Tile size limits for matmul dimensions.
-constexpr int kMinLhsTileSizeBits = 4;         // 2^4 = 16
-constexpr int kMaxLhsTileSizeBits = 7;         // 2^7 = 128
-constexpr int kMinRhsTileSizeBits = 3;         // 2^3 = 8
-constexpr int kMaxRhsTileSizeBits = 8;         // 2^8 = 256
-constexpr int kMinContractionTileSizeBits = 4; // 2^4 = 16
-constexpr int kMaxContractionTileSizeBits = 8; // 2^8 = 256
+/// 2^4 = 16
+constexpr int kMinLhsTileSizeBits = 4;
+/// 2^7 = 128
+constexpr int kMaxLhsTileSizeBits = 7;
+/// 2^3 = 8
+constexpr int kMinRhsTileSizeBits = 3;
+/// 2^8 = 256
+constexpr int kMaxRhsTileSizeBits = 8;
+/// 2^4 = 16
+constexpr int kMinContractionTileSizeBits = 4;
+/// 2^8 = 256
+constexpr int kMaxContractionTileSizeBits = 8;
 
 /// ----- Dimension analysis ---------------------------------------------------
 ///
@@ -48,8 +58,10 @@ constexpr int kMaxContractionTileSizeBits = 8; // 2^8 = 256
 /// - Tensor sources count the tensors where the dimension is contiguous
 ///   (stride 1, the loads and stores can be vectorized), and where it is
 ///   broadcast (stride 0, the loaded values are reused across the tile).
-/// - Concat sources mark their concatenation dimension as non-tileable, as the
-///   evaluator requires a unit tile size for it.
+/// - Concat sources fix the tile size of their concatenation dimension to one,
+///   as the evaluator requires a unit tile size for it.
+/// - The dimensions projected out by a graph result are fixed to the size
+///   covering them (see `TilingEvaluator::getFixedTileSizes`).
 /// - Matmul sources mark the dimensions that map to the M and N dimensions of
 ///   the matmul result, based on their position in the (batch, M, N, K)
 ///   iteration space. The matmul generator tiles these groups separately.
@@ -62,12 +74,10 @@ constexpr int kMaxContractionTileSizeBits = 8; // 2^8 = 256
 /// The dimensions are then ordered by importance. The combination generators
 /// assign the bits depth-first, starting from the largest values in the first
 /// dimensions, so the order decides which dimensions get the largest tiles
-/// when the budget is limited. Non-tileable dimensions go last, and the other
+/// when the budget is limited. Fixed-size dimensions go last, and the other
 /// dimensions are ordered by the number of vectorizable and broadcast uses.
 
-/**
- * @brief Information about a dimension.
- */
+/// Information about a dimension.
 struct DimensionInfo {
   /// Dimension number in the main iteration space (-1 for reduction dims).
   int index;
@@ -78,8 +88,10 @@ struct DimensionInfo {
   /// Number of tensors where this dimension is broadcasted (stride=0).
   int broadcastedCount = 0;
 
-  /// Marks dimensions that cannot be tiled (e.g. concatenation dims).
-  bool nonTileable = false;
+  /// The tile size of a dimension that cannot be tiled (zero if unrestricted):
+  /// a unit size for concatenation dims, or the size covering the whole
+  /// dimension for dims fixed by the multi-output graph results.
+  int64_t fixedSize = 0;
 
   /// Marks dimensions that propagate to a matmul result.
   bool usedInMatmulM = false;
@@ -103,7 +115,12 @@ public:
   LogicalResult processReduction(ReductionSourceAttr reduction) override;
   LogicalResult processMatmul(MatmulSourceAttr matmul) override;
 
-  // Returns the ordered dimensions (important first).
+  /// Fixes the tile size of a dimension of the main iteration space.
+  void setFixedSize(size_t dim, int64_t size) {
+    dimensions[dim].fixedSize = size;
+  }
+
+  /// Returns the ordered dimensions (important first).
   SmallVector<DimensionInfo> getOrderedDimensions() const;
 
 private:
@@ -137,8 +154,8 @@ LogicalResult DimensionLayoutIterator::processTensor(TensorSourceAttr tensor) {
 }
 
 LogicalResult DimensionLayoutIterator::processConcat(ConcatSourceAttr concat) {
-  // Mark the concatenation dimension as non-tileable.
-  pointers[concat.getDimension()]->nonTileable = true;
+  // Fix the tile size of the concatenation dimension to one.
+  pointers[concat.getDimension()]->fixedSize = 1;
   return LayoutIterator::processConcat(concat);
 }
 
@@ -214,14 +231,14 @@ LogicalResult DimensionLayoutIterator::processMatmul(MatmulSourceAttr matmul) {
 SmallVector<DimensionInfo>
 DimensionLayoutIterator::getOrderedDimensions() const {
   // Sort the dimensions in order of importance:
-  // - Non-tileable dimensions go to the end.
+  // - Fixed-size dimensions go to the end.
   // - Vectorizable dimensions first.
   // - Broadcasted dimensions next.
   // - Otherwise, in the iteration space order.
   SmallVector<DimensionInfo> result = dimensions;
   llvm::sort(result, [](const DimensionInfo &a, const DimensionInfo &b) {
-    if (a.nonTileable != b.nonTileable) {
-      return b.nonTileable;
+    if ((a.fixedSize != 0) != (b.fixedSize != 0)) {
+      return b.fixedSize != 0;
     }
     if (a.vectorizableCount != b.vectorizableCount) {
       return a.vectorizableCount > b.vectorizableCount;
@@ -244,8 +261,8 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
   if (info.broadcastedCount > 0) {
     os << " b" << info.broadcastedCount;
   }
-  if (info.nonTileable) {
-    os << " nt";
+  if (info.fixedSize != 0) {
+    os << " f" << info.fixedSize;
   }
   os << "]";
   return os;
@@ -273,24 +290,52 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
 ///   the limits of the least important slots, when the whole space does not fit
 ///   the budget, so that the truncation does not favor the first slots only.
 
-/**
- * @brief Counts the number of combinations of bits assigned to slots.
- * @param minBits The minimum number of bits to assign.
- * @param maxBits The maximum number of bits to assign.
- * @param limits The maximum number of bits for each slot.
- */
-size_t countCombinations(int minBits, int maxBits, ArrayRef<int> limits) {
+struct SizeRange : std::pair<int, int> {
+  SizeRange(int lowerBound, int upperBound)
+      : std::pair<int, int>(lowerBound, upperBound) {}
+
+  int getLowerBound() const { return first; }
+  int getUpperBound() const { return second; }
+  int getRange() const { return second - first; }
+  bool isValid(int size) const { return size >= first && size <= second; }
+};
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const SizeRange &range) {
+  return os << range.getLowerBound() << ".." << range.getUpperBound();
+}
+
+int getMaxSize(ArrayRef<SizeRange> limits) {
+  return llvm::sum_of(llvm::map_range(
+      limits, [](const SizeRange &range) { return range.getUpperBound(); }));
+}
+
+/// Counts the number of combinations of bits assigned to slots.
+///
+/// \param minBits The minimum number of bits to assign.
+/// \param maxBits The maximum number of bits to assign.
+/// \param limits The min/max number of bits for each slot.
+size_t countCombinations(int minBits, int maxBits, ArrayRef<SizeRange> limits) {
+  // Every slot holds at least its lower bound, so only the remaining bits are
+  // distributed. There are no combinations if the lower bounds exceed the max.
+  int lowerBits = llvm::sum_of(llvm::map_range(
+      limits, [](const SizeRange &range) { return range.getLowerBound(); }));
+  maxBits -= lowerBits;
+  minBits = std::max(minBits - lowerBits, 0);
+  if (maxBits < 0) {
+    return 0;
+  }
+
   // Use dynamic programming to avoid enumerating the combinations: for each
   // bit total, count the ways to reach it as slots are added one at a time.
   // The result is the sum of the counts for totals in [minBits, maxBits].
   SmallVector<size_t> accum(maxBits + 1, 0);
   accum[0] = 1;
-  for (int limit : limits) {
+  for (const auto &limit : limits) {
     // accum[s] counts the combinations of the previous slots summing to s.
     // Add the current dimension by shifting each count by every value in
     // [0, limit], dropping sums above maxBits.
     SmallVector<size_t> next = accum;
-    for (int add = std::min(maxBits, limit); add >= 1; --add) {
+    for (int add = std::min(maxBits, limit.getRange()); add >= 1; --add) {
       for (int i = maxBits - add; i >= 0; --i) {
         next[i + add] += accum[i];
       }
@@ -300,23 +345,23 @@ size_t countCombinations(int minBits, int maxBits, ArrayRef<int> limits) {
   return llvm::sum_of(ArrayRef(accum).drop_front(minBits));
 }
 
-/**
- * @brief Generates all combinations of exact number of bits assigned to slots.
- * @param bits The number of bits to assign.
- * @param limits The maximum number of bits for each slot.
- * @param maxResults The maximum number of results to generate.
- */
+/// Generates all combinations of exact number of bits assigned to slots.
+///
+/// \param bits The number of bits to assign.
+/// \param limits The min/max number of bits for each slot.
+/// \param maxResults The maximum number of results to generate.
 SmallVector<SmallVector<int>>
-generateCombinationsExactCount(int bits, ArrayRef<int> limits,
+generateCombinationsExactCount(int bits, ArrayRef<SizeRange> limits,
                                size_t maxResults) {
   SmallVector<SmallVector<int>> result;
-  SmallVector<int> current(limits.size(), 0);
+  SmallVector<int> current = llvm::map_to_vector(
+      limits, [](const SizeRange &range) { return range.getLowerBound(); });
 
   // Calculate suffix sum for the limits, needed for early stopping.
   // Example: for input [2,3,4], the suffix sum is [7,4,0].
   SmallVector<int> suffixSum(limits.size(), 0);
   for (int i = static_cast<int>(limits.size()) - 1; i > 0; --i) {
-    suffixSum[i - 1] = suffixSum[i] + limits[i];
+    suffixSum[i - 1] = suffixSum[i] + limits[i].getRange();
   }
 
   // Recursively assign bits to slots.
@@ -332,31 +377,35 @@ generateCombinationsExactCount(int bits, ArrayRef<int> limits,
     }
     // Try all possible assignments for the current dimension.
     // Start from the higher value, as the dimensions are sorted.
-    for (int i = std::min(bits, limits[idx]);
+    int base = limits[idx].getLowerBound();
+    for (int i = std::min(bits, limits[idx].getRange());
          i >= std::max(bits - suffixSum[idx], 0); --i) {
-      current[idx] = i;
+      current[idx] = base + i;
       generate(idx + 1, bits - i);
     }
-    current[idx] = 0;
+    current[idx] = base;
   };
 
   // Start from the first index.
   assert(!limits.empty());
-  generate(0, bits);
+  int bitsLeft = bits - llvm::sum_of(current);
+  if (bitsLeft >= 0) {
+    generate(0, bitsLeft);
+  }
   return result;
 }
 
-/**
- * @brief Generates all combinations of bits assigned to slots.
- * @param minBits The minimum number of bits to assign (must be >= 0).
- * @param maxBits The maximum number of bits to assign (must be >= minBits).
- * @param limits The maximum number of bits for each slot.
- * @param maxResults The maximum number of results to generate.
- * @param descending Whether to start from the upper bound.
- */
+/// Generates all combinations of bits assigned to slots.
+///
+/// \param minBits The minimum number of bits to assign (must be >= 0).
+/// \param maxBits The maximum number of bits to assign (must be >= minBits).
+/// \param limits The min/max number of bits for each slot.
+/// \param maxResults The maximum number of results to generate.
+/// \param descending Whether to start from the upper bound.
 SmallVector<SmallVector<int>>
-generateCombinationsWithinRange(int minBits, int maxBits, ArrayRef<int> limits,
-                                size_t maxResults, bool descending) {
+generateCombinationsWithinRange(int minBits, int maxBits,
+                                ArrayRef<SizeRange> limits, size_t maxResults,
+                                bool descending) {
   SmallVector<SmallVector<int>> result;
   assert(minBits >= 0 && maxBits >= minBits);
 
@@ -371,7 +420,9 @@ generateCombinationsWithinRange(int minBits, int maxBits, ArrayRef<int> limits,
 
   // If there are no results, then the limits are too low.
   if (result.empty() && maxResults > 0) {
-    result.push_back(SmallVector<int>(limits));
+    SmallVector<int> selected =
+        llvm::map_to_vector(limits, [](auto range) { return range.second; });
+    result.push_back(selected);
   }
   return result;
 }
@@ -388,14 +439,13 @@ generateCombinationsWithinRange(int minBits, int maxBits, ArrayRef<int> limits,
 /// truncated and would only contain the combinations favoring the first slots.
 /// In case there are more than two vectorizable dimensions, this would result
 /// in missed optimization opportunities.
-SmallVector<SmallVector<int>>
-generateCombinationsBalanced(int minBits, int maxBits, ArrayRef<int> limits,
-                             size_t maxResults, bool descending,
-                             ArrayRef<DimensionInfo> dimensions) {
+SmallVector<SmallVector<int>> generateCombinationsBalanced(
+    int minBits, int maxBits, ArrayRef<SizeRange> limits, size_t maxResults,
+    bool descending, ArrayRef<DimensionInfo> dimensions) {
   // If the number of combinations is within the budget, then generate all
   // combinations (fast path).
-  auto fitsBudget = [&](ArrayRef<int> limits) {
-    return llvm::sum_of(limits) <= maxBits ||
+  auto fitsBudget = [&](ArrayRef<SizeRange> limits) {
+    return getMaxSize(limits) <= maxBits ||
            countCombinations(minBits, maxBits, limits) <= maxResults;
   };
   if (fitsBudget(limits)) {
@@ -410,11 +460,11 @@ generateCombinationsBalanced(int minBits, int maxBits, ArrayRef<int> limits,
   // Try reducing the search space by reducing the limits starting from the
   // less important dimensions. Reduce the limit on vectorizable dimensions and
   // remove the other dimensions.
-  SmallVector<int> newLimits(limits);
+  SmallVector<SizeRange> newLimits(limits);
   for (int dim = limits.size() - 1; dim >= 0; --dim) {
     int cap = dimensions[dim].vectorizableCount > 0 ? vectorizableCap : 0;
-    if (limits[dim] > cap) {
-      newLimits[dim] = cap;
+    if (limits[dim].isValid(cap)) {
+      newLimits[dim] = SizeRange(limits[dim].getLowerBound(), cap);
       if (fitsBudget(newLimits)) {
         return generateCombinationsWithinRange(minBits, maxBits, newLimits,
                                                maxResults, descending);
@@ -429,8 +479,11 @@ generateCombinationsBalanced(int minBits, int maxBits, ArrayRef<int> limits,
   // truncated.
   constexpr int kReductionExponentFactorMax = 2;
   for (int i = 1; i <= kReductionExponentFactorMax; ++i) {
-    for (int &limit : newLimits) {
-      limit = std::min(limit, vectorizableCap - i);
+    for (auto &limit : newLimits) {
+      int cap = vectorizableCap - i;
+      if (limit.isValid(cap)) {
+        limit = SizeRange(limit.getLowerBound(), cap);
+      }
     }
     if (fitsBudget(newLimits)) {
       break;
@@ -465,8 +518,10 @@ generateCombinationsBalanced(int minBits, int maxBits, ArrayRef<int> limits,
 /// - The evaluator is used to lower the upper bound while the estimated
 ///   register storage exceeds the register file, as such tiles are likely to
 ///   spill.
-/// - Non-tileable dimensions are forced to a unit tile size. They are still
-///   counted in the single wave bound, as they multiply the number of blocks.
+/// - Fixed-size dimensions are not searched: their tile size is set to the
+///   fixed size (one for non-tileable dimensions), and the bits they take are
+///   removed from the bounds. They are still counted in the single wave bound,
+///   as they multiply the number of blocks.
 ///
 /// The result budget is split evenly between the reduction tile sizes, and the
 /// tile shapes are generated by the balanced combination generator, starting
@@ -482,34 +537,48 @@ public:
   int64_t maxReductionSize = 1;
 };
 
+/// Returns the tile shape of the dimensions with a fixed size, and one for the
+/// others.
+SmallVector<int32_t> getBaseShape(ArrayRef<DimensionInfo> dimensions) {
+  SmallVector<int32_t> tileShape(dimensions.size(), 1);
+  for (const auto &dim : dimensions) {
+    if (dim.fixedSize != 0) {
+      tileShape[dim.index] = dim.fixedSize;
+    }
+  }
+  return tileShape;
+}
+
 /// Calculates the maximum number of tile size bits in each dimension.
+/// Fixed dimensions are not searched, so set the limit to zero.
 SmallVector<int> getMaxSizeBits(ArrayRef<DimensionInfo> dimensions,
-                                ArrayRef<int64_t> shape,
-                                bool markNonTileable = true) {
+                                ArrayRef<int64_t> shape) {
   SmallVector<int> result;
   for (const auto &dim : dimensions) {
     int64_t size = shape[dim.index];
-    result.push_back(size > 0 ? llvm::Log2_64_Ceil(size)
-                              : kMaxDynamicTileSizeBits);
-    if (markNonTileable && dim.nonTileable) {
-      result.back() = 0;
-    }
+    int tileSizeBits =
+        size > 0 ? llvm::Log2_64_Ceil(size) : kMaxDynamicTileSizeBits;
+    result.push_back(tileSizeBits);
   }
   return result;
 }
 
-// Calculates the maximum number of tile size bits in each dimension, taking
-// into account the estimated storage size needed for the tile.
-SmallVector<int> getMaxSizeBits(ArrayRef<DimensionInfo> dimensions,
-                                ArrayRef<int> limits, int reductionTileSizeBits,
-                                TilingEvaluator &evaluator) {
-  SmallVector<int> result(limits);
+/// Calculates the min/max number of tile size bits in each dimension, taking
+/// into account the estimated storage size needed for the tile.
+SmallVector<SizeRange> getSizeRangeBits(ArrayRef<DimensionInfo> dimensions,
+                                        ArrayRef<int> upperBounds,
+                                        int reductionTileSizeBits,
+                                        TilingEvaluator &evaluator) {
+  SmallVector<int32_t> baseShape = getBaseShape(dimensions);
+  int fixedBits = llvm::Log2_64(llvm::product_of(baseShape));
+
+  SmallVector<SizeRange> result;
   for (auto [idx, dim] : llvm::enumerate(dimensions)) {
-    if (limits[idx] > 0) {
+    if (dim.fixedSize == 0) {
       // Run the evaluator to estimate the storage size needed for the maximum
       // tile size with the given reduction tile size.
-      SmallVector<int32_t> tileShape(limits.size(), 1);
-      tileShape[dim.index] = 1 << kMaxTileSizeBits;
+      SmallVector<int32_t> tileShape = baseShape;
+      tileShape[dim.index] = 1 << (kMaxTileSizeBits - fixedBits);
       auto evalResult = evaluator.evaluate(
           *TilingConfig::get(tileShape, 1 << reductionTileSizeBits));
       if (succeeded(evalResult)) {
@@ -517,43 +586,49 @@ SmallVector<int> getMaxSizeBits(ArrayRef<DimensionInfo> dimensions,
         int64_t ratio = 1 + evalResult->registerStorageBytes /
                                 (kMaxRegistersPerSM * kRegisterSize);
         int newLimit = kMaxTileSizeBits - llvm::Log2_64_Ceil(ratio);
-        result[idx] = std::min(limits[idx], std::max(newLimit, 0));
+        result.push_back(
+            SizeRange(0, std::clamp(newLimit, 0, upperBounds[idx])));
       }
+    } else {
+      int bits = llvm::Log2_64(dim.fixedSize);
+      result.push_back(SizeRange(bits, bits));
     }
   }
   return result;
 }
 
-/**
- * @brief Generates tiling configurations for a graph with reductions.
- * @param evaluator The tiling config evaluator.
- * @param dimensions The ordered dimensions of the main iteration space.
- * @param maxResults The maximum number of results to generate.
- * @param fallbackUpperBound Maximum reduction tile size on fallback path.
- */
+/// Generates tiling configurations for a graph with reductions.
+///
+/// \param dimensions The ordered dimensions of the main iteration space.
+/// \param fallbackUpperBound Maximum reduction tile size on fallback path.
 SmallVector<TilingConfig>
 generateReductionConfigs(TilingEvaluator &evaluator,
                          ArrayRef<DimensionInfo> dimensions, size_t maxResults,
                          int fallbackUpperBound = 0) {
   SmallVector<TilingConfig> result;
 
+  // Get the base tile shape (all ones, except fixed dimensions).
+  SmallVector<int32_t> baseShape = getBaseShape(dimensions);
+  int fixedBits = llvm::Log2_64(llvm::product_of(baseShape));
+  if (fixedBits > kMaxTileSizeBits) {
+    return {}; // Fixed tile size is too large.
+  }
+
   // Calculate the maximum number of tile size bits in each dimension.
   auto shape = evaluator.getInputLayout().getShape();
-  SmallVector<int> maxTileSizeBits =
-      getMaxSizeBits(dimensions, shape, /*markNonTileable=*/false);
+  SmallVector<int> maxSizeBits = getMaxSizeBits(dimensions, shape);
 
   // Set the lower and upper bounds for the reduction tile size.
   ReductionSizeEstimator iter;
   auto iterResult = iter.dispatch(evaluator.getInputLayout());
   (void)iterResult;
 
-  int minReductionTileSizeBits = kMinReductionTileSizeBits;
   int maxReductionTileSizeBits = std::min<int>(
-      llvm::Log2_64_Ceil(iter.maxReductionSize), kMaxTileSizeBits);
+      llvm::Log2_64_Ceil(iter.maxReductionSize), kMaxTileSizeBits - fixedBits);
+  int minReductionTileSizeBits =
+      std::min(maxReductionTileSizeBits, kMinReductionTileSizeBits);
 
-  if (maxReductionTileSizeBits > 0) {
-    maxReductionTileSizeBits =
-        std::max(maxReductionTileSizeBits, minReductionTileSizeBits);
+  if (iter.maxReductionSize > 1) {
     LLVM_DEBUG(llvm::dbgs() << "Max reduction size: " << iter.maxReductionSize
                             << ", max reduction tile size: "
                             << (1 << maxReductionTileSizeBits) << "\n");
@@ -568,21 +643,14 @@ generateReductionConfigs(TilingEvaluator &evaluator,
   // that are too low (i.e. underutilize threads).
   const ArchInfo &archInfo = evaluator.getArchInfo();
   int bitsPerProcessorSingleWave =
-      llvm::sum_of(maxTileSizeBits) - llvm::Log2_64(archInfo.numSMs);
-  int globalUpperBound = std::max(bitsPerProcessorSingleWave, kMinTileSizeBits);
+      llvm::sum_of(maxSizeBits) - llvm::Log2_64(archInfo.numSMs);
+  int globalLowerBound = std::max(fixedBits, kMinTileSizeBits);
+  int globalUpperBound = std::max(bitsPerProcessorSingleWave, globalLowerBound);
 
-  LLVM_DEBUG(llvm::dbgs() << "Tile size upper bound: "
+  LLVM_DEBUG(llvm::dbgs() << "Tile size range: "
+                          << (int64_t{1} << globalLowerBound) << ".."
                           << (int64_t{1} << globalUpperBound)
                           << " (using SM count: " << archInfo.numSMs << ")\n");
-
-  // Force the tile size limit for non-tileable dimensions.
-  for (auto [idx, dim] : llvm::enumerate(dimensions)) {
-    if (dim.nonTileable) {
-      LLVM_DEBUG(llvm::dbgs()
-                 << "Non-tileable dimension: " << dim.index << "\n");
-      maxTileSizeBits[idx] = 0;
-    }
-  }
 
   // Iterate over all possible reduction tile sizes.
   for (int reductionTileSizeBits = maxReductionTileSizeBits;
@@ -600,31 +668,30 @@ generateReductionConfigs(TilingEvaluator &evaluator,
     // bound assumes one block per SM; if N blocks fit on each SM, the grid can
     // have N times more blocks, so the tile can be N times smaller and still
     // run in a single wave.
-    int lowerBound = kMinTileSizeBits;
+    int lowerBound = globalLowerBound;
     if (reductionTileSizeBits > 0) {
       auto evalResult = evaluator.evaluate(
-          *TilingConfig::get(SmallVector<int32_t>(dimensions.size(), 1),
-                             1 << reductionTileSizeBits));
+          *TilingConfig::get(baseShape, 1 << reductionTileSizeBits));
       if (succeeded(evalResult)) {
         int occupancy = std::clamp<int>((kMaxRegistersPerSM * kRegisterSize) /
                                             evalResult->registerStorageBytes,
                                         1, archInfo.maxBlocksPerSM);
         int bitsRemaining =
             bitsPerProcessorSingleWave - llvm::Log2_32_Ceil(occupancy);
-        lowerBound = std::min(lowerBound, std::max(bitsRemaining, 0));
+        // Lower bound can go below the soft minimum.
+        lowerBound = std::min(bitsRemaining, kMinTileSizeBits);
+        // Lower bound cannot go below the hard minimum.
+        lowerBound = std::max(lowerBound, fixedBits);
       }
     }
 
     // Lower the per-dimension limits so that a tile with this reduction tile
     // size fits into the register file. The tile cannot be larger than all
     // dimensions at their limits, nor than the maximum tile size.
-    SmallVector<int> limits = getMaxSizeBits(dimensions, maxTileSizeBits,
-                                             reductionTileSizeBits, evaluator);
-    int upperBound = std::min(kMaxTileSizeBits, llvm::sum_of(limits));
-
-    // Set the bounds for the tile size.
-    upperBound = std::min(upperBound, globalUpperBound);
-    lowerBound = std::min(lowerBound, upperBound);
+    SmallVector<SizeRange> limits = getSizeRangeBits(
+        dimensions, maxSizeBits, reductionTileSizeBits, evaluator);
+    int upperBound = std::min(kMaxTileSizeBits, getMaxSize(limits));
+    upperBound = std::clamp(upperBound, lowerBound, globalUpperBound);
 
     LLVM_DEBUG({
       llvm::dbgs() << "Reduction tile size: " << (1 << reductionTileSizeBits)
@@ -635,7 +702,7 @@ generateReductionConfigs(TilingEvaluator &evaluator,
     });
 
     // Build the tiling configuration.
-    SmallVector<int32_t> tileShape(dimensions.size(), 1);
+    SmallVector<int32_t> tileShape = baseShape;
     int32_t reductionTileSize = 1 << reductionTileSizeBits;
 
     auto combinations = generateCombinationsBalanced(
@@ -646,7 +713,11 @@ generateReductionConfigs(TilingEvaluator &evaluator,
       for (auto [bits, dim] : llvm::zip_equal(combination, dimensions)) {
         tileShape[dim.index] = 1 << bits;
       }
-      result.push_back(*TilingConfig::get(tileShape, reductionTileSize));
+      // The fixed dimensions can make the tile too large to represent.
+      if (auto config = TilingConfig::get(tileShape, reductionTileSize);
+          succeeded(config)) {
+        result.push_back(*config);
+      }
     }
   }
 
@@ -703,12 +774,9 @@ public:
   int64_t maxContractionSize = 1;
 };
 
-/**
- * @brief Generates tiling configurations for a graph with matmuls.
- * @param evaluator The tiling config evaluator.
- * @param dimensions The ordered dimensions of the main iteration space.
- * @param maxResults The maximum number of results to generate.
- */
+/// Generates tiling configurations for a graph with matmuls.
+///
+/// \param dimensions The ordered dimensions of the main iteration space.
 SmallVector<TilingConfig>
 generateMatmulConfigs(TilingEvaluator &evaluator,
                       ArrayRef<DimensionInfo> dimensions, size_t maxResults) {
@@ -727,8 +795,18 @@ generateMatmulConfigs(TilingEvaluator &evaluator,
                           << (1 << maxContractionTileSizeBits) << "\n");
 
   // Separate the dimensions into LHS, RHS, and other dimensions.
+  SmallVector<int32_t> baseShape = getBaseShape(dimensions);
   SmallVector<DimensionInfo> lhsDims, rhsDims, otherDims;
   for (const auto &dim : dimensions) {
+    // The MMA tile is built around the LHS and RHS dimensions, so fixed
+    // dimensions among them are left to the default generator, which handles
+    // them (but does not use tensor core tiles).
+    if (dim.fixedSize != 0 && (dim.usedInMatmulM || dim.usedInMatmulN)) {
+      LLVM_DEBUG(llvm::dbgs() << "Fixed matmul dimension " << dim.index
+                              << ", falling back to reduction generator\n");
+      return generateReductionConfigs(evaluator, dimensions, maxResults,
+                                      maxContractionTileSizeBits);
+    }
     if (dim.usedInMatmulM) {
       lhsDims.push_back(dim);
     } else if (dim.usedInMatmulN) {
@@ -740,11 +818,37 @@ generateMatmulConfigs(TilingEvaluator &evaluator,
 
   // Calculate the maximum number of tile size bits in each dimension.
   auto shape = evaluator.getInputLayout().getShape();
-  SmallVector<int> lhsLimits = getMaxSizeBits(lhsDims, shape);
-  SmallVector<int> rhsLimits = getMaxSizeBits(rhsDims, shape);
-  SmallVector<int> otherLimits = getMaxSizeBits(otherDims, shape);
+  SmallVector<int> lhsMaxBits = getMaxSizeBits(lhsDims, shape);
+  SmallVector<int> rhsMaxBits = getMaxSizeBits(rhsDims, shape);
+  SmallVector<int> otherMaxBits = getMaxSizeBits(otherDims, shape);
+
+  auto convertToSizeRange = [](ArrayRef<int> maxBits) {
+    return llvm::map_to_vector(maxBits,
+                               [](int bits) { return SizeRange(0, bits); });
+  };
+
+  // If the LHS/RHS dimensions are too small, add bits to the first dimension
+  // to reach the minimum size needed for effective tensor core usage.
+  int lhsLimitsSum = llvm::sum_of(lhsMaxBits);
+  if (lhsLimitsSum > 0 && lhsLimitsSum < kMinLhsTileSizeBits) {
+    int bitsToAdd = kMinLhsTileSizeBits - lhsLimitsSum;
+    LLVM_DEBUG(llvm::dbgs() << "LHS dimensions are too small, adding "
+                            << bitsToAdd << " bits\n");
+    lhsMaxBits[0] += bitsToAdd;
+  }
+
+  int rhsLimitsSum = llvm::sum_of(rhsMaxBits);
+  if (rhsLimitsSum > 0 && rhsLimitsSum < kMinRhsTileSizeBits) {
+    int bitsToAdd = kMinRhsTileSizeBits - rhsLimitsSum;
+    LLVM_DEBUG(llvm::dbgs() << "RHS dimensions are too small, adding "
+                            << bitsToAdd << " bits\n");
+    rhsMaxBits[0] += bitsToAdd;
+  }
 
   // Count the number of combinations for LHS and RHS dimensions.
+  auto lhsLimits = convertToSizeRange(lhsMaxBits);
+  auto rhsLimits = convertToSizeRange(rhsMaxBits);
+
   size_t lhsCount =
       countCombinations(kMinLhsTileSizeBits, kMaxLhsTileSizeBits, lhsLimits);
   size_t rhsCount =
@@ -787,6 +891,17 @@ generateMatmulConfigs(TilingEvaluator &evaluator,
   DenseSet<std::pair<int, int>> visited;
 #endif
 
+  // Calculate the limits for the other dimensions.
+  auto otherLimits = convertToSizeRange(otherMaxBits);
+  int otherFixedBits = 0;
+  for (size_t i = 0; i < otherDims.size(); ++i) {
+    if (otherDims[i].fixedSize != 0) {
+      int bits = llvm::Log2_64(otherDims[i].fixedSize);
+      otherLimits[i] = SizeRange(bits, bits);
+      otherFixedBits += bits;
+    }
+  }
+
   // Iterate over all generated LHS/RHS tile combinations.
   for (const auto &lhs : lhsCombinations) {
     for (const auto &rhs : rhsCombinations) {
@@ -795,7 +910,7 @@ generateMatmulConfigs(TilingEvaluator &evaluator,
           llvm::divideCeil(maxResults - result.size(), remainingCount--);
 
       // Build the tiling configuration.
-      SmallVector<int32_t> tileShape(dimensions.size(), 1);
+      SmallVector<int32_t> tileShape = baseShape;
       for (auto [bits, dim] : llvm::zip_equal(lhs, lhsDims)) {
         tileShape[dim.index] = 1 << bits;
       }
@@ -835,8 +950,8 @@ generateMatmulConfigs(TilingEvaluator &evaluator,
               std::max(lhsBits + rhsBits,
                        contractionTileSizeBits + std::max(lhsBits, rhsBits));
           auto combinations = generateCombinationsBalanced(
-              0, innerBound, otherLimits, maxResultsInner, /*descending=*/false,
-              otherDims);
+              otherFixedBits, std::max(innerBound, otherFixedBits), otherLimits,
+              maxResultsInner, /*descending=*/false, otherDims);
           maxResultsWeighted -= combinations.size();
 
           // Add the generated configurations to the result.
@@ -844,7 +959,10 @@ generateMatmulConfigs(TilingEvaluator &evaluator,
             for (auto [bits, dim] : llvm::zip_equal(combination, otherDims)) {
               tileShape[dim.index] = 1 << bits;
             }
-            result.push_back(*TilingConfig::get(tileShape, reductionTileSize));
+            if (auto config = TilingConfig::get(tileShape, reductionTileSize);
+                succeeded(config)) {
+              result.push_back(*config);
+            }
           }
         } else if (maxResultsWeighted > 0) {
           // No other dimensions, add the configuration to the result.
@@ -880,6 +998,14 @@ SmallVector<TilingConfig> enumerateTilings(TilingEvaluator &evaluator,
   auto outputResult = iter.start(evaluator.getOutputLayout(), /*writes=*/true);
   (void)outputResult;
 
+  // The dimensions fixed by the graph results are covered by every tile, so
+  // they are not searched.
+  for (auto [dim, size] : llvm::enumerate(evaluator.getFixedTileSizes())) {
+    if (size > 0) {
+      iter.setFixedSize(dim, size);
+    }
+  }
+
   // Order the dimensions using the importance heuristic.
   auto dimensions = iter.getOrderedDimensions();
   LLVM_DEBUG({
@@ -890,10 +1016,15 @@ SmallVector<TilingConfig> enumerateTilings(TilingEvaluator &evaluator,
     llvm::dbgs() << "\n";
   });
 
-  // If the first dimension is non-tileable, return a unit tile shape.
-  if (dimensions.front().nonTileable) {
-    return {*TilingConfig::get(SmallVector<int32_t>(shape.size(), 1),
-                               1 << kMaxTileSizeBits)};
+  // If the first dimension has a fixed size, so have all the others: return
+  // the only tile shape.
+  if (dimensions.front().fixedSize != 0) {
+    auto config =
+        TilingConfig::get(getBaseShape(dimensions), 1 << kMaxTileSizeBits);
+    if (failed(config)) {
+      return {};
+    }
+    return SmallVector<TilingConfig>{*config};
   }
 
   // Generate tiling configurations.

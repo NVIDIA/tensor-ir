@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-# RUN: %PYTHON -m pytest --capture=no -vv %s
+# RUN: %pytest %s
 # REQUIRES: cuda-sm100
 
 """Explicit exp policies and a basic-math gated RMSNorm against FP64 references."""

@@ -1,6 +1,7 @@
 set(TENSOR_IR_TEST_ANALYSIS_SOURCES
   TestControlFlowInterface.cpp
   TestLayoutPropagation.cpp
+  TestShapeOracle.cpp
   TestTileAnalyzer.cpp
   TestTilingEnumerator.cpp
   TestTilingEvaluator.cpp

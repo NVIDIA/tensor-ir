@@ -44,6 +44,7 @@ std::string calculateCacheKey(mlir::ModuleOp module,
   normalizedModule->print(stream, flags);
   CompilerInvocation cacheOptions = options;
   cacheOptions.debug = {};
+  cacheOptions.optimizationRemarks = {};
   stream << '_' << cacheOptions.toString();
   stream.flush();
   return key;

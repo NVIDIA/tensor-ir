@@ -4,7 +4,7 @@
 // Arithmetic operations (signed integer)
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_add
+// CHECK-LABEL: entry @test_reduce_add(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
 // CHECK:   %[[RES:.*]] = addi %[[RHS]], %[[LHS]]
@@ -21,7 +21,7 @@ nv_tensor_ir.graph @test_reduce_add(%arg0: tensor<64x16xsi32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_sub
+// CHECK-LABEL: entry @test_reduce_sub(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
 // CHECK:   %[[RES:.*]] = subi %[[RHS]], %[[LHS]]
@@ -38,7 +38,7 @@ nv_tensor_ir.graph @test_reduce_sub(%arg0: tensor<64x16xsi32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_mul
+// CHECK-LABEL: entry @test_reduce_mul(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[1 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
 // CHECK:   %[[RES:.*]] = muli %[[RHS]], %[[LHS]]
@@ -55,7 +55,7 @@ nv_tensor_ir.graph @test_reduce_mul(%arg0: tensor<64x16xsi32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_max
+// CHECK-LABEL: entry @test_reduce_max(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[-2147483648 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
 // CHECK:   %[[RES:.*]] = maxi %[[RHS]], %[[LHS]] signed
@@ -72,7 +72,7 @@ nv_tensor_ir.graph @test_reduce_max(%arg0: tensor<64x16xsi32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_min
+// CHECK-LABEL: entry @test_reduce_min(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[2147483647 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
 // CHECK:   %[[RES:.*]] = mini %[[RHS]], %[[LHS]] signed
@@ -93,7 +93,7 @@ nv_tensor_ir.graph @test_reduce_min(%arg0: tensor<64x16xsi32>)
 // Bitwise operations (signed integer)
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_and
+// CHECK-LABEL: entry @test_reduce_and(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[-1 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
 // CHECK:   %[[RES:.*]] = andi %[[RHS]], %[[LHS]]
@@ -110,7 +110,7 @@ nv_tensor_ir.graph @test_reduce_and(%arg0: tensor<64x16xsi32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_or
+// CHECK-LABEL: entry @test_reduce_or(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
 // CHECK:   %[[RES:.*]] = ori %[[RHS]], %[[LHS]]
@@ -127,7 +127,7 @@ nv_tensor_ir.graph @test_reduce_or(%arg0: tensor<64x16xsi32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_xor
+// CHECK-LABEL: entry @test_reduce_xor(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
 // CHECK:   %[[RES:.*]] = xori %[[RHS]], %[[LHS]]
@@ -148,7 +148,7 @@ nv_tensor_ir.graph @test_reduce_xor(%arg0: tensor<64x16xsi32>)
 // Comparison operations
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_compare
+// CHECK-LABEL: entry @test_reduce_compare(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0 : i32]
 // CHECK:   (%[[LHS:.*]]: tile<i32>, %[[RHS:.*]]: tile<i32>)
 // CHECK:   cmpi equal %[[LHS]], %[[RHS]]
@@ -182,7 +182,7 @@ nv_tensor_ir.graph @test_reduce_compare(%arg0: tensor<64x16xsi32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_with_const
+// CHECK-LABEL: entry @test_reduce_with_const(
 // CHECK-DAG: %[[ZERO_TILE:.*]] = constant <i32: 0> : tile<32x128xi32>
 // CHECK-DAG: constant <i32: 0> : tile<i32>
 // CHECK-DAG: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ZERO_TILE]])

@@ -39,3 +39,20 @@ nv_tensor_ir.graph @rmsnorm_large_auto_tile(
   %y = mul %x, %wide : tensor<8x512xf32>
   results %y, %sum : tensor<8x512xf32>, tensor<8x1xf32>
 }
+
+// A projected extent that is not a power of two is covered by the next power
+// of two: tiles are powers of two and the padded tail of the load is zero, so
+// the reduction is unaffected and the store is masked.
+// CHECK-LABEL: nv_tensor_ir.graph @rmsnorm_non_power_of_two_auto_tile
+// CHECK-SAME: attributes {tile_size = array<i32: 1, 1024>}
+nv_tensor_ir.graph @rmsnorm_non_power_of_two_auto_tile(
+    %x: tensor<64x640xf32> {nv_tensor_ir.stride = "(640,1)"}
+    ) -> (tensor<64x640xf32> {nv_tensor_ir.stride = "(640,1)"},
+          tensor<64x1xf32> {nv_tensor_ir.stride = "(1,1)"}) {
+  %sq = mul %x, %x : tensor<64x640xf32>
+  %sum = reduce(%sq)<dimensions = [1], reduction_mode = <add>>
+      : tensor<64x640xf32> -> tensor<64x1xf32>
+  %wide = broadcast %sum : tensor<64x1xf32> -> tensor<64x640xf32>
+  %y = mul %x, %wide : tensor<64x640xf32>
+  results %y, %sum : tensor<64x640xf32>, tensor<64x1xf32>
+}

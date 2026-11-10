@@ -91,6 +91,7 @@ add_dependencies(
   TensorIRPythonSources.Dialects.nv_tensor_ir.tablegen
 )
 
+
 add_mlir_python_sources_target(TensorIRPythonPublicModules
   INSTALL_COMPONENT TensorIRPythonModules
   INSTALL_DIR "python_packages/nv_tensor_ir"

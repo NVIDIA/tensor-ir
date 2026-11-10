@@ -61,12 +61,12 @@ nv_tensor_ir.graph @unequal_ranks(
 
 // CHECK-LABEL: func.func @permuted_batches(
 nv_tensor_ir.graph @permuted_batches(
-    %a: tensor<3x1x5x2xf32>, %b: tensor<7x11x1x5xf32>) -> tensor<2x7x3x11xf32> {
-  %result = contraction(%a, %b) maps (d0, d1, d2, d3, d4) -> (d2, d1, d4, d0), (d1, d3, d0, d4), (d0, d1, d2, d3) : (tensor<3x1x5x2xf32>, tensor<7x11x1x5xf32>) -> tensor<2x7x3x11xf32>
+    %a: tensor<3x7x5x2xf32>, %b: tensor<7x11x2x5xf32>) -> tensor<2x7x3x11xf32> {
+  %result = contraction(%a, %b) maps (d0, d1, d2, d3, d4) -> (d2, d1, d4, d0), (d1, d3, d0, d4), (d0, d1, d2, d3) : (tensor<3x7x5x2xf32>, tensor<7x11x2x5xf32>) -> tensor<2x7x3x11xf32>
   results %result : tensor<2x7x3x11xf32>
 }
 // CHECK: linalg.generic
-// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2, d3, d4) -> (d2, 0, d4, d0)>, affine_map<(d0, d1, d2, d3, d4) -> (d1, d3, 0, d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d3)>]
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2, d3, d4) -> (d2, d1, d4, d0)>, affine_map<(d0, d1, d2, d3, d4) -> (d1, d3, d0, d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d3)>]
 // CHECK-SAME: iterator_types = ["parallel", "parallel", "parallel", "parallel", "reduction"]
 // CHECK: arith.mulf
 // CHECK: arith.addf
@@ -91,18 +91,16 @@ nv_tensor_ir.graph @permuted_domain(
 
 // CHECK-LABEL: func.func @dynamic(
 nv_tensor_ir.graph @dynamic(
-    %a: tensor<?x1x?x5x?xf32>, %b: tensor<2x?x5x7x11xf32>) -> tensor<2x?x?x11xf32> {
-  %result = contraction(%a, %b) maps (d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d4, d5), (d0, d1, d4, d5, d3), (d0, d1, d2, d3) : (tensor<?x1x?x5x?xf32>, tensor<2x?x5x7x11xf32>) -> tensor<2x?x?x11xf32>
+    %a: tensor<?x?x?x5x?xf32>, %b: tensor<2x?x5x7x11xf32>) -> tensor<2x?x?x11xf32> {
+  %result = contraction(%a, %b) maps (d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d4, d5), (d0, d1, d4, d5, d3), (d0, d1, d2, d3) : (tensor<?x?x?x5x?xf32>, tensor<2x?x5x7x11xf32>) -> tensor<2x?x?x11xf32>
   results %result : tensor<2x?x?x11xf32>
 }
 // CHECK: tensor.dim
 // CHECK: tensor.empty
-// CHECK: tensor.generate
-// CHECK: arith.select
-// CHECK: tensor.extract
-// CHECK: tensor.yield
+// CHECK-NOT: tensor.generate
+// CHECK-NOT: arith.select
 // CHECK: linalg.generic
-// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, 0, d2, d4, d5)>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d4, d5, d3)>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d3)>]
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d4, d5)>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d4, d5, d3)>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d3)>]
 // CHECK-SAME: iterator_types = ["parallel", "parallel", "parallel", "parallel", "reduction", "reduction"]
 // CHECK: linalg.yield
 
@@ -197,6 +195,8 @@ nv_tensor_ir.graph @matmul_rank4(%a: tensor<2x3x4x5xf32>, %b: tensor<2x3x5x6xf32
   results %r : tensor<2x3x4x6xf32>
 }
 // CHECK: linalg.generic
+// CHECK-SAME: indexing_maps = [affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d4, d3)>, affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d3)>]
+// CHECK-SAME: iterator_types = ["parallel", "parallel", "parallel", "parallel", "reduction"]
 // CHECK: arith.mulf
 // CHECK: arith.addf
 // CHECK: linalg.yield
@@ -214,3 +214,39 @@ nv_tensor_ir.graph @matmul_rank5_dynamic(%a: tensor<?x2x3x4x5xf16>, %b: tensor<?
 // CHECK: arith.mulf
 // CHECK: arith.addf
 // CHECK: linalg.yield
+
+// -----
+
+// CHECK-LABEL: func.func @contraction_refined_unit(
+// CHECK-NOT: tensor.generate
+// CHECK-NOT: arith.select
+// CHECK: linalg.generic
+// CHECK: return
+nv_tensor_ir.graph @contraction_refined_unit(%a: tensor<?x3x5xf32>, %b: tensor<1x5x7xf32>) -> tensor<1x3x7xf32> {
+  %result = contraction(%a, %b) maps (b, m, n, k) -> (b, m, k), (b, k, n), (b, m, n) : (tensor<?x3x5xf32>, tensor<1x5x7xf32>) -> tensor<1x3x7xf32>
+  results %result : tensor<1x3x7xf32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @contraction_refined_zero(
+// CHECK-NOT: tensor.generate
+// CHECK-NOT: arith.select
+// CHECK: linalg.generic
+// CHECK: return
+nv_tensor_ir.graph @contraction_refined_zero(%a: tensor<0x3x5xf32>, %b: tensor<?x5x7xf32>) -> tensor<0x3x7xf32> {
+  %result = contraction(%a, %b) maps (b, m, n, k) -> (b, m, k), (b, k, n), (b, m, n) : (tensor<0x3x5xf32>, tensor<?x5x7xf32>) -> tensor<0x3x7xf32>
+  results %result : tensor<0x3x7xf32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @contraction_explicit_batch_broadcast(
+// CHECK: linalg.broadcast
+// CHECK: linalg.generic
+// CHECK: return
+nv_tensor_ir.graph @contraction_explicit_batch_broadcast(%a: tensor<1x3x5xf32>, %b: tensor<4x5x7xf32>) -> tensor<4x3x7xf32> {
+  %expanded = broadcast %a : tensor<1x3x5xf32> -> tensor<4x3x5xf32>
+  %result = contraction(%expanded, %b) maps (b, m, n, k) -> (b, m, k), (b, k, n), (b, m, n) : (tensor<4x3x5xf32>, tensor<4x5x7xf32>) -> tensor<4x3x7xf32>
+  results %result : tensor<4x3x7xf32>
+}

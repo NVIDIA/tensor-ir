@@ -25,7 +25,8 @@ enum class StatusCode : int32_t {
   kNotSupported,
   kInsufficientWorkspace,
   kNotFound,
-  kConstraintNotSatisfied, // checkSupport failed
+  /// checkSupport failed
+  kConstraintNotSatisfied,
   kNotInitialized,
   kNotImplemented,
 };

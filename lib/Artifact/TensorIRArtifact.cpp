@@ -58,10 +58,11 @@ TensorIRArtifact::TensorIRArtifact(
     std::string kernelName, std::string funcName, Binary &&binary,
     SmTarget arch, KernelMetadata argLayout,
     const std::optional<std::array<int32_t, 3>> &staticGrid, bool usesPDL,
-    std::optional<HostModule> hostModule, std::string entrypointName)
-    : kernelName(std::move(kernelName)), funcName(std::move(funcName)),
-      entrypointName(std::move(entrypointName)), binary(std::move(binary)),
-      hostModule(std::move(hostModule)), arch(arch),
+    std::optional<HostModule> hostModule, std::string entrypointName,
+    std::string remarksYaml)
+    : remarksYaml_(std::move(remarksYaml)), kernelName(std::move(kernelName)),
+      funcName(std::move(funcName)), entrypointName(std::move(entrypointName)),
+      binary(std::move(binary)), hostModule(std::move(hostModule)), arch(arch),
       argLayout(std::move(argLayout)), staticGrid(staticGrid),
       usesPDL_(usesPDL) {}
 
@@ -69,7 +70,8 @@ StatusOr<std::unique_ptr<TensorIRArtifact>> TensorIRArtifact::create(
     std::string kernelName, std::string funcName, Binary &&binary,
     SmTarget arch, KernelMetadata argLayout,
     const std::optional<std::array<int32_t, 3>> &staticGrid, bool usesPDL,
-    std::optional<HostModule> hostModule, std::string entrypointName) {
+    std::optional<HostModule> hostModule, std::string entrypointName,
+    std::string remarksYaml) {
   // Interpreter artifacts historically use the display name as their entrypoint.
   // Native artifacts must supply the actual symbol exported by their host object.
   if (entrypointName.empty() && !hostModule) {
@@ -83,7 +85,7 @@ StatusOr<std::unique_ptr<TensorIRArtifact>> TensorIRArtifact::create(
   return std::unique_ptr<TensorIRArtifact>(new TensorIRArtifact(
       std::move(kernelName), std::move(funcName), std::move(binary), arch,
       std::move(argLayout), staticGrid, usesPDL, std::move(hostModule),
-      std::move(entrypointName)));
+      std::move(entrypointName), std::move(remarksYaml)));
 }
 
 } // namespace tensor_ir::rt

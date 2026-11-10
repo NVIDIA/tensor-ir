@@ -8,6 +8,17 @@ add_tensor_ir_library(NVTensorIRSupport
   MLIRSupport
 )
 
+# Assembles TileIR bytecode into a cubin via 'tileiras'; shared by Compiler
+# and Runtime.
+add_tensor_ir_library(NVTensorIRTileIRAssembly
+  TileIRAssembly.cpp
+  PARTIAL_SOURCES_INTENDED
+
+  LINK_COMPONENTS Support
+  LINK_LIBS PUBLIC
+    NVTensorIR::CompilerOptions
+)
+
 add_tensor_ir_library(NVTensorIRCudaApi STATIC
   CudaApi.cpp
   PARTIAL_SOURCES_INTENDED

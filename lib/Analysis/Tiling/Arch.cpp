@@ -124,11 +124,7 @@ ArchInfo getArchInfo(ComputeCapability cc) {
 
 } // namespace
 
-/**
- * @brief Get the architecture information for a given compute capability.
- * @param cc Compute capability.
- * @param numSMs Number of Streaming Multiprocessors (SMs).
- */
+/// Get the architecture information for a given compute capability.
 ArchInfo getArchInfo(ComputeCapability cc, int numSMs) {
   ArchInfo archInfo = getArchInfo(cc);
   archInfo.numSMs = std::max(numSMs, 1);

@@ -1,10 +1,35 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+/// Implementation of multi-variate integer polynomial operations, canonicalization,
+/// arithmetic, multivariate exact division, and symbol normalization in TensorIR.
+///
+/// Implementation Overview:
+/// - Working Representation (`Terms`): Arithmetic operations (`add`, `subtract`,
+///   `multiply`, `exactDiv`) unpack canonical CSR storage into an ordered associative
+///   map `std::map<Monomial, llvm::DynamicAPInt, MonomialOrder>`.
+/// - Leading Term Extraction: `MonomialOrder` arranges monomials in descending
+///   lexicographic order. This ensures `terms.begin()` yields the leading monomial
+///   in O(1), enabling the multivariate polynomial division algorithm over Z.
+/// - Invariant Preservation: `accumulateTerm` immediately erases any term whose
+///   coefficient sums to zero. Consequently, zero polynomials are uniquely represented
+///   by an empty map, and `terms.begin()` is guaranteed to point to a non-zero term.
+/// - Interning & Hash-Consing: Canonical expressions are uniqued in `PolyExprContext`
+///   using `ExpressionOrder` with transparent lookup (`is_transparent`), avoiding
+///   allocations during deduplication probes.
+/// - DenseMap Sentinel Safety: Symbol IDs are widened to `uint64_t` in symbol tables
+///   to avoid collisions with `DenseMap` empty (~0ULL) and tombstone (~0ULL - 1ULL) keys.
+/// - Cycle Detection: Transitive dependency traversal prevents cyclic symbol definitions
+///   from being inserted into the context.
+/// - Normalization: Evaluates symbol substitutions using binary exponentiation
+///   (exponentiation by squaring), avoiding unnecessary final squarings to protect
+///   against exponent overflow, then reduces the result modulo the reduction basis.
+
 #include "tensor_ir/Analysis/PolyExprs.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 
 #include <algorithm>
 #include <cassert>
@@ -97,31 +122,6 @@ private:
   PolyExprContext &context;
   Storage storage;
 };
-
-/// \file
-/// Implementation of multi-variate integer polynomial operations, canonicalization,
-/// arithmetic, multivariate exact division, and symbol normalization in TensorIR.
-///
-/// Implementation Overview:
-/// - Working Representation (`Terms`): Arithmetic operations (`add`, `subtract`,
-///   `multiply`, `exactDiv`) unpack canonical CSR storage into an ordered associative
-///   map `std::map<Monomial, llvm::DynamicAPInt, MonomialOrder>`.
-/// - Leading Term Extraction: `MonomialOrder` arranges monomials in descending
-///   lexicographic order. This ensures `terms.begin()` yields the leading monomial
-///   in O(1), enabling the multivariate polynomial division algorithm over Z.
-/// - Invariant Preservation: `accumulateTerm` immediately erases any term whose
-///   coefficient sums to zero. Consequently, zero polynomials are uniquely represented
-///   by an empty map, and `terms.begin()` is guaranteed to point to a non-zero term.
-/// - Interning & Hash-Consing: Canonical expressions are uniqued in `PolyExprContext`
-///   using `ExpressionOrder` with transparent lookup (`is_transparent`), avoiding
-///   allocations during deduplication probes.
-/// - DenseMap Sentinel Safety: Symbol IDs are widened to `uint64_t` in symbol tables
-///   to avoid collisions with `DenseMap` empty (~0ULL) and tombstone (~0ULL - 1ULL) keys.
-/// - Cycle Detection: Transitive dependency traversal prevents cyclic symbol definitions
-///   from being inserted into the context.
-/// - Normalization: Evaluates symbol substitutions using binary exponentiation
-///   (exponentiation by squaring), avoiding unnecessary final squarings to protect
-///   against exponent overflow.
 
 /// A monomial is a sequence of variable powers sorted by strictly increasing VariableId.
 using Monomial = std::vector<Power>;
@@ -328,8 +328,14 @@ struct PolyExprContext::Impl {
   llvm::DenseMap<uint64_t, const PolyExprImpl *> definitions;
   /// Memoization cache for `normalizeImpl()`. Maps unexpanded expression pointers to
   /// their canonical normalized forms. Stores `nullptr` to memoize failed expansions
-  /// (e.g. exponent overflow). Cleared whenever definitions change.
+  /// (e.g. exponent overflow). Cleared whenever definitions or the reduction
+  /// basis change.
   llvm::DenseMap<const PolyExprImpl *, const PolyExprImpl *> normalized;
+  /// Reduction basis: primitive normalized polynomials known to be zero, each
+  /// with a positive leading coefficient, in insertion order.
+  std::vector<Terms> basis;
+  /// Whether definitions and the basis are fixed.
+  bool frozen = false;
 };
 
 PolyExprContext::PolyExprContext() : impl(std::make_unique<Impl>()) {}
@@ -604,6 +610,8 @@ PolyExprContext::getDefinitionImpl(VariableId variable) const {
 /// normalized expressions may contain `variable` as an unexpanded leaf symbol.
 bool PolyExprContext::addDefinitionImpl(VariableId variable,
                                         const PolyExprImpl &definition) {
+  assert(!impl->frozen && "cannot add a definition to a frozen context");
+  assert(impl->basis.empty() && "definitions must precede the reduction basis");
   if (&definition.getContext() != this || getDefinitionImpl(variable)) {
     return false;
   }
@@ -690,15 +698,66 @@ PolyExprContext::normalizeImpl(const PolyExprImpl &expression) {
     }
     result = term ? result->add(*term) : nullptr;
   }
+  if (result) {
+    result = reduceImpl(*result);
+  }
   impl->normalized.try_emplace(&expression, result);
   return result;
 }
 
-/// Tests semantic equality modulo symbol definitions.
+/// Reduces a substituted expression modulo the reduction basis.
 ///
-/// Uses pointer equality as a fast path. If addresses differ, normalizes both expressions
-/// and compares the resulting canonical pointers. Returns `std::nullopt` on overflow or
-/// mismatched contexts.
+/// Visits terms from the leading term down. A term whose monomial is a
+/// multiple `m` of the leading monomial of a basis element `b`, and whose
+/// coefficient is a multiple `k` of the leading coefficient of `b`, is
+/// replaced by subtracting `k * m * b`; this only introduces smaller terms, so
+/// reduction terminates. Other terms are kept. Returns `nullptr` on exponent
+/// or offset overflow.
+const PolyExprImpl *
+PolyExprContext::reduceImpl(const PolyExprImpl &expression) {
+  if (impl->basis.empty() || expression.isConstant()) {
+    return &expression;
+  }
+  Terms pending = unpack(expression), reduced;
+  while (!pending.empty()) {
+    auto lead = *pending.begin();
+    pending.erase(pending.begin());
+    const Terms *element = nullptr;
+    std::optional<Monomial> factor;
+    for (const Terms &candidate : impl->basis) {
+      const auto &candidateLead = *candidate.begin();
+      if (lead.second % candidateLead.second != 0) {
+        continue;
+      }
+      factor = divideMonomials(lead.first, candidateLead.first);
+      if (factor) {
+        element = &candidate;
+        break;
+      }
+    }
+    if (!element) {
+      reduced.emplace(std::move(lead.first), lead.second);
+      continue;
+    }
+    llvm::DynamicAPInt scale = lead.second / element->begin()->second;
+    // The leading term cancels exactly; only smaller terms remain to visit.
+    for (const auto &term : llvm::drop_begin(*element)) {
+      auto powers = multiplyMonomials(*factor, term.first);
+      if (!powers) {
+        return nullptr;
+      }
+      accumulateTerm(pending, *powers, -(scale * term.second));
+    }
+  }
+  auto result = pack(reduced);
+  return result ? intern(std::move(*result)) : nullptr;
+}
+
+/// Tests equality modulo symbol definitions and the reduction basis.
+///
+/// Uses pointer equality as a fast path. Otherwise normalizes the difference of
+/// the normalized operands, which reduces it as a whole. Returns `std::nullopt`
+/// on overflow, mismatched contexts, or a non-constant difference.
 std::optional<bool> PolyExprContext::areEqualImpl(const PolyExprImpl &lhs,
                                                   const PolyExprImpl &rhs) {
   if (&lhs.getContext() != this || &rhs.getContext() != this) {
@@ -713,7 +772,15 @@ std::optional<bool> PolyExprContext::areEqualImpl(const PolyExprImpl &lhs,
   if (!left || !right) {
     return std::nullopt;
   }
-  return left == right;
+  if (left == right) {
+    return true;
+  }
+  const PolyExprImpl *difference = left->subtract(*right);
+  difference = difference ? normalizeImpl(*difference) : nullptr;
+  if (!difference || !difference->isConstant()) {
+    return std::nullopt;
+  }
+  return difference->isZero();
 }
 
 PolyExpr PolyExpr::getZero(PolyExprContext &context) {
@@ -775,6 +842,34 @@ bool PolyExpr::isMonomial() const { return impl && impl->isMonomial(); }
 bool PolyExpr::isSymbol() const { return impl && impl->isSymbol(); }
 
 bool PolyExpr::isOne() const { return impl && impl->isOne(); }
+
+PolyExpr PolyExpr::getPrimitivePart() const {
+  if (!impl || impl->isZero()) {
+    return *this;
+  }
+  const auto &coefficients = impl->getStorage().coefficients;
+  llvm::DynamicAPInt content = abs(coefficients.front());
+  for (const llvm::DynamicAPInt &coefficient : coefficients) {
+    content = gcd(content, abs(coefficient));
+  }
+  if (coefficients.front() < 0) {
+    content = -content;
+  }
+  return exactDiv(getConstant(getContext(), content));
+}
+
+llvm::SmallVector<VariableId> PolyExpr::getVariables() const {
+  llvm::SmallVector<VariableId> variables;
+  if (!impl) {
+    return variables;
+  }
+  for (const Power &power : impl->getStorage().powers) {
+    variables.push_back(power.variable);
+  }
+  llvm::sort(variables);
+  variables.erase(llvm::unique(variables), variables.end());
+  return variables;
+}
 
 std::optional<llvm::DynamicAPInt> PolyExpr::getConstantValue() const {
   return impl ? impl->getConstantValue() : std::nullopt;
@@ -859,3 +954,34 @@ PolyExpr PolyExprContext::normalize(PolyExpr expression) {
 std::optional<bool> PolyExprContext::areEqual(PolyExpr lhs, PolyExpr rhs) {
   return lhs && rhs ? areEqualImpl(*lhs.impl, *rhs.impl) : std::nullopt;
 }
+
+std::optional<bool> PolyExprContext::isOne(PolyExpr expression) {
+  return expression ? areEqualImpl(*expression.impl,
+                                   *PolyExprImpl::getConstant(*this, 1))
+                    : std::nullopt;
+}
+
+bool PolyExprContext::addReduction(PolyExpr zero) {
+  assert(!impl->frozen && "cannot extend the basis of a frozen context");
+  if (!zero || &zero.getContext() != this) {
+    return false;
+  }
+  PolyExpr normalized(normalizeImpl(*zero.impl));
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.isConstant()) {
+    return normalized.isZero();
+  }
+  PolyExpr primitive = normalized.getPrimitivePart();
+  if (!primitive) {
+    return false;
+  }
+  impl->basis.push_back(unpack(*primitive.impl));
+  impl->normalized.clear();
+  return true;
+}
+
+void PolyExprContext::freeze() { impl->frozen = true; }
+
+bool PolyExprContext::isFrozen() const { return impl->frozen; }

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Command-line support for code emitted by -gen-component-options.
+/// Command-line support for code emitted by -gen-component-options.
 
 #ifndef TENSORIR_OPTIONS_OPTIONSCLDETAIL_H
 #define TENSORIR_OPTIONS_OPTIONSCLDETAIL_H

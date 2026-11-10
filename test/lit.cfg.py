@@ -32,17 +32,7 @@ config.name = "TENSOR_IR"
 if config.tensor_ir_oss_layout:
     config.available_features.add("tensor-ir-oss")
 
-# ShTest's first arg is execute_external: on Linux, use_lit_shell is False by
-# default, so this historically selected the system /bin/sh. LLVM 23 rejects
-# execute_external=True unless force_execute_external=True (removed in LLVM 24);
-# catch ValueError so older lit still works while we keep external-shell behavior.
-# Prefer migrating to lit.formats.ShTest() (internal shell) when RUN lines allow.
-try:
-    config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
-except ValueError:
-    config.test_format = lit.formats.ShTest(
-        not llvm_config.use_lit_shell, force_execute_external=True
-    )
+config.test_format = lit.formats.ShTest(execute_external=False)
 
 # suffixes: A list of file extensions to treat as test files.
 config.suffixes = [".mlir"]
@@ -150,11 +140,18 @@ if cuda_tile_translate:
     tools.append(ToolSubst("cuda-tile-translate", cuda_tile_translate))
 
 
+tileiras_search_path = config.environment["PATH"]
+tileiras = shutil.which("tileiras", path=tileiras_search_path)
+if tileiras:
+    config.available_features.add("tensor-ir-tileiras")
+    tools.append(ToolSubst("%tensor_ir_tileiras", tileiras))
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)
 
 llvm_config.with_environment("PATH", config.tensor_ir_tools_dir, append_path=True)
 llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
+if tileiras:
+    llvm_config.with_environment("PATH", os.path.dirname(tileiras), append_path=True)
 
 # so that NVPTXSerializer can find ptxas/libdevice
 if config.cuda_toolkit_path:

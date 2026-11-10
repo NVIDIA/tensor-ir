@@ -3,7 +3,7 @@
 // ============================================================================
 // TEST 1: Reduce with no loops, single input/output
 // ============================================================================
-// CHECK-LABEL: @test_reduce_noloop_single
+// CHECK-LABEL: entry @test_reduce_noloop_single(
 // CHECK: %[[INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[RESULT:.*]] = reduce %[[INPUT]] dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[VAL:.*]]: tile<f32>, %[[ACC:.*]]: tile<f32>)
@@ -28,7 +28,7 @@ nv_tensor_ir.graph @test_reduce_noloop_single(
 // ============================================================================
 // TEST 2: Reduce with no loops, multiple inputs/outputs
 // ============================================================================
-// CHECK-LABEL: @test_reduce_noloop_multiple
+// CHECK-LABEL: entry @test_reduce_noloop_multiple(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf16>
 // CHECK: %[[RESULT:.*]]:2 = reduce %[[ARG0]], %[[ARG1]] dim=1 identities=[1.000000e+00 : f32, 0.000000e+00 : f16]
@@ -58,7 +58,7 @@ nv_tensor_ir.graph @test_reduce_noloop_multiple(
 // ============================================================================
 // TEST 3: Reduce with one loop, single input/output
 // ============================================================================
-// CHECK-LABEL: @test_reduce_1loop_single
+// CHECK-LABEL: entry @test_reduce_1loop_single(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
@@ -92,7 +92,7 @@ nv_tensor_ir.graph @test_reduce_1loop_single(
 // ============================================================================
 // TEST 4: Reduce with one loop, multiple inputs/outputs
 // ============================================================================
-// CHECK-LABEL: @test_reduce_1loop_multiple
+// CHECK-LABEL: entry @test_reduce_1loop_multiple(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
@@ -133,7 +133,7 @@ nv_tensor_ir.graph @test_reduce_1loop_multiple(
 // ============================================================================
 // TEST 5: Reduce with two loops, single input/output
 // ============================================================================
-// CHECK-LABEL: @test_reduce_2loops_single
+// CHECK-LABEL: entry @test_reduce_2loops_single(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C16:.*]] = constant <i32: 16>
@@ -172,7 +172,7 @@ nv_tensor_ir.graph @test_reduce_2loops_single(
 // ============================================================================
 // TEST 6: Reduce with two loops, multiple inputs/outputs
 // ============================================================================
-// CHECK-LABEL: @test_reduce_2loops_multiple
+// CHECK-LABEL: entry @test_reduce_2loops_multiple(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
 // CHECK-DAG: %[[C16:.*]] = constant <i32: 16>
@@ -219,7 +219,7 @@ nv_tensor_ir.graph @test_reduce_2loops_multiple(
 // ============================================================================
 // TEST 7: Reduce with broadcasted outputs
 // ============================================================================
-// CHECK-LABEL: @test_reduce_broadcast
+// CHECK-LABEL: entry @test_reduce_broadcast(
 // CHECK: %[[REDUCE:.*]]:2 = reduce %{{.*}} dim=1 identities=[1.000000e+00 : f32, 0.000000e+00 : f16]
 // CHECK-DAG: %[[RESHAPE1:.*]] = reshape %[[REDUCE]]#0 : tile<32xf32> -> tile<32x1xf32>
 // CHECK-DAG: %[[RESHAPE2:.*]] = reshape %[[REDUCE]]#1 : tile<32xf16> -> tile<32x1xf16>
@@ -252,7 +252,7 @@ nv_tensor_ir.graph @test_reduce_broadcast(
 // ============================================================================
 // TEST 8: Welford reduction
 // ============================================================================
-// CHECK-LABEL: @test_reduce_welford
+// CHECK-LABEL: entry @test_reduce_welford(
 // CHECK-DAG: %[[MEAN_INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x64xf32>
 // CHECK-DAG: %[[M2_INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x64xf32>
 // CHECK-DAG: %[[WEIGHT_INPUT:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x64xf32>
@@ -332,7 +332,7 @@ nv_tensor_ir.graph @test_reduce_welford(
 // maps every operand to space 0 directly. Data flow: operand 0 (f32) and operand
 // 1 (f16) each load from that shared space and feed the fused reduce.
 // ============================================================================
-// CHECK-LABEL: @reduce_ud_multi
+// CHECK-LABEL: entry @reduce_ud_multi(
 // CHECK: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf32>
 // CHECK: %[[ARG1:.*]], %{{.*}} = load_view_tko {{.*}} -> tile<32x16xf16>
 // CHECK: %[[RESULT:.*]]:2 = reduce %[[ARG0]], %[[ARG1]] dim=1 identities=[1.000000e+00 : f32, 0.000000e+00 : f16]

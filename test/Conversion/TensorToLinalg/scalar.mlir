@@ -5,6 +5,7 @@
 // RUN:   --pass-pipeline='builtin.module(convert-tensor-to-linalg,convert-tensor-to-linalg)' \
 // RUN:   | tensor_ir-opt --split-input-file --mlir-print-local-scope \
 // RUN:   | FileCheck %s --implicit-check-not=nv_tensor_ir.
+// RUN: tensor_ir-opt %s --split-input-file --tir-linalg-pipeline | FileCheck %s --check-prefix=LLVM --implicit-check-not=arith.flush_denormals
 
 // CHECK-LABEL: func.func @add_float(
 nv_tensor_ir.graph @add_float(%a: tensor<2xf32>, %b: tensor<2xf32>) -> tensor<2xf32> {
@@ -423,3 +424,59 @@ nv_tensor_ir.graph @pointwise(
 // CHECK:           %[[SCALAR_EXP:.+]] = math.exp
 // CHECK:           linalg.yield %[[SCALAR_EXP]] : f32
 // CHECK:         return %[[RESULT]] : tensor<4x8xf32>
+
+// -----
+
+// CHECK-LABEL: func.func @float_ops
+// CHECK: tensor.dim
+// CHECK: math.cosh
+// CHECK: math.sinh
+// CHECK: math.exp2
+// CHECK: math.log2
+// CHECK: math.fma {{.*}} : f32
+nv_tensor_ir.graph @float_ops(%a: tensor<?xf32>, %b: tensor<?xf32>, %c: tensor<?xf32>) -> tensor<?xf32> {
+  %0 = cosh %a : tensor<?xf32>
+  %1 = sinh %0 : tensor<?xf32>
+  %2 = exp2 %1 : tensor<?xf32>
+  %3 = log2 %2 : tensor<?xf32>
+  %4 = fma %3, %b, %c : tensor<?xf32>
+  results %4 : tensor<?xf32>
+}
+
+// -----
+
+// The rounding mode is not modeled, and 16-bit FMAs compute in f32.
+// LLVM-LABEL: llvm.func @fma_rounding_f16
+// LLVM-COUNT-3: llvm.fpext {{.*}} : f16 to f32
+// LLVM: %[[FMA:.*]] = llvm.intr.fma({{.*}}) : (f32, f32, f32) -> f32
+// LLVM: llvm.fptrunc %[[FMA]] : f32 to f16
+// CHECK-LABEL: func.func @fma_rounding_f16
+// CHECK: %[[LHS:.*]] = arith.extf %{{.*}} : f16 to f32
+// CHECK: %[[RHS:.*]] = arith.extf %{{.*}} : f16 to f32
+// CHECK: %[[ACC:.*]] = arith.extf %{{.*}} : f16 to f32
+// CHECK: %[[FMA:.*]] = math.fma %[[LHS]], %[[RHS]], %[[ACC]] : f32
+// CHECK: arith.truncf %[[FMA]] : f32 to f16
+nv_tensor_ir.graph @fma_rounding_f16(%a: tensor<2xf16>, %b: tensor<2xf16>, %c: tensor<2xf16>) -> tensor<2xf16> {
+  %r = fma %a, %b, %c <rounding_mode = zero> : tensor<2xf16>
+  results %r : tensor<2xf16>
+}
+
+// -----
+
+// Flush subnormal operands and results before lowering the math operations.
+// LLVM-LABEL: llvm.func @ftz
+// LLVM: llvm.intr.fma
+// CHECK-LABEL: func.func @ftz
+// CHECK: %[[INPUT:.*]] = arith.flush_denormals
+// CHECK: %[[EXP:.*]] = math.exp2 %[[INPUT]]
+// CHECK: arith.flush_denormals %[[EXP]]
+// CHECK: %[[LHS:.*]] = arith.flush_denormals
+// CHECK: %[[RHS:.*]] = arith.flush_denormals
+// CHECK: %[[ACC:.*]] = arith.flush_denormals
+// CHECK: %[[FMA:.*]] = math.fma %[[LHS]], %[[RHS]], %[[ACC]] : f32
+// CHECK: arith.flush_denormals %[[FMA]]
+nv_tensor_ir.graph @ftz(%a: tensor<2xf32>, %b: tensor<2xf32>, %c: tensor<2xf32>) -> tensor<2xf32> {
+  %0 = exp2 %a <ftz> : tensor<2xf32>
+  %1 = fma %0, %b, %c <ftz> : tensor<2xf32>
+  results %1 : tensor<2xf32>
+}

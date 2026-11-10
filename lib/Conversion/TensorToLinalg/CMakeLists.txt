@@ -19,6 +19,7 @@ add_tensor_ir_conversion_library(NVTensorIRToLinalgConversion
   LINK_LIBS PUBLIC
   MLIRAnalysis
   MLIRArithDialect
+  MLIRArithUtils
   MLIRFuncDialect
   MLIRFuncTransforms
   MLIRLinalgDialect

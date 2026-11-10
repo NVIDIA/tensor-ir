@@ -4,9 +4,9 @@
 #ifndef TENSOR_IR_CONVERSION_TENSORTOCUDATILE_TENSORTOCUDATILEINTERNAL_H_
 #define TENSOR_IR_CONVERSION_TENSORTOCUDATILE_TENSORTOCUDATILEINTERNAL_H_
 
-// Library-internal plumbing for the TensorIR-to-CudaTile conversion. These
-// declarations are shared across the conversion library's translation units
-// but are not part of the public interface consumed by backend code.
+/// Library-internal plumbing for the TensorIR-to-CudaTile conversion. These
+/// declarations are shared across the conversion library's translation units
+/// but are not part of the public interface consumed by backend code.
 
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTile.h"
 #include "tensor_ir/Dialect/TensorIR.h"
@@ -104,22 +104,21 @@ createEntryOptimizationHints(MLIRContext *ctx, int32_t numCTAs,
                              int32_t minCTAsPerSM = 1);
 
 /// Create constant tile (floating-point).
-/// @param type Shaped type with the original element type.
-/// @param value The literal value for the attribute.
+///
+/// \param type Shaped type with the original element type.
 Value createConstant(OpBuilder &rewriter, Location loc, ShapedType type,
                      double value);
 
 /// Create constant tile (integer).
-/// @param type Shaped type with the converted element type (signless).
-/// @param value The literal value for the attribute.
+///
+/// \param type Shaped type with the converted element type (signless).
 Value createConstant(OpBuilder &rewriter, Location loc, ShapedType type,
                      int64_t value);
 
 /// Get signedness enum value for the given TensorIR integer type.
-/// @param type The signed/unsigned integer type.
 cuda_tile::Signedness getSignedness(Type type);
 
-/// @brief Reduction emission helper.
+/// Reduction emission helper.
 /// Currently supports only floating-point types.
 struct ReductionEmissionHelper {
   ReductionMode mode;

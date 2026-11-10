@@ -97,3 +97,19 @@ nv_tensor_ir.graph @matmulAccumulatorElementTypeMismatch(
       : (tensor<16x32xf16>, tensor<32x8xf16>) -> tensor<16x8xf32>
   results %result : tensor<16x8xf32>
 }
+
+// -----
+
+nv_tensor_ir.graph @matmul_lhs_unit(%a: tensor<1x3x5xf32>, %b: tensor<4x5x7xf32>) -> tensor<4x3x7xf32> {
+  // expected-error@below {{expects C batch dimensions to equal the merged shape of A and B}}
+  %result = matmul(%a, %b) : (tensor<1x3x5xf32>, tensor<4x5x7xf32>) -> tensor<4x3x7xf32>
+  results %result : tensor<4x3x7xf32>
+}
+
+// -----
+
+nv_tensor_ir.graph @matmul_dynamic_and_unit(%a: tensor<?x3x5xf32>, %b: tensor<1x5x7xf32>) -> tensor<?x3x7xf32> {
+  // expected-error@below {{expects C batch dimensions to equal the merged shape of A and B}}
+  %result = matmul(%a, %b) : (tensor<?x3x5xf32>, tensor<1x5x7xf32>) -> tensor<?x3x7xf32>
+  results %result : tensor<?x3x7xf32>
+}

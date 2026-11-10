@@ -6,7 +6,16 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 
-from .dtypes import DataType, normalize_dtype, supports_scalar_attr
+from nv_tensor_ir._mlir.dialects.nv_tensor_ir import IntegerOverflow, RoundingMode
+
+from .dtypes import (
+    DataType,
+    UNSIGNED_INTEGER_DTYPES,
+    is_float_dtype,
+    is_integer_dtype,
+    normalize_dtype,
+    supports_scalar_attr,
+)
 from .tracing import (
     BinaryOp,
     MovementOp,
@@ -15,6 +24,7 @@ from .tracing import (
     TraceGraph,
     TraceOpEnum,
     TracedScalar,
+    TernaryOp,
     TracedTensor,
     UnaryOp,
     _binary as _trace_binary,
@@ -30,6 +40,8 @@ from .tracing import (
     _trace_graph_context,
 )
 
+from .utils import get_raw_func_locations
+
 __all__ = [
     "abs",
     "add",
@@ -42,15 +54,21 @@ __all__ = [
     "constant",
     "convert",
     "cos",
+    "cosh",
     "div",
     "elu",
     "exp",
+    "exp2",
+    "expm1",
+    "fma",
     "floor",
     "full_like",
     "gelu_approx_tanh",
     "iota",
     "iota_like",
     "log",
+    "log2",
+    "log1p",
     "logical_and",
     "logical_not",
     "logical_or",
@@ -59,7 +77,9 @@ __all__ = [
     "min",
     "mod",
     "mul",
+    "mul_high",
     "neg",
+    "negi",
     "pow",
     "reduce",
     "rem",
@@ -69,17 +89,21 @@ __all__ = [
     "rsqrt",
     "sigmoid",
     "sin",
+    "sinh",
     "slice",
     "softplus",
     "splat",
     "sqrt",
     "scan_slice",
+    "shift_left",
+    "shift_right",
     "sub",
     "swish",
     "tan",
     "tanh",
     "transpose",
     "where",
+    "xor",
 ]
 
 
@@ -179,6 +203,13 @@ def _unary(op: TraceOpEnum, value: object, **kwargs: object) -> TracedTensor:
     )
 
 
+def _float_unary(op: UnaryOp, value: object) -> TracedTensor:
+    tensor = _ensure_traced(value, op.value)
+    if not is_float_dtype(tensor.tensor_info.dtype):
+        raise TypeError(f"tir.{op.value} expects a floating-point tensor operand")
+    return _unary(op, tensor)
+
+
 def _unary_with_beta(op: TraceOpEnum, value: object, beta: float) -> TracedTensor:
     tensor = _ensure_traced(value, op.value)
     return _unary(op, tensor, beta=float(beta))
@@ -219,18 +250,37 @@ def _binary_with_beta(
 
 
 def _logical_binary(op: BinaryOp, lhs: object, rhs: object) -> TracedTensor:
-    op_name = op.value
-    lhs_tensor = _ensure_traced(lhs, op_name)
-    rhs_tensor = _ensure_traced(rhs, op_name)
-    _check_same_graph(lhs_tensor, rhs_tensor, op_name)
-    _check_same_tensor_type(lhs_tensor.tensor_info, rhs_tensor.tensor_info, op_name)
-    if lhs_tensor.tensor_info.dtype != DataType.BOOL:
-        raise TypeError(f"tir.{op_name} expects i1 tensor operands")
+    tensor = _ensure_traced(lhs, op.value)
+    if tensor.tensor_info.dtype != DataType.BOOL:
+        raise TypeError(f"tir.{op.value} expects boolean tensor operands")
+    return _integer_binary(op, tensor, rhs)
+
+
+def _integer_binary(
+    op: BinaryOp,
+    lhs: object,
+    rhs: object,
+    *,
+    unsigned_only: bool = False,
+    **kwargs: object,
+) -> TracedTensor:
+    lhs_tensor = _ensure_traced(lhs, op.value)
+    rhs_tensor = _ensure_traced(rhs, op.value)
+    _check_same_graph(lhs_tensor, rhs_tensor, op.value)
+    _check_same_tensor_type(lhs_tensor.tensor_info, rhs_tensor.tensor_info, op.value)
+    dtype = lhs_tensor.tensor_info.dtype
+    valid = is_integer_dtype(dtype)
+    if unsigned_only:
+        valid = dtype in UNSIGNED_INTEGER_DTYPES or dtype == DataType.BOOL
+    if not valid:
+        qualifier = "unsigned integer or boolean" if unsigned_only else "integer"
+        raise TypeError(f"tir.{op.value} expects {qualifier} tensor operands")
     return lhs_tensor._graph.add_node(
         NodeKind.BINARY,
         op,
         (lhs_tensor._id, rhs_tensor._id),
         lhs_tensor.tensor_info,
+        kwargs=kwargs,
     )
 
 
@@ -257,6 +307,10 @@ def cos(value: object) -> TracedTensor:
     return _unary(UnaryOp.COS, value)
 
 
+def cosh(value: object) -> TracedTensor:
+    return _float_unary(UnaryOp.COSH, value)
+
+
 def exp(value: object, *, rounding_mode: str = "full") -> TracedTensor:
     """Compute exp with ``"full"`` (default) or ``"approx"`` accuracy.
 
@@ -277,6 +331,25 @@ def exp(value: object, *, rounding_mode: str = "full") -> TracedTensor:
     return _unary(UnaryOp.EXP, tensor, rounding_mode=rounding_mode)
 
 
+def exp2(value: object, *, ftz: bool = False) -> TracedTensor:
+    tensor = _ensure_traced(value, "exp2")
+    if not is_float_dtype(tensor.tensor_info.dtype):
+        raise TypeError("tir.exp2 expects a floating-point tensor operand")
+    if ftz and tensor.tensor_info.dtype != DataType.F32:
+        raise ValueError("tir.exp2 ftz is only supported for f32 tensors")
+    return tensor._graph.add_node(
+        NodeKind.UNARY,
+        UnaryOp.EXP2,
+        (tensor._id,),
+        tensor.tensor_info,
+        kwargs={"ftz": bool(ftz)},
+    )
+
+
+def expm1(value: object) -> TracedTensor:
+    return _unary(UnaryOp.EXPM1, value)
+
+
 def floor(value: object) -> TracedTensor:
     return _unary(UnaryOp.FLOOR, value)
 
@@ -285,8 +358,33 @@ def log(value: object) -> TracedTensor:
     return _unary(UnaryOp.LOG, value)
 
 
+def log2(value: object) -> TracedTensor:
+    return _float_unary(UnaryOp.LOG2, value)
+
+
+def log1p(value: object) -> TracedTensor:
+    return _unary(UnaryOp.LOG1P, value)
+
+
 def neg(value: object) -> TracedTensor:
-    return _unary(UnaryOp.NEG, value)
+    """Negate a tensor; integer results wrap at the storage width."""
+    tensor = _ensure_traced(value, "neg")
+    if is_integer_dtype(tensor.tensor_info.dtype):
+        return negi(tensor)
+    return _unary(UnaryOp.NEG, tensor)
+
+
+def negi(value: object, *, overflow: str = "none") -> TracedTensor:
+    """Negate integer bits using the selected overflow assumptions."""
+    tensor = _ensure_traced(value, "negi")
+    dtype = tensor.tensor_info.dtype
+    if not is_integer_dtype(dtype):
+        raise TypeError("tir.negi requires an integer tensor")
+    if overflow not in {
+        str(mode) for mode in IntegerOverflow if mode != IntegerOverflow.NUW
+    }:
+        raise ValueError("tir.negi overflow must be none, no_signed_wrap, or no_wrap")
+    return _unary(UnaryOp.NEG_I, tensor, overflow=overflow)
 
 
 def sqrt(value: object) -> TracedTensor:
@@ -303,6 +401,10 @@ def rsqrt(value: object) -> TracedTensor:
 
 def sin(value: object) -> TracedTensor:
     return _unary(UnaryOp.SIN, value)
+
+
+def sinh(value: object) -> TracedTensor:
+    return _float_unary(UnaryOp.SINH, value)
 
 
 def tan(value: object) -> TracedTensor:
@@ -579,8 +681,8 @@ def scan_slice(
                 stride=_contiguous_stride(element_shape),
             )
         )
-
-    region = TraceGraph()
+    src_file, begin_loc, end_loc = get_raw_func_locations(body)
+    region = TraceGraph(src_file, begin_loc, end_loc)
     region_args = [region.add_input(replace(carry.tensor_info, name="carry"))]
     region_args.extend(
         region.add_input(replace(info, name=f"scan_slice_input_{index}"))
@@ -823,6 +925,11 @@ def mul(lhs: object, rhs: object) -> TracedTensor:
     return _binary(BinaryOp.MUL, lhs, rhs)
 
 
+def mul_high(lhs: object, rhs: object) -> TracedTensor:
+    """Return the high half of each unsigned integer product."""
+    return _integer_binary(BinaryOp.MUL_HIGH, lhs, rhs, unsigned_only=True)
+
+
 def div(lhs: object, rhs: object) -> TracedTensor:
     """Divide ``lhs`` by ``rhs`` elementwise."""
     return _binary(BinaryOp.DIV, lhs, rhs)
@@ -860,7 +967,7 @@ def pow(lhs: object, rhs: object) -> TracedTensor:
 
 
 def logical_and(lhs: object, rhs: object) -> TracedTensor:
-    return _logical_binary(BinaryOp.LOGICAL_AND, lhs, rhs)
+    return _logical_binary(BinaryOp.AND, lhs, rhs)
 
 
 def logical_not(value: object) -> TracedTensor:
@@ -868,7 +975,55 @@ def logical_not(value: object) -> TracedTensor:
 
 
 def logical_or(lhs: object, rhs: object) -> TracedTensor:
-    return _logical_binary(BinaryOp.LOGICAL_OR, lhs, rhs)
+    return _logical_binary(BinaryOp.OR, lhs, rhs)
+
+
+def xor(lhs: object, rhs: object) -> TracedTensor:
+    return _integer_binary(BinaryOp.XOR, lhs, rhs)
+
+
+def shift_left(lhs: object, rhs: object, *, overflow: str = "none") -> TracedTensor:
+    """Shift left using unsigned counts and the selected overflow assumptions."""
+    if overflow not in {str(mode) for mode in IntegerOverflow}:
+        raise ValueError(
+            "tir.shift_left overflow must be none, no_signed_wrap, "
+            "no_unsigned_wrap, or no_wrap"
+        )
+    return _integer_binary(BinaryOp.SHIFT_LEFT, lhs, rhs, overflow=overflow)
+
+
+def shift_right(lhs: object, rhs: object) -> TracedTensor:
+    return _integer_binary(BinaryOp.SHIFT_RIGHT, lhs, rhs)
+
+
+def fma(
+    lhs: object,
+    rhs: object,
+    acc: object,
+    *,
+    rounding_mode: str = "nearest_even",
+    ftz: bool = False,
+) -> TracedTensor:
+    """Compute a fused multiply-add with explicit arithmetic modifiers."""
+    tensors = tuple(_ensure_traced(value, "fma") for value in (lhs, rhs, acc))
+    _check_same_graph(tensors[0], tensors[1], "fma")
+    _check_same_graph(tensors[0], tensors[2], "fma")
+    _check_same_tensor_type(tensors[0].tensor_info, tensors[1].tensor_info, "fma")
+    _check_same_tensor_type(tensors[0].tensor_info, tensors[2].tensor_info, "fma")
+    if not is_float_dtype(tensors[0].tensor_info.dtype):
+        raise TypeError("tir.fma expects floating-point tensor operands")
+    rounding_modes = {str(mode) for mode in RoundingMode}
+    if rounding_mode not in rounding_modes:
+        raise ValueError(f"unsupported fma rounding mode: {rounding_mode}")
+    if ftz and tensors[0].tensor_info.dtype != DataType.F32:
+        raise ValueError("tir.fma ftz is only supported for f32 tensors")
+    return tensors[0]._graph.add_node(
+        NodeKind.TERNARY,
+        TernaryOp.FMA,
+        tuple(tensor._id for tensor in tensors),
+        tensors[0].tensor_info,
+        kwargs={"rounding_mode": rounding_mode, "ftz": bool(ftz)},
+    )
 
 
 def where(selector: object, lhs: object, rhs: object) -> TracedTensor:
@@ -891,8 +1046,21 @@ def where(selector: object, lhs: object, rhs: object) -> TracedTensor:
     )
 
 
-def matmul(lhs: object, rhs: object, *, dtype: object | None = None) -> TracedTensor:
-    """Multiply tensors, optionally selecting the result element type."""
+def matmul(
+    lhs: object,
+    rhs: object,
+    *,
+    dtype: object | None = None,
+    left_triangle: str | None = None,
+    right_triangle: str | None = None,
+) -> TracedTensor:
+    """Multiply tensors, optionally declaring triangular operands.
+
+    Both triangle parameters accept ``"upper"`` or ``"lower"``. The default
+    ``None`` omits the corresponding IR attribute. Inputs
+    must already contain zeros outside their declared triangles, including
+    within diagonal tiles. This enables skipping entirely zero K tiles.
+    """
     lhs_tensor = _ensure_traced(lhs, "matmul")
     rhs_tensor = _ensure_traced(rhs, "matmul")
-    return _trace_matmul(lhs_tensor, rhs_tensor, dtype)
+    return _trace_matmul(lhs_tensor, rhs_tensor, dtype, left_triangle, right_triangle)

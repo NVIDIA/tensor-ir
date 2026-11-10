@@ -15,11 +15,11 @@ using namespace mlir::nv_tensor_ir::tiling_analysis;
 
 namespace {
 
-// Test pass that drives enumerateTilings() so its behavior can be exercised
-// with FileCheck instead of C++ unit tests. Runs TilingEvaluator::create()
-// plus enumerateTilings() with the max-results pass option and stashes the
-// ordered list of candidate configs as a "tiling-candidates" array-of-strings
-// attribute on the graph, one string per config.
+/// Test pass that drives enumerateTilings() so its behavior can be exercised
+/// with FileCheck instead of C++ unit tests. Runs TilingEvaluator::create()
+/// plus enumerateTilings() with the max-results pass option and stashes the
+/// ordered list of candidate configs as a "tiling-candidates" array-of-strings
+/// attribute on the graph, one string per config.
 struct TestTilingEnumeratorPass
     : public PassWrapper<TestTilingEnumeratorPass, OperationPass<GraphOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestTilingEnumeratorPass);

@@ -348,9 +348,9 @@ std::optional<bool> allStatic(const RecursiveDimValue &lhsShape,
          rhsStride.isStatic();
 }
 
-// Coalesces flattened modes using logical last-dimension-fastest order.
-// The left mode can be folded into the right mode exactly when advancing the
-// left coordinate skips one complete right mode.
+/// Coalesces flattened modes using logical last-dimension-fastest order.
+/// The left mode can be folded into the right mode exactly when advancing the
+/// left coordinate skips one complete right mode.
 bool coalesceFlat(RecursiveDimValues &shape, RecursiveDimValues &stride) {
   if (shape.empty() || shape.size() != stride.size()) {
     return false;

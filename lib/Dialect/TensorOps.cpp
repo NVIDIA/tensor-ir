@@ -66,26 +66,6 @@ bool mlir::nv_tensor_ir::isGraphOutput(Value value) {
                       [](Operation *user) { return isa<ResultsOp>(user); });
 }
 
-FailureOr<int64_t> mlir::nv_tensor_ir::mergeBroadcastDimensions(int64_t lhs,
-                                                                int64_t rhs) {
-  if (lhs == rhs) {
-    return lhs;
-  }
-  if (lhs == 1) {
-    return rhs;
-  }
-  if (rhs == 1) {
-    return lhs;
-  }
-  if (ShapedType::isDynamic(lhs)) {
-    return rhs > 1 ? rhs : ShapedType::kDynamic;
-  }
-  if (ShapedType::isDynamic(rhs)) {
-    return lhs > 1 ? lhs : ShapedType::kDynamic;
-  }
-  return failure();
-}
-
 FailureOr<int64_t> mlir::nv_tensor_ir::mergeEqualDimensions(int64_t lhs,
                                                             int64_t rhs) {
   if (lhs == rhs) {
@@ -173,8 +153,8 @@ mlir::nv_tensor_ir::detail::verifyDynamicDimsOpInterface(Operation *op) {
 // Layout transformation helpers
 //===----------------------------------------------------------------------===//
 
-static ParseResult parseContractionIndexingMaps(OpAsmParser &parser,
-                                                ArrayAttr &indexingMaps) {
+static ParseResult parseContractionDomainMaps(OpAsmParser &parser,
+                                              ArrayAttr &domainMaps) {
   SmallVector<std::pair<StringRef, AffineExpr>> dimensions;
   auto parseDimension = [&]() -> ParseResult {
     auto loc = parser.getCurrentLocation();
@@ -218,18 +198,18 @@ static ParseResult parseContractionIndexingMaps(OpAsmParser &parser,
         AffineMap::get(dimensions.size(), 0, results, parser.getContext());
     maps.push_back(AffineMapAttr::get(map));
   }
-  indexingMaps = parser.getBuilder().getArrayAttr(maps);
+  domainMaps = parser.getBuilder().getArrayAttr(maps);
   return success();
 }
 
-static void printContractionIndexingMaps(OpAsmPrinter &printer, Operation *,
-                                         ArrayAttr indexingMaps) {
-  auto firstMap = cast<AffineMapAttr>(indexingMaps[0]).getValue();
+static void printContractionDomainMaps(OpAsmPrinter &printer, Operation *,
+                                       ArrayAttr domainMaps) {
+  auto firstMap = cast<AffineMapAttr>(domainMaps[0]).getValue();
   printer << '(';
   llvm::interleaveComma(llvm::seq<unsigned>(0, firstMap.getNumDims()), printer,
                         [&](unsigned i) { printer << 'd' << i; });
   printer << ") -> ";
-  llvm::interleaveComma(indexingMaps, printer, [&](Attribute attr) {
+  llvm::interleaveComma(domainMaps, printer, [&](Attribute attr) {
     printer << '(';
     llvm::interleaveComma(cast<AffineMapAttr>(attr).getValue().getResults(),
                           printer);
@@ -551,8 +531,8 @@ ValueRange ScanSliceOp::getSuccessorInputs(RegionSuccessor successor) {
       std::min<unsigned>(1, getBody().front().getNumArguments()));
 }
 
-// LLVM versions differ in how a successor returning to the parent is created.
-// Keep both expressions dependent so only the supported API is instantiated.
+/// LLVM versions differ in how a successor returning to the parent is created.
+/// Keep both expressions dependent so only the supported API is instantiated.
 template <typename Successor = RegionSuccessor>
 static Successor getParentSuccessor(Operation *parent) {
   if constexpr (std::is_constructible_v<Successor, Operation *>) {
@@ -826,25 +806,33 @@ static bool reductionDropsDimensions(int64_t inputRank, int64_t outputRank,
   return outputRank == inputRank - static_cast<int64_t>(dimensions.size());
 }
 
-static llvm::SmallBitVector reductionDimMask(int64_t inputRank,
-                                             ArrayRef<int32_t> dimensions) {
-  llvm::SmallBitVector mask(static_cast<unsigned>(inputRank));
-  for (int32_t dimension : dimensions) {
-    assert(dimension >= 0 && dimension < inputRank &&
-           "dimension is out of bounds");
-    mask.set(static_cast<unsigned>(dimension));
-  }
-  return mask;
-}
-
 bool ReduceOp::dropsReducedDimensions() {
   return reductionDropsDimensions(getInput().getType().getRank(),
                                   getOutput().getType().getRank(),
                                   getDimensions());
 }
 
-llvm::SmallBitVector ReduceOp::getReductionDimMask() {
-  return reductionDimMask(getInput().getType().getRank(), getDimensions());
+/// Recover graph labels for local loops, retaining canonical labels for loops
+/// omitted by the tensor map, such as reduction loops absent from the result.
+static AffineMap inferLoopIterSpaceMap(AffineMap indexingMap,
+                                       AffineMap tensorMap) {
+  if (indexingMap.getNumResults() != tensorMap.getNumResults() ||
+      indexingMap.getNumDims() > tensorMap.getNumDims()) {
+    return {};
+  }
+  SmallVector<AffineExpr> loops;
+  unsigned offset = tensorMap.getNumDims() - indexingMap.getNumDims();
+  for (unsigned loop = 0; loop < indexingMap.getNumDims(); ++loop) {
+    loops.push_back(getAffineDimExpr(offset + loop, indexingMap.getContext()));
+  }
+  for (auto [coordinate, expr] : llvm::enumerate(indexingMap.getResults())) {
+    loops[cast<AffineDimExpr>(expr).getPosition()] =
+        tensorMap.getResult(coordinate);
+  }
+  AffineMap loopMap =
+      AffineMap::get(tensorMap.getNumDims(), tensorMap.getNumSymbols(), loops,
+                     tensorMap.getContext());
+  return loopMap.isProjectedPermutation() ? loopMap : AffineMap();
 }
 
 AffineMap ReduceOp::computeCanonicalOutputIterSpaceMap(
@@ -855,13 +843,9 @@ AffineMap ReduceOp::computeCanonicalOutputIterSpaceMap(
     return {};
   }
 
-  llvm::SmallBitVector reducedDimensions = getReductionDimMask();
-  bool dropsDimensions = dropsReducedDimensions();
-  return AffineMap::getFilteredIdentityMap(
-      getContext(), numIterSpaceDims, [&](AffineDimExpr dimension) {
-        return !dropsDimensions ||
-               !reducedDimensions.test(dimension.getPosition());
-      });
+  return dropsReducedDimensions()
+             ? getResultIndexingMaps().front()
+             : AffineMap::getMultiDimIdentityMap(inputRank, getContext());
 }
 
 AffineMap ReduceOp::inferInputFromOutputIterSpaceMap(unsigned inputIndex) {
@@ -872,23 +856,10 @@ AffineMap ReduceOp::inferInputFromOutputIterSpaceMap(unsigned inputIndex) {
   }
 
   unsigned inputRank = getInput().getType().getRank();
-  llvm::SmallBitVector reducedDimensions = getReductionDimMask();
-  if (outputMap.getNumDims() != inputRank ||
-      outputMap.getNumResults() != inputRank - reducedDimensions.count()) {
+  if (outputMap.getNumDims() != inputRank) {
     return {};
   }
-
-  SmallVector<AffineExpr> inputResults;
-  unsigned outputIndex = 0;
-  for (unsigned inputDim = 0; inputDim < inputRank; ++inputDim) {
-    if (reducedDimensions.test(inputDim)) {
-      inputResults.push_back(getAffineDimExpr(inputDim, getContext()));
-      continue;
-    }
-    inputResults.push_back(outputMap.getResult(outputIndex++));
-  }
-  return AffineMap::get(outputMap.getNumDims(), outputMap.getNumSymbols(),
-                        inputResults, getContext());
+  return inferLoopIterSpaceMap(getResultIndexingMaps().front(), outputMap);
 }
 
 AffineMap ReduceOp::inferOutputFromInputIterSpaceMaps() {
@@ -897,19 +868,11 @@ AffineMap ReduceOp::inferOutputFromInputIterSpaceMaps() {
     return inputMap;
   }
 
-  llvm::SmallBitVector reducedDimensions = getReductionDimMask();
-  if (inputMap.getNumResults() != reducedDimensions.size()) {
+  AffineMap resultMap = getResultIndexingMaps().front();
+  if (inputMap.getNumResults() != resultMap.getNumDims()) {
     return {};
   }
-
-  SmallVector<AffineExpr> outputResults;
-  for (auto [index, result] : llvm::enumerate(inputMap.getResults())) {
-    if (!reducedDimensions.test(index)) {
-      outputResults.push_back(result);
-    }
-  }
-  return AffineMap::get(inputMap.getNumDims(), inputMap.getNumSymbols(),
-                        outputResults, getContext());
+  return resultMap.compose(inputMap);
 }
 
 bool ReduceUDOp::dropsReducedDimensions() {
@@ -919,9 +882,64 @@ bool ReduceUDOp::dropsReducedDimensions() {
                                   getDimensions());
 }
 
-llvm::SmallBitVector ReduceUDOp::getReductionDimMask() {
+/// One loop per input dimension; the reduced dimensions are reduction loops.
+static SmallVector<utils::IteratorType>
+getReductionIteratorTypes(int64_t inputRank, ArrayRef<int32_t> dimensions) {
+  SmallVector<utils::IteratorType> iteratorTypes(inputRank,
+                                                 utils::IteratorType::parallel);
+  for (int32_t dimension : dimensions) {
+    iteratorTypes[dimension] = utils::IteratorType::reduction;
+  }
+  return iteratorTypes;
+}
+
+SmallVector<utils::IteratorType> ReduceOp::getLoopIteratorTypes() {
+  return getReductionIteratorTypes(getInput().getType().getRank(),
+                                   getDimensions());
+}
+
+static SmallVector<AffineMap>
+getReductionResultMaps(IterationDomainOpInterface domain,
+                       bool dropsDimensions) {
+  auto iterators = domain.getLoopIteratorTypes();
+  SmallVector<AffineExpr> results;
+  for (auto [loop, iterator] : llvm::enumerate(iterators)) {
+    if (iterator == utils::IteratorType::parallel) {
+      results.push_back(getAffineDimExpr(loop, domain.getContext()));
+    } else if (!dropsDimensions) {
+      results.push_back(getAffineConstantExpr(0, domain.getContext()));
+    }
+  }
+  AffineMap resultMap =
+      AffineMap::get(iterators.size(), 0, results, domain.getContext());
+  return SmallVector<AffineMap>(domain->getNumResults(), resultMap);
+}
+
+SmallVector<AffineMap> ReduceOp::getResultIndexingMaps() {
+  return getReductionResultMaps(*this, dropsReducedDimensions());
+}
+
+ArrayAttr ReduceOp::getIndexingMaps() {
+  return Builder(getContext())
+      .getAffineMapArrayAttr({AffineMap::getMultiDimIdentityMap(
+          getInput().getType().getRank(), getContext())});
+}
+
+SmallVector<utils::IteratorType> ReduceUDOp::getLoopIteratorTypes() {
   auto inputType = cast<RankedTensorType>(getOperand(0).getType());
-  return reductionDimMask(inputType.getRank(), getDimensions());
+  return getReductionIteratorTypes(inputType.getRank(), getDimensions());
+}
+
+SmallVector<AffineMap> ReduceUDOp::getResultIndexingMaps() {
+  return getReductionResultMaps(*this, dropsReducedDimensions());
+}
+
+ArrayAttr ReduceUDOp::getIndexingMaps() {
+  int64_t inputRank = cast<RankedTensorType>(getOperand(0).getType()).getRank();
+  SmallVector<AffineMap> maps(
+      getNumOperands(),
+      AffineMap::getMultiDimIdentityMap(inputRank, getContext()));
+  return Builder(getContext()).getAffineMapArrayAttr(maps);
 }
 
 LogicalResult ReduceOp::verify() {
@@ -1166,6 +1184,47 @@ LogicalResult DimOp::verify() {
     return emitOpError() << "dimension " << dimension
                          << " is out of bounds for tensor rank "
                          << getInput().getType().getRank();
+  }
+  return success();
+}
+
+void DimOp::populateBoundsForIndexValue(Value value,
+                                        ValueBoundsConstraintSet &cstr) {
+  assert(value == getSize() && "expected the dim result");
+  (void)value;
+  cstr.bound(getSize()) == cstr.getExpr(getInput(), getDimension());
+}
+
+SmallVector<OpFoldResult> AssumeShapeOp::getMixedSizes() {
+  return getMixedValues(getStaticSizes(), getDynamicSizes(), getContext());
+}
+
+LogicalResult AssumeShapeOp::verify() {
+  RankedTensorType type = getInput().getType();
+  if (getStaticSizes().size() != static_cast<size_t>(type.getRank())) {
+    return emitOpError() << "expected " << type.getRank()
+                         << " extent(s), but got " << getStaticSizes().size();
+  }
+  if (failed(verifyListOfOperandsOrIntegers(*this, "sizes", type.getRank(),
+                                            getStaticSizes(),
+                                            getDynamicSizes()))) {
+    return failure();
+  }
+  for (auto [dimension, size] : llvm::enumerate(getMixedSizes())) {
+    std::optional<int64_t> constant = getConstantIntValue(size);
+    if (!constant) {
+      continue;
+    }
+    if (*constant < 0) {
+      return emitOpError() << "expected nonnegative extent #" << dimension
+                           << ", but got " << *constant;
+    }
+    if (!type.isDynamicDim(dimension) &&
+        type.getDimSize(dimension) != *constant) {
+      return emitOpError() << "extent #" << dimension << " is " << *constant
+                           << " but the tensor type requires "
+                           << type.getDimSize(dimension);
+    }
   }
   return success();
 }
@@ -1425,7 +1484,22 @@ LogicalResult PowOp::verify() {
   return success();
 }
 
-// Verifier for CmpOp operation
+static LogicalResult verifyFtz(Operation *op, RankedTensorType type, bool ftz) {
+  if (ftz && !type.getElementType().isF32()) {
+    return op->emitOpError("ftz is only supported for f32 tensors");
+  }
+  return success();
+}
+
+LogicalResult FmaOp::verify() {
+  return verifyFtz(*this, getOutput().getType(), getFtz());
+}
+
+LogicalResult Exp2Op::verify() {
+  return verifyFtz(*this, getOutput().getType(), getFtz());
+}
+
+/// Verifier for CmpOp operation
 LogicalResult CmpOp::verify() {
   auto lhsType = getLhs().getType();
 
@@ -1551,10 +1625,9 @@ LayoutSourceAttrInterface ConcatenateOp::inferResultLayout(
 }
 
 LogicalResult ContractionOp::verify() {
-  SmallVector<AffineMap> maps;
-  for (Attribute attr : getIndexingMaps()) {
-    maps.push_back(cast<AffineMapAttr>(attr).getValue());
-  }
+  SmallVector<AffineMap> maps =
+      llvm::to_vector(getDomainMaps().getAsValueRange<AffineMapAttr>());
+
   RankedTensorType types[] = {getA().getType(), getB().getType(),
                               getC().getType()};
   unsigned numDims = maps.front().getNumDims();
@@ -1589,11 +1662,11 @@ LogicalResult ContractionOp::verify() {
     roles.push_back(role);
     switch (role) {
     case 7: { // Batch.
-      auto extent = mergeBroadcastDimensions(types[0].getDimSize(aDim),
-                                             types[1].getDimSize(bDim));
+      auto extent = mergeEqualDimensions(types[0].getDimSize(aDim),
+                                         types[1].getDimSize(bDim));
       if (failed(extent) || types[2].getDimSize(cDim) != *extent) {
         return emitOpError() << "expects C batch dimension " << cDim
-                             << " to be the broadcasted extent of A and B";
+                             << " to equal the common extent of A and B";
       }
       break;
     }
@@ -1657,6 +1730,11 @@ void MatmulOp::build(OpBuilder &builder, OperationState &result, Type c,
   build(builder, result, c, a, b, Value{});
 }
 
+void MatmulOp::build(OpBuilder &builder, OperationState &result, Type c,
+                     Value a, Value b, Value acc) {
+  build(builder, result, c, a, b, acc, TriangleAttr{}, TriangleAttr{});
+}
+
 LayoutSourceAttrInterface
 MatmulOp::inferResultLayout(ArrayRef<LayoutSourceAttrInterface> inputLayouts) {
   // Layout propagation does not support custom matmul accumulators.
@@ -1665,36 +1743,16 @@ MatmulOp::inferResultLayout(ArrayRef<LayoutSourceAttrInterface> inputLayouts) {
   }
   assert(inputLayouts.size() == 2 && "MatmulOp must have two inputs");
 
-  // Build a CuTe view layout for the inferred matmul result.
-  // The view has rank+1 dimensions: batch dims (...) + M + N + K (reduction).
-  // For a result shape (..., M, N) and operands (..., M, K) × (..., K, N),
-  // we construct a flattened layout where K is the innermost reduction
-  // dimension.
-
-  // Calculate B/M/N/K from the shapes.
-  auto shape = getResult().getType().getShape();
-  size_t rank = shape.size();
+  auto shape = getC().getType().getShape();
   int64_t sizeB = std::accumulate(shape.begin(), shape.end() - 2, 1,
                                   std::multiplies<int64_t>());
-  // Matmul requires rank >= 2 for at least (M, N) dimensions.
-  int64_t sizeM = shape[rank - 2];
-  int64_t sizeN = shape[rank - 1];
-  // Get K from first operand's last dimension: (..., M, K).
-  int64_t sizeK = getA().getType().getShape().back();
-
-  // Build the logical view shape, with K as the final reduction dimension.
-  tcg::Shape viewShape;
-  for (size_t i = 0; i < rank - 2; ++i) {
-    viewShape.append(shape[i]);
-  }
-  viewShape.append(sizeM);
-  viewShape.append(sizeN);
-  viewShape.append(sizeK);
-  tcg::Layout view(viewShape);
-
-  // Build matmul source attribute.
-  return MatmulSourceAttr::get(getContext(), view.toString(), sizeB, sizeM,
-                               sizeN, sizeK, inputLayouts[0], inputLayouts[1]);
+  // Preserve result-shape refinements and append the reduction loop extent.
+  SmallVector<int64_t> domainShape(shape);
+  domainShape.push_back(getStaticLoopRanges().back());
+  tcg::Layout view{tcg::Shape(domainShape)};
+  return MatmulSourceAttr::get(
+      getContext(), view.toString(), sizeB, shape[shape.size() - 2],
+      shape.back(), domainShape.back(), inputLayouts[0], inputLayouts[1]);
 }
 
 /// Returns the element types that a staged matmul can use for its result, for
@@ -1736,95 +1794,55 @@ MatmulOp::deduceCudaTileStagedMatmulTypes(Type lhsType, Type rhsType) {
 //===----------------------------------------------------------------------===//
 
 unsigned MatmulOp::getNumIterSpaceDims() {
-  // Number of dimensions in a matmul is result rank (..., m, n) + 1 (k).
-  return getResult().getType().getRank() + 1;
+  return getLoopIteratorTypes().size();
+}
+
+/// Embed a local indexing map into a graph with additional leading dimensions.
+static AffineMap extendIterSpaceMap(AffineMap map, unsigned rank) {
+  if (rank < map.getNumDims()) {
+    return {};
+  }
+  unsigned extraDims = rank - map.getNumDims();
+  SmallVector<AffineExpr> results;
+  for (unsigned dimension = 0; dimension < extraDims; ++dimension) {
+    results.push_back(getAffineDimExpr(dimension, map.getContext()));
+  }
+  llvm::append_range(results, map.shiftDims(extraDims).getResults());
+  return AffineMap::get(rank, map.getNumSymbols(), results, map.getContext());
 }
 
 AffineMap MatmulOp::computeCanonicalInputIterSpaceMap(
     unsigned inputIndex, std::optional<unsigned> iterSpaceRank) {
   assert(inputIndex < getNumOperands() && "invalid MatmulOp input index");
 
-  // Use provided rank or fall back to operation's iteration space rank.
-  unsigned numIterSpaceDims = iterSpaceRank.value_or(getNumIterSpaceDims());
-
-  MLIRContext *ctx = getContext();
-  if (inputIndex == 2) {
-    return computeCanonicalOutputIterSpaceMap(numIterSpaceDims);
-  }
-  bool isA = inputIndex == 0;
-
-  // A input - canonical input map result is (..., m, k). Return identity map
-  // without the n dimension.
-  if (isA) {
-    unsigned nDimPos = numIterSpaceDims - 2;
-    return AffineMap::getFilteredIdentityMap(
-        getContext(), numIterSpaceDims,
-        [&](AffineDimExpr dim) { return dim.getPosition() != nDimPos; });
-  }
-
-  // B input - canonical input map result is (..., k, n). Drop the m dimension
-  // from identity map and swap the n and k dimensions.
-  unsigned mDimPos = numIterSpaceDims - 3;
-  auto bFilteredIdentityMap = AffineMap::getFilteredIdentityMap(
-      getContext(), numIterSpaceDims,
-      [&](AffineDimExpr dim) { return dim.getPosition() != mDimPos; });
-
-  auto bResExprs = llvm::to_vector(bFilteredIdentityMap.getResults());
-  int numResults = bResExprs.size();
-  int nDimPos = numResults - 2;
-  int kDimPos = numResults - 1;
-  std::swap(bResExprs[nDimPos], bResExprs[kDimPos]);
-  return AffineMap::get(numIterSpaceDims, 0, bResExprs, ctx);
+  return extendIterSpaceMap(getIndexingMapsArray()[inputIndex],
+                            iterSpaceRank.value_or(getNumIterSpaceDims()));
 }
 
 AffineMap MatmulOp::computeCanonicalOutputIterSpaceMap(
     std::optional<unsigned> iterSpaceRank) {
-  // Use provided rank or fall back to operation's iteration space rank.
-  unsigned numIterSpaceDims = iterSpaceRank.value_or(getNumIterSpaceDims());
-
-  // Canonical output map result is always (..., m, n), regardless of the output
-  // rank. It's an identity map except that we drop the reduction dimension.
-  return AffineMap::getFilteredIdentityMap(
-      getContext(), numIterSpaceDims, [&](AffineDimExpr dim) {
-        return dim.getPosition() != numIterSpaceDims - 1;
-      });
+  return extendIterSpaceMap(getResultIndexingMaps().front(),
+                            iterSpaceRank.value_or(getNumIterSpaceDims()));
 }
 
 AffineMap MatmulOp::inferInputFromOutputIterSpaceMap(unsigned inputIndex) {
   assert(inputIndex < getNumOperands() && "invalid MatmulOp input index");
 
-  MLIRContext *ctx = getContext();
-  bool isA = inputIndex == 0;
-
-  // Retrieve the output iteration space map.
-  auto iterSpaceOp = cast<IterationSpaceInfoInterface>(this->getOperation());
-  auto outputMap = iterSpaceOp.getOutputIterSpaceMap();
+  AffineMap outputMap = getOutputIterSpaceMap();
   if (!outputMap) {
-    return AffineMap();
+    return {};
   }
-  if (inputIndex == 2) {
-    return outputMap;
+  unsigned localRank = outputMap.getNumResults() + 1;
+  AffineMap resultMap = computeCanonicalOutputIterSpaceMap(localRank);
+  if (!resultMap) {
+    return {};
   }
-
-  auto outputResExprs = outputMap.getResults();
-  int numResults = outputResExprs.size();
-  auto nDimExpr = outputResExprs[numResults - 1];
-  auto kDimExpr = getAffineDimExpr(outputMap.getNumDims() - 1, ctx);
-
-  // Initialize the input results with the output results and the replace the
-  // corresponding dimensions based on the input index.
-  auto inputExprs = llvm::to_vector(outputResExprs);
-
-  if (isA) {
-    // Map result for A is (..., m, k).
-    inputExprs[numResults - 1] = kDimExpr;
-  } else {
-    // Map result for B is (..., k, n).
-    inputExprs[numResults - 2] = kDimExpr;
-    inputExprs[numResults - 1] = nDimExpr;
+  AffineMap loops = inferLoopIterSpaceMap(resultMap, outputMap);
+  if (!loops) {
+    return {};
   }
-
-  return AffineMap::get(outputMap.getNumDims(), 0, inputExprs, ctx);
+  return computeCanonicalInputIterSpaceMap(inputIndex, localRank)
+      .compose(loops);
 }
 
 AffineMap MatmulOp::inferOutputFromInputIterSpaceMaps() {
@@ -1834,17 +1852,19 @@ AffineMap MatmulOp::inferOutputFromInputIterSpaceMaps() {
     return AffineMap();
   }
 
-  unsigned iterSpaceRank = aMap.getNumInputs();
-  assert(iterSpaceRank == bMap.getNumInputs() &&
+  assert(aMap.getNumInputs() == bMap.getNumInputs() &&
          "Iteration space rank doesn't match");
-  MLIRContext *ctx = getContext();
-
-  // Map result for output is (..., m, n). Initialize the output results with
-  // input A results and then replace the k dimension with the n dimension from
-  // input B.
-  SmallVector<AffineExpr> outputExprs = llvm::to_vector(aMap.getResults());
-  outputExprs.back() = bMap.getResults().back();
-  return AffineMap::get(iterSpaceRank, 0, outputExprs, ctx);
+  unsigned localRank = aMap.getNumResults() + 1;
+  SmallVector<AffineMap> operandMaps = {
+      computeCanonicalInputIterSpaceMap(0, localRank),
+      computeCanonicalInputIterSpaceMap(1, localRank)};
+  if (!operandMaps[0] || !operandMaps[1]) {
+    return {};
+  }
+  AffineMap toLoops =
+      inversePermutation(concatAffineMaps(operandMaps, getContext()));
+  return computeCanonicalOutputIterSpaceMap(localRank).compose(toLoops).compose(
+      concatAffineMaps({aMap, bMap}, getContext()));
 }
 
 // ===----------------------------------------------------------------------===//
@@ -1969,6 +1989,66 @@ AffineMap SplatOp::getInputIterSpaceMap(unsigned inputIdx) {
                         getContext());
 }
 
+//===----------------------------------------------------------------------===//
+// IterationDomainOpInterface implementations for MatmulOp and ContractionOp.
+//===----------------------------------------------------------------------===//
+
+SmallVector<utils::IteratorType> MatmulOp::getLoopIteratorTypes() {
+  SmallVector<utils::IteratorType> iteratorTypes(getC().getType().getRank(),
+                                                 utils::IteratorType::parallel);
+  iteratorTypes.push_back(utils::IteratorType::reduction);
+  return iteratorTypes;
+}
+
+ArrayAttr MatmulOp::getIndexingMaps() {
+  AffineMap resultMap = getResultIndexingMaps().front();
+  SmallVector<AffineExpr> lhs(resultMap.getResults()), rhs(lhs);
+  AffineExpr k = getAffineDimExpr(resultMap.getNumDims() - 1, getContext());
+  lhs.back() = k;
+  rhs[rhs.size() - 2] = k;
+  SmallVector<AffineMap> maps;
+  for (ArrayRef<AffineExpr> coordinates :
+       {ArrayRef<AffineExpr>(lhs), ArrayRef<AffineExpr>(rhs)}) {
+    maps.push_back(
+        AffineMap::get(resultMap.getNumDims(), 0, coordinates, getContext()));
+  }
+  if (getAcc()) {
+    maps.push_back(resultMap);
+  }
+  return Builder(getContext()).getAffineMapArrayAttr(maps);
+}
+
+SmallVector<AffineMap> MatmulOp::getResultIndexingMaps() {
+  unsigned rank = getC().getType().getRank();
+  return {AffineMap::getFilteredIdentityMap(
+      getContext(), rank + 1, [rank](AffineDimExpr dimension) {
+        return dimension.getPosition() < rank;
+      })};
+}
+
+SmallVector<utils::IteratorType> ContractionOp::getLoopIteratorTypes() {
+  AffineMap resultMap = getResultIndexingMap();
+  SmallVector<utils::IteratorType> iteratorTypes(
+      resultMap.getNumDims(), utils::IteratorType::reduction);
+  for (AffineExpr expr : resultMap.getResults()) {
+    iteratorTypes[cast<AffineDimExpr>(expr).getPosition()] =
+        utils::IteratorType::parallel;
+  }
+  return iteratorTypes;
+}
+
+SmallVector<AffineMap> ContractionOp::getResultIndexingMaps() {
+  return {getResultIndexingMap()};
+}
+
+ArrayAttr ContractionOp::getIndexingMaps() {
+  SmallVector<AffineMap> maps = {getLhsIndexingMap(), getRhsIndexingMap()};
+  if (getAcc()) {
+    maps.push_back(getResultIndexingMap());
+  }
+  return Builder(getContext()).getAffineMapArrayAttr(maps);
+}
+
 // ===----------------------------------------------------------------------===//
 // IotaOp
 // ===----------------------------------------------------------------------===//
@@ -2003,6 +2083,13 @@ LogicalResult IotaOp::verify() {
                          << dimension
                          << " exceeds the maximum value representable in the "
                          << "iota element type";
+  }
+  return success();
+}
+
+LogicalResult NegIOp::verify() {
+  if (getOverflow() == IntegerOverflow::NUW) {
+    return emitOpError("'no_unsigned_wrap' overflow flag is not supported");
   }
   return success();
 }

@@ -73,6 +73,21 @@ module {
 
 module {
   gpu.module @kernels {
+  func.func @unaligned_slice() attributes {gpu.kernel} {
+    %input = nv_tensor_ir.constant dense<1.0> : tensor<2x4xf32>
+    // expected-error @+2 {{staged nv_tensor_ir.slice requires sizes that divide the tile and offsets that are multiples of the sizes}}
+    // expected-error @+1 {{failed to legalize operation 'nv_tensor_ir.slice'}}
+    %slice = nv_tensor_ir.slice %input starts = [0, 1] limits = [2, 3] strides = [1, 1]
+        : tensor<2x4xf32> -> tensor<2x2xf32>
+    return
+  }
+  }
+}
+
+// -----
+
+module {
+  gpu.module @kernels {
   // expected-error @+1 {{outlined TensorIR kernel arguments must be scalars or strided memrefs, but got 'tensor<4xf32>'}}
   func.func @tensor_argument(%arg: tensor<4xf32>) attributes {gpu.kernel} {
     return

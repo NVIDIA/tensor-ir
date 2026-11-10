@@ -46,6 +46,23 @@ using tensor_ir::rt::Stream;
 using tensor_ir::rt::TensorView;
 using tensor_ir::rt::Workspace;
 
+static_assert(MlirTensorIRElementTypeBool == 0);
+static_assert(MlirTensorIRElementTypeF16 == 1);
+static_assert(MlirTensorIRElementTypeBF16 == 2);
+static_assert(MlirTensorIRElementTypeF32 == 3);
+static_assert(MlirTensorIRElementTypeF64 == 4);
+static_assert(MlirTensorIRElementTypeSI8 == 5);
+static_assert(MlirTensorIRElementTypeSI16 == 6);
+static_assert(MlirTensorIRElementTypeSI32 == 7);
+static_assert(MlirTensorIRElementTypeSI64 == 8);
+static_assert(MlirTensorIRElementTypeUI8 == 9);
+static_assert(MlirTensorIRElementTypeUI16 == 10);
+static_assert(MlirTensorIRElementTypeUI32 == 11);
+static_assert(MlirTensorIRElementTypeUI64 == 12);
+static_assert(MlirTensorIRElementTypeF8E4M3FN == 13);
+static_assert(MlirTensorIRElementTypeF8E5M2 == 14);
+static_assert(MlirTensorIRElementTypeF8E8M0FNU == 15);
+
 MlirTensorIRBytecodeVersion
 wrapBytecodeVersion(const BytecodeVersion &version) {
   return {version.getMajor(), version.getMinor(), version.getTag()};
@@ -97,6 +114,8 @@ StatusOr<ElementType> unwrapElementType(MlirTensorIRElementType type) {
     return ElementType::F8E4M3FN;
   case MlirTensorIRElementTypeF8E5M2:
     return ElementType::F8E5M2;
+  case MlirTensorIRElementTypeF8E8M0FNU:
+    return ElementType::F8E8M0FNU;
   }
   return Status::InvalidArgument("unsupported TensorIR element type");
 }
@@ -220,6 +239,7 @@ MlirLogicalResult mlirTensorIRElementTypeFromSpelling(
                    .Case("ui64", MlirTensorIRElementTypeUI64)
                    .Case("f8E4M3FN", MlirTensorIRElementTypeF8E4M3FN)
                    .Case("f8E5M2", MlirTensorIRElementTypeF8E5M2)
+                   .Case("f8E8M0FNU", MlirTensorIRElementTypeF8E8M0FNU)
                    .Default(std::nullopt);
   if (!match) {
     return reportStatus(
@@ -231,7 +251,7 @@ MlirLogicalResult mlirTensorIRElementTypeFromSpelling(
   return mlirLogicalResultSuccess();
 }
 
-// BytecodeVersion C API
+/// BytecodeVersion C API
 
 MlirTensorIRBytecodeVersion mlirTensorIRGetCurrentBytecodeVersion(void) {
   return wrapBytecodeVersion(BytecodeVersion::kCurrentVersion);
@@ -271,7 +291,7 @@ uint32_t mlirTensorIRBytecodeVersionHash(MlirTensorIRBytecodeVersion version) {
          (static_cast<uint32_t>(version.minor) << 16) | version.tag;
 }
 
-// Program C API
+/// Program C API
 
 MlirLogicalResult mlirTensorIRCalculateCacheKey(
     MlirModule module, MlirTensorIRCompilerInvocation invocation,
@@ -372,6 +392,44 @@ MlirTensorIRArtifact mlirTensorIRArtifactCompile(
 
 void mlirTensorIRArtifactDestroy(MlirTensorIRArtifact artifact) {
   delete static_cast<tensor_ir::rt::TensorIRArtifact *>(artifact.ptr);
+}
+
+MlirLogicalResult mlirTensorIRCompilerInvocationHasRemarks(
+    MlirTensorIRCompilerInvocation invocation, bool *enabled,
+    MlirStringCallback errorCallback, void *errorUserData) {
+  if (!invocation.ptr || !enabled) {
+    return reportStatus(
+        Status::InvalidArgument("invocation and enabled must not be null"),
+        errorCallback, errorUserData);
+  }
+  const auto &options =
+      *static_cast<const CompilerInvocation *>(invocation.ptr);
+  auto status = options.validate();
+  if (!status.ok()) {
+    return reportStatus(status, errorCallback, errorUserData);
+  }
+  auto filters =
+      mlir::nv_tensor_ir::resolveRemarkFilters(options.optimizationRemarks);
+  if (!filters.ok()) {
+    return reportStatus(filters.status(), errorCallback, errorUserData);
+  }
+  *enabled = filters->isEnabled();
+  return mlirLogicalResultSuccess();
+}
+
+MlirLogicalResult mlirTensorIRArtifactGetRemarks(
+    MlirTensorIRArtifact artifact, MlirStringCallback callback, void *userData,
+    MlirStringCallback errorCallback, void *errorUserData) {
+  if (!artifact.ptr || !callback) {
+    return reportStatus(
+        Status::InvalidArgument("artifact and callback must not be null"),
+        errorCallback, errorUserData);
+  }
+  llvm::StringRef yaml =
+      static_cast<const tensor_ir::rt::TensorIRArtifact *>(artifact.ptr)
+          ->getRemarks();
+  callback(mlirStringRefCreate(yaml.data(), yaml.size()), userData);
+  return mlirLogicalResultSuccess();
 }
 
 MlirLogicalResult mlirTensorIRArtifactGetBytecode(

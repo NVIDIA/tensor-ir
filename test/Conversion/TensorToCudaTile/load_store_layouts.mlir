@@ -8,8 +8,8 @@
 // CHECK-LABEL: entry @loads_unary_elementwise
 // CHECK-SAME: (%[[INPTR:.+]]: tile<ptr<f32>>, %[[OUTPTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
-// CHECK-DAG: %[[COL:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[ROW:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[COL:.+]] = remi %[[BID_X]],
 // CHECK: %[[VIEW1:.+]] = make_tensor_view %[[INPTR]], shape = [32, 32], strides = [32, 1]
 // CHECK: %[[PVIEW1:.+]] = make_partition_view %[[VIEW1]] : partition_view<tile=(16x16), tensor_view<32x32xf32, strides=[32,1]>>
 // CHECK: %[[TILE1:.+]], %{{.+}} = load_view_tko weak %[[PVIEW1]][%[[ROW]], %[[COL]]] {{.+}} tile<16x16xf32>, token
@@ -39,8 +39,8 @@ module {
 // CHECK-LABEL: entry @loads_binary_elementwise
 // CHECK-SAME: (%[[IN0_PTR:.+]]: tile<ptr<f32>>, %[[IN1_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
-// CHECK-DAG: %[[COL:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[ROW:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[COL:.+]] = remi %[[BID_X]],
 // CHECK: %[[TVIEW01:.+]] = make_tensor_view %[[IN0_PTR]], shape = [32, 32], strides = [32, 1]
 // CHECK: %[[PVIEW01:.+]] = make_partition_view %[[TVIEW01]] : partition_view<tile=(16x16), tensor_view<32x32xf32, strides=[32,1]>>
 // CHECK: %[[ARG0_TILE1:.+]], %{{.+}} = load_view_tko weak %[[PVIEW01]][%[[ROW]], %[[COL]]] {{.+}} tile<16x16xf32>, token
@@ -77,8 +77,8 @@ module {
 // CHECK-LABEL: entry @loads_binary_elementwise_single_input
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
-// CHECK-DAG: %[[COL:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[ROW:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[COL:.+]] = remi %[[BID_X]],
 // CHECK: %[[TVIEW1:.+]] = make_tensor_view %[[IN_PTR]], shape = [32, 32], strides = [32, 1]
 // CHECK: %[[PVIEW1:.+]] = make_partition_view %[[TVIEW1]] : partition_view<tile=(16x16), tensor_view<32x32xf32, strides=[32,1]>>
 // CHECK: %[[TILE1:.+]], %{{.+}} = load_view_tko weak %[[PVIEW1]][%[[ROW]], %[[COL]]] {{.+}} tile<16x16xf32>, token
@@ -108,8 +108,8 @@ module {
 // CHECK-LABEL: entry @loads_binary_elementwise_lhs_input
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
-// CHECK-DAG: %[[COL:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[ROW:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[COL:.+]] = remi %[[BID_X]],
 // CHECK: %[[TVIEW1:.+]] = make_tensor_view %[[IN_PTR]], shape = [32, 32], strides = [32, 1]
 // CHECK: %[[PVIEW1:.+]] = make_partition_view %[[TVIEW1]] : partition_view<tile=(16x16), tensor_view<32x32xf32, strides=[32,1]>>
 // CHECK: %[[TILE1:.+]], %{{.+}} = load_view_tko weak %[[PVIEW1]][%[[ROW]], %[[COL]]] {{.+}} tile<16x16xf32>, token
@@ -142,8 +142,8 @@ module {
 // CHECK-LABEL: entry @loads_binary_elementwise_rhs_input
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
-// CHECK-DAG: %[[COL:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[ROW:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[COL:.+]] = remi %[[BID_X]],
 // CHECK: %[[TVIEW1:.+]] = make_tensor_view %[[IN_PTR]], shape = [32, 32], strides = [32, 1]
 // CHECK: %[[PVIEW1:.+]] = make_partition_view %[[TVIEW1]] : partition_view<tile=(16x16), tensor_view<32x32xf32, strides=[32,1]>>
 // CHECK: %[[TILE1:.+]], %{{.+}} = load_view_tko weak %[[PVIEW1]][%[[ROW]], %[[COL]]] {{.+}} tile<16x16xf32>, token
@@ -176,8 +176,8 @@ module {
 // CHECK-LABEL: entry @loads_ternary_elementwise_select
 // CHECK-SAME: (%[[IN0_PTR:.+]]: tile<ptr<i1>>, %[[IN1_PTR:.+]]: tile<ptr<f32>>, %[[IN2_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
-// CHECK-DAG: %[[COL:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[ROW:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[COL:.+]] = remi %[[BID_X]],
 // CHECK: %[[TVIEW01:.+]] = make_tensor_view %[[IN0_PTR]], shape = [32, 32], strides = [32, 1]
 // CHECK: %[[PVIEW01:.+]] = make_partition_view %[[TVIEW01]] : partition_view<tile=(16x16), tensor_view<32x32xi1, strides=[32,1]>>
 // CHECK: %[[ARG0_TILE1:.+]], %{{.+}} = load_view_tko weak %[[PVIEW01]][%[[ROW]], %[[COL]]] {{.+}} tile<16x16xi1>, token
@@ -221,8 +221,8 @@ module {
 // CHECK-LABEL: entry @loads_transpose_kernel
 // CHECK-SAME: (%[[INPTR:.+]]: tile<ptr<f32>>, %[[OUTPTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
-// CHECK-DAG: %[[COL:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[ROW:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[COL:.+]] = remi %[[BID_X]],
 // CHECK: %[[VIEW:.+]] = make_tensor_view %[[INPTR]], shape = [32, 32], strides = [1, 32]
 // CHECK: %[[PVIEW:.+]] = make_partition_view %[[VIEW]] : partition_view<tile=(16x16), tensor_view<32x32xf32, strides=[1,32]>>
 // CHECK: %[[TILE:.+]], %{{.+}} = load_view_tko weak %[[PVIEW]][%[[ROW]], %[[COL]]] {{.+}} tile<16x16xf32>, token
@@ -244,8 +244,8 @@ module {
 // CHECK-LABEL: entry @loads_multiple_convert
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f16>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
-// CHECK-DAG: %[[COL:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[ROW:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[COL:.+]] = remi %[[BID_X]],
 // CHECK: %[[TVIEW1:.+]] = make_tensor_view %[[IN_PTR]], shape = [32, 32], strides = [32, 1]
 // CHECK: %[[PVIEW1:.+]] = make_partition_view %[[TVIEW1]] : partition_view<tile=(16x16), tensor_view<32x32xf16, strides=[32,1]>>
 // CHECK: %[[TILE1:.+]], %{{.+}} = load_view_tko weak %[[PVIEW1]][%[[ROW]], %[[COL]]] {{.+}} tile<16x16xf16>, token
@@ -275,8 +275,8 @@ module {
 // CHECK-LABEL: entry @loads_multiple_compare
 // CHECK-SAME: (%[[IN0_PTR:.+]]: tile<ptr<f32>>, %[[IN1_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<i1>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
-// CHECK-DAG: %[[COL:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[ROW:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[COL:.+]] = remi %[[BID_X]],
 // CHECK: %[[TVIEW01:.+]] = make_tensor_view %[[IN0_PTR]], shape = [32, 32], strides = [32, 1]
 // CHECK: %[[PVIEW01:.+]] = make_partition_view %[[TVIEW01]] : partition_view<tile=(16x16), tensor_view<32x32xf32, strides=[32,1]>>
 // CHECK: %[[ARG0_TILE1:.+]], %{{.+}} = load_view_tko weak %[[PVIEW01]][%[[ROW]], %[[COL]]] {{.+}} tile<16x16xf32>, token
@@ -319,8 +319,8 @@ module {
 // CHECK-SAME: (%[[IN_PTR:.+]]: tile<ptr<f32>>, %[[OUT_PTR:.+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[BID_X:.+]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
 // CHECK-DAG: %[[ZERO:.+]] = constant <i32: 0> : tile<i32>
-// CHECK-DAG: %[[ROW:.+]] = remi %[[BID_X]],
-// CHECK-DAG: %[[COL:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[ROW:.+]] = divi %[[BID_X]],
+// CHECK-DAG: %[[COL:.+]] = remi %[[BID_X]],
 // CHECK: %[[TVIEW_IN:.+]] = make_tensor_view %[[IN_PTR]], shape = [4, 8, 4, 8], strides = [1, 4, 32, 128]
 // CHECK: %[[PVIEW_IN:.+]] = make_partition_view %[[TVIEW_IN]] : partition_view<tile=(4x8x2x1), tensor_view<4x8x4x8xf32, strides=[1,4,32,128]>>
 // CHECK: %[[TILE:.+]], %{{.+}} = load_view_tko weak %[[PVIEW_IN]][%[[ZERO]], %[[ZERO]], %[[ROW]], %[[COL]]] {{.+}} tile<4x8x2x1xf32>, token

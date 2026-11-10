@@ -9,14 +9,12 @@
 
 #define DEBUG_TYPE "rewrite-unsupported-ops"
 
-//===----------------------------------------------------------------------===//
-// Rewrite Unsupported Ops
-//===----------------------------------------------------------------------===//
-// This is the place to fix up ops that TensorIR needs but the cutile dialect
-// cannot represent, before the graph is converted to CudaTile. Everything
-// after this pass can assume a CudaTile-compatible graph. New rewrites for
-// unsupported ops should be added here, not scattered across later passes.
-//===----------------------------------------------------------------------===//
+/// Rewrite Unsupported Ops
+///
+/// This is the place to fix up ops that TensorIR needs but the cutile dialect
+/// cannot represent, before the graph is converted to CudaTile. Everything
+/// after this pass can assume a CudaTile-compatible graph. New rewrites for
+/// unsupported ops should be added here, not scattered across later passes.
 
 #include "tensor_ir/Transform/Passes.h"
 

@@ -14,12 +14,13 @@
 
 #include <optional>
 
+using namespace mlir;
+using namespace mlir::nv_tensor_ir;
+
 // ODS-generated definitions.
 #include "tensor_ir/Dialect/TensorDialect.cpp.inc"
 #include "tensor_ir/Dialect/TensorOpInterfaces.cpp.inc"
 
-using namespace mlir;
-using namespace mlir::nv_tensor_ir;
 namespace tcg = mlir::nv_tensor_ir::tcutegen;
 
 namespace mlir::nv_tensor_ir {

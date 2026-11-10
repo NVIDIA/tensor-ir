@@ -473,6 +473,34 @@ nv_tensor_ir.graph @normalize_matmul_no_batch(
 
 // -----
 
+// Matmul operands retain the normalized reduction source, with the reduced
+// dimension moved after the non-reduced dimensions.
+// CHECK-LABEL: @normalize_matmul_lhs_reduction
+// CHECK-NEXT: iteration_space: #nv_tensor_ir.matmul_source<"(8,32,16):(512,16,1)", 1, 8, 32, 16, #nv_tensor_ir.reduction_source<"(8,16,(4)):(64,4,(1))", #nv_tensor_ir.tensor_source<0, 0, "(8,16,4):(16,1,128)">>, #nv_tensor_ir.tensor_source<1, 0, "(16,32):(32,1)">>
+nv_tensor_ir.graph @normalize_matmul_lhs_reduction(
+        %values: tensor<4x8x16xf32> {nv_tensor_ir.stride = "(128,16,1)"},
+        %rhs: tensor<16x32xf32> {nv_tensor_ir.stride = "(32,1)"}) -> (tensor<8x32xf32> {nv_tensor_ir.stride = "(32,1)"}) {
+    %reduced = reduce(%values)<dimensions = [0], reduction_mode = <add>> : tensor<4x8x16xf32> -> tensor<1x8x16xf32>
+    %lhs = reshape %reduced : tensor<1x8x16xf32> -> tensor<8x16xf32>
+    %matmul = matmul(%lhs, %rhs) : (tensor<8x16xf32>, tensor<16x32xf32>) -> tensor<8x32xf32>
+    results %matmul : tensor<8x32xf32>
+}
+
+// -----
+
+// CHECK-LABEL: @normalize_matmul_rhs_reduction
+// CHECK-NEXT: iteration_space: #nv_tensor_ir.matmul_source<"(8,32,16):(512,16,1)", 1, 8, 32, 16, #nv_tensor_ir.tensor_source<0, 0, "(8,16):(16,1)">, #nv_tensor_ir.reduction_source<"(16,32,(4)):(128,4,(1))", #nv_tensor_ir.tensor_source<1, 0, "(16,32,4):(32,1,512)">>>
+nv_tensor_ir.graph @normalize_matmul_rhs_reduction(
+        %lhs: tensor<8x16xf32> {nv_tensor_ir.stride = "(16,1)"},
+        %values: tensor<4x16x32xf32> {nv_tensor_ir.stride = "(512,32,1)"}) -> (tensor<8x32xf32> {nv_tensor_ir.stride = "(32,1)"}) {
+    %reduced = reduce(%values)<dimensions = [0], reduction_mode = <add>> : tensor<4x16x32xf32> -> tensor<1x16x32xf32>
+    %rhs = reshape %reduced : tensor<1x16x32xf32> -> tensor<16x32xf32>
+    %matmul = matmul(%lhs, %rhs) : (tensor<8x16xf32>, tensor<16x32xf32>) -> tensor<8x32xf32>
+    results %matmul : tensor<8x32xf32>
+}
+
+// -----
+
 // CHECK-LABEL: @normalize_matmul_batch_one
 // CHECK-NEXT: iteration_space: #nv_tensor_ir.matmul_source<"(2,4,8,16):(512,128,16,1)", 2, 4, 8, 16, #nv_tensor_ir.tensor_source<0, 0, "(2,4,16):(1,2,8)">, #nv_tensor_ir.tensor_source<1, 0, "(2,16,8):(1,2,32)">>
 nv_tensor_ir.graph @normalize_matmul_batch_one(

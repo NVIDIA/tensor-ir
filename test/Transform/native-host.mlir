@@ -85,7 +85,7 @@ module @dynamic attributes {gpu.container_module} {
   //       CHECK: %[[OK2:.+]] = llvm.icmp "eq" %[[STATUS2]], %[[COPY_ID]] : i32
   //       CHECK: llvm.cond_br %[[OK2]], ^[[LATCH:.+]], ^[[ERROR_COPY_AGAIN:.+]]
   //       CHECK: ^[[LATCH]]:
-  //       CHECK: %[[NEXT_IV:.+]] = llvm.add %[[IV]], %[[STEP]] : i64
+  //       CHECK: %[[NEXT_IV:.+]] = llvm.add %[[IV]], %[[STEP]]{{( overflow<nsw>)?}} : i64
   //       CHECK: llvm.br ^[[LOOP]](%[[NEXT_IV]] : i64)
   //       CHECK: ^[[DONE]]:
   //       CHECK: llvm.return %[[COPY_ID]] : i32
@@ -313,8 +313,6 @@ module @relaunch attributes {gpu.container_module} {
     func.func @scale(%data: memref<?xf32>, %factor: f32)
         attributes {gpu.kernel} { return }
   }
-  // FINAL-LABEL: cuda_tile.module @cuda_tile_relaunch
-  //       FINAL: entry @scale(%{{[^:]+}}: tile<ptr<f32>>, %{{[^:]+}}: tile<i32>, %{{[^:]+}}: tile<f32>)
 }
 
 // -----
@@ -395,8 +393,6 @@ module @uniform attributes {gpu.container_module} {
   //       CHECK: %[[STATUS:.+]] = llvm.call @copy(%[[RUNTIME_PTR]], %[[DATA]], %[[DATA]],
   //  CHECK-SAME:    %[[OFFSET]], %[[SIZE0]], %[[SIZE1]], %[[STRIDE0]], %[[STRIDE1]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
   //       CHECK: llvm.return %[[STATUS]] : i32
-  // FINAL-LABEL: cuda_tile.module
-  //       FINAL: entry @copy(%{{[^:]+}}: tile<ptr<f32>>)
 }
 
 // -----

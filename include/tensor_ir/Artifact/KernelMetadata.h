@@ -1,12 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===----------------------------------------------------------------------===//
-// Kernel launch metadata — compiled arguments, grid, and scheduling
-//
-// The compiler produces this metadata and the runtime uses it to pack the flat
-// kernel argument list and compute grid dimensions dynamically.
-//===----------------------------------------------------------------------===//
+/// Kernel launch metadata — compiled arguments, grid, and scheduling
+///
+/// The compiler produces this metadata and the runtime uses it to pack the flat
+/// kernel argument list and compute grid dimensions dynamically.
 
 #ifndef TENSOR_IR_ARTIFACT_KERNEL_METADATA_H_
 #define TENSOR_IR_ARTIFACT_KERNEL_METADATA_H_
@@ -26,6 +24,8 @@
 namespace tensor_ir::rt {
 
 /// Element type of a tensor or scalar kernel argument.
+///
+/// Append-only: ordinals are serialized in TensorIR artifacts.
 enum class ElementType : uint8_t {
   Bool = 0,
   F16,
@@ -42,17 +42,24 @@ enum class ElementType : uint8_t {
   UI16,
   UI32,
   UI64,
-  // The largest defined value -- the enum is dense, so [Bool,
-  // kMaxElementType] is exactly its valid range.
-  kMaxElementType = UI64,
+  F4E2M1FN = 15,
+  F8E8M0FNU = 16,
+  /// The largest defined value -- the enum is dense, so [Bool,
+  /// kMaxElementType] is exactly its valid range.
+  kMaxElementType = F8E8M0FNU,
 };
 
-int32_t getElementByteWidth(ElementType type);
+/// Logical width of one element.
+int32_t getElementBitWidth(ElementType type);
+
+/// Storage occupied by one byte-addressable, by-value scalar. The element's
+/// logical width must be a multiple of eight.
+int32_t getScalarByteWidth(ElementType type);
 
 bool isValidElementType(ElementType type);
 
 /// A by-value scalar kernel argument. All state is immutable, including through
-/// assignment; construction rejects unknown element types.
+/// assignment; construction rejects unknown and sub-byte element types.
 struct ScalarArgDesc {
   static ::mlir::nv_tensor_ir::StatusOr<ScalarArgDesc>
   create(ElementType elementType);
@@ -67,9 +74,11 @@ private:
   explicit ScalarArgDesc(ElementType elementType);
 };
 
-/// A pointer argument with a shape and optional explicit strides. Factories
-/// copy input storage; callers cannot mutate a descriptor through input aliases.
-/// Const storage also leaves moved-from descriptors valid and unchanged.
+/// A pointer argument with a shape and optional explicit strides. Static
+/// sub-byte shapes must contain complete byte-sized element groups. Factories
+/// copy input storage; callers cannot mutate a descriptor through input
+/// aliases. Const storage also leaves moved-from descriptors valid and
+/// unchanged.
 struct TensorArgDesc {
   static constexpr int64_t kDynamic = std::numeric_limits<int64_t>::min();
 

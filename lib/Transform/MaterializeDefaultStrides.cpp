@@ -1,15 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===- MaterializeDefaultStrides.cpp - Row-major stride materialization ---===//
-//
-// Attaches a row-major stride attribute to every GraphOp argument and result
-// of RankedTensorType that does not already declare one. Running this pass at the
-// front of every backend pipeline turns TensorIR's row-major default into an
-// explicit IR fact, so downstream code can read strides from the graph
-// attributes without needing to know the default-layout convention.
-//
-//===----------------------------------------------------------------------===//
+/// Attaches a row-major stride attribute to every GraphOp argument and result
+/// of RankedTensorType that does not already declare one. Running this pass at the
+/// front of every backend pipeline turns TensorIR's row-major default into an
+/// explicit IR fact, so downstream code can read strides from the graph
+/// attributes without needing to know the default-layout convention.
 
 #include "tensor_ir/Dialect/TensorIR.h"
 #include "tensor_ir/Support/TCutegen.h"

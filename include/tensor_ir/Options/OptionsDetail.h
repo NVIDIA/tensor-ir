@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Runtime support for code emitted by -gen-component-options.
+/// Runtime support for code emitted by -gen-component-options.
 
 #ifndef TENSORIR_OPTIONS_OPTIONSDETAIL_H
 #define TENSORIR_OPTIONS_OPTIONSDETAIL_H
@@ -76,7 +76,7 @@ LogicalResult parseValue(llvm::StringRef value, T &out) {
 
 constexpr char kDynamicExtentToken = '?';
 constexpr llvm::StringLiteral kShapeSeparators = ",x";
-// Kept independent of MLIR IR headers; Options.cpp checks this value.
+/// Kept independent of MLIR IR headers; Options.cpp checks this value.
 constexpr int64_t kDynamicExtent = std::numeric_limits<int64_t>::min();
 inline LogicalResult parseShapeExtent(llvm::StringRef value, int64_t &out) {
   if (value == "?") {

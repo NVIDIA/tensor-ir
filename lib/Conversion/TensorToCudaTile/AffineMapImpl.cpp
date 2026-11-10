@@ -300,7 +300,8 @@ private:
 
 /// Process a single tensor (input or output) and create its descriptor.
 /// Returns the number of arguments consumed for this tensor.
-/// @param metadata Static descriptor sizes, strides, and divisibility facts.
+///
+/// \param metadata Static descriptor sizes, strides, and divisibility facts.
 ///                 If metadata has no explicit strides, row-major strides are
 ///                 computed from sizes and no stride args are expected.
 static size_t processTensorDescriptor(
@@ -982,14 +983,14 @@ private:
 
   cuda_tile::GetTileBlockIdOp getTileBlockIdOp;
 
-  // Mapping from tensor view Values to their descriptors.
+  /// Mapping from tensor view Values to their descriptors.
   DenseMap<Value, CudaTileTensorDescriptor *> tensorViewToDescriptorMap;
 
-  // Mapping from (iter_space_id, dim_idx) to insertion points.
+  /// Mapping from (iter_space_id, dim_idx) to insertion points.
   DenseMap<std::pair<int32_t, int64_t>, OpBuilder::InsertPoint>
       iterSpaceDimInsertPoints;
 
-  // Sorted list of iteration space IDs in the graph.
+  /// Sorted list of iteration space IDs in the graph.
   SmallVector<int32_t> iterSpaceIds;
 };
 
@@ -1388,7 +1389,8 @@ void StaticPersistenceStrategy::createReturnOp(OpBuilder &builder, Location loc,
 
 /// Convert function argument types. Tensors are expanded into non-aggregated
 /// descriptor arguments: pointer, dimension sizes and strides.
-/// @param numDynamicStrides Number of dynamic strides from stride attribute.
+///
+/// \param numDynamicStrides Number of dynamic strides from stride attribute.
 LogicalResult functionArgumentConverter(Type argType,
                                         const TypeConverter &typeConverter,
                                         SmallVectorImpl<Type> &result,
@@ -1662,11 +1664,13 @@ buildPartitionView(ConversionPatternRewriter &rewriter,
 
 /// Compute row-major dynamic strides from sizes.
 /// For row-major: stride[last] = 1, stride[i] = product(size[i+1..last]).
-/// @param staticStrides Static strides with kDynamic markers
+///
+/// \param staticStrides Static strides with kDynamic markers
 ///                      Must contain at least one dynamic stride.
-/// @param staticSizes Static sizes with kDynamic markers
-/// @param dynamicSizes Dynamic size values in order
-/// @return Dynamic stride values for each kDynamic in staticStrides,
+/// \param staticSizes Static sizes with kDynamic markers
+/// \param dynamicSizes Dynamic size values in order
+///
+/// \returns Dynamic stride values for each kDynamic in staticStrides,
 ///         in left-to-right (increasing index) order.
 static SmallVector<Value> computeRowMajorDynamicStrides(
     Location loc, OpBuilder &builder, ArrayRef<int64_t> staticStrides,

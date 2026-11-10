@@ -6,9 +6,9 @@
 
 include "mlir/IR/EnumAttr.td"
 
-// The option generator consumes the standard EnumInfo records.  This small
-// case extension keeps CLI help text local to option enums without adding a
-// second enum representation.
+/// The option generator consumes the standard EnumInfo records.  This small
+/// case extension keeps CLI help text local to option enums without adding a
+/// second enum representation.
 class CompilerOptionEnumCase<string sym, int val, string str = sym,
                              string helpStr = "">
     : I32EnumCase<sym, val, str> {
@@ -58,6 +58,15 @@ def ArtifactKindEnum : CompilerOptionEnum<
      CompilerOptionEnumCase<"Cubin", 1, "cubin",
                             "Request a cubin and fall back to TileIR when no compatible assembler is available">]> {
 }
+
+def RemarkCategoryEnum : CompilerOptionEnum<
+    "RemarkCategory", "Optimization remark category",
+    [CompilerOptionEnumCase<"None", 0, "none", "Disable remarks">,
+     CompilerOptionEnumCase<"Inherit", 1, "inherit", "Use the global remark category">,
+     CompilerOptionEnumCase<"All", 2, "all", "Enable all categories">,
+     CompilerOptionEnumCase<"Memory", 3, "memory", "Memory optimization remarks">,
+     CompilerOptionEnumCase<"TensorCore", 4, "tensorcore", "Tensor-core optimization remarks">,
+    ]>;
 
 def PersistenceModeEnum : CompilerOptionEnum<
     "PersistenceMode", "Kernel persistence mode",

@@ -4,7 +4,7 @@
 // Verify Abramowitz-Stegun 7.1.26 approximation:
 //   erf(x) ~= sign(x) * (1 - poly(t) * exp(-abs(x)^2)),
 // where t = 1 / (1 + p * abs(x)).
-// CHECK-LABEL: @erf_f32
+// CHECK-LABEL: entry @erf_f32(
 // CHECK-DAG: %[[ARG0:.*]], %{{.*}} = load_view_tko {{.*}} -> [[TILE:tile<[0-9]+xf32>]], token
 // CHECK-DAG: constant <f32: 0.327591091> : [[TILE]]
 // CHECK-DAG: constant <f32: 0.254829586> : [[TILE]]

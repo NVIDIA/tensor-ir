@@ -42,11 +42,11 @@ nv_tensor_ir.graph @unequal_ranks(
 
 // CHECK-LABEL: nv_tensor_ir.graph @permuted_batches
 nv_tensor_ir.graph @permuted_batches(
-    %a: tensor<3x1x5x2xf32>, %b: tensor<7x11x1x5xf32>) -> tensor<2x7x3x11xf32> {
+    %a: tensor<3x7x5x2xf32>, %b: tensor<7x11x2x5xf32>) -> tensor<2x7x3x11xf32> {
   // CHECK: contraction(%{{[^, )]+}}, %{{[^, )]+}})
   // CHECK-SAME: maps (d0, d1, d2, d3, d4) -> (d2, d1, d4, d0), (d1, d3, d0, d4), (d0, d1, d2, d3)
-  // CHECK-SAME: : (tensor<3x1x5x2xf32>, tensor<7x11x1x5xf32>) -> tensor<2x7x3x11xf32>
-  %result = contraction(%a, %b) maps (d0, d1, d2, d3, d4) -> (d2, d1, d4, d0), (d1, d3, d0, d4), (d0, d1, d2, d3) : (tensor<3x1x5x2xf32>, tensor<7x11x1x5xf32>) -> tensor<2x7x3x11xf32>
+  // CHECK-SAME: : (tensor<3x7x5x2xf32>, tensor<7x11x2x5xf32>) -> tensor<2x7x3x11xf32>
+  %result = contraction(%a, %b) maps (d0, d1, d2, d3, d4) -> (d2, d1, d4, d0), (d1, d3, d0, d4), (d0, d1, d2, d3) : (tensor<3x7x5x2xf32>, tensor<7x11x2x5xf32>) -> tensor<2x7x3x11xf32>
   results %result : tensor<2x7x3x11xf32>
 }
 
@@ -66,11 +66,11 @@ nv_tensor_ir.graph @permuted_domain(
 
 // CHECK-LABEL: nv_tensor_ir.graph @dynamic
 nv_tensor_ir.graph @dynamic(
-    %a: tensor<?x1x?x5x?xf32>, %b: tensor<2x?x5x7x11xf32>) -> tensor<2x?x?x11xf32> {
+    %a: tensor<?x?x?x5x?xf32>, %b: tensor<2x?x5x7x11xf32>) -> tensor<2x?x?x11xf32> {
   // CHECK: contraction(%{{[^, )]+}}, %{{[^, )]+}})
   // CHECK-SAME: maps (d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d4, d5), (d0, d1, d4, d5, d3), (d0, d1, d2, d3)
-  // CHECK-SAME: : (tensor<?x1x?x5x?xf32>, tensor<2x?x5x7x11xf32>) -> tensor<2x?x?x11xf32>
-  %result = contraction(%a, %b) maps (d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d4, d5), (d0, d1, d4, d5, d3), (d0, d1, d2, d3) : (tensor<?x1x?x5x?xf32>, tensor<2x?x5x7x11xf32>) -> tensor<2x?x?x11xf32>
+  // CHECK-SAME: : (tensor<?x?x?x5x?xf32>, tensor<2x?x5x7x11xf32>) -> tensor<2x?x?x11xf32>
+  %result = contraction(%a, %b) maps (d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d4, d5), (d0, d1, d4, d5, d3), (d0, d1, d2, d3) : (tensor<?x?x?x5x?xf32>, tensor<2x?x5x7x11xf32>) -> tensor<2x?x?x11xf32>
   results %result : tensor<2x?x?x11xf32>
 }
 

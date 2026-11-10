@@ -11,6 +11,7 @@
 #include "mlir/Conversion/MathToLibm/MathToLibm.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Passes.h"
@@ -75,6 +76,9 @@ void mlir::nv_tensor_ir::buildLinalgPipeline(
   if (options.useLibm) {
     pm.addPass(createConvertMathToLibmPass());
   }
+  arith::ArithExpandOpsPassOptions arithOptions;
+  arithOptions.includeFlushDenormals = true;
+  pm.addPass(arith::createArithExpandOpsPass(arithOptions));
   pm.addPass(createConvertToLLVMPass());
   pm.addPass(createReconcileUnrealizedCastsPass());
 }

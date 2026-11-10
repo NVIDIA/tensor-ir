@@ -7,7 +7,6 @@
 /// bridge those buffers to the original tensor computation. The pass creates
 /// no memory accesses and performs no tiling or grid construction; grid
 /// formation replaces the bridges with tiled TensorIR loads and stores.
-///
 /// Each buffer binds to exactly one tensor, recorded by `restrict` on both
 /// bridge operations.
 

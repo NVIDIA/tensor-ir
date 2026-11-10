@@ -1,5 +1,5 @@
 // RUN: tensor_ir-opt %s --tir-linalg-pipeline \
-// RUN:   | mlir-runner -e main -entry-point-result=void --shared-libs=%mlir_c_runner_utils
+// RUN:   | mlir-runner -e main -entry-point-result=void
 
 func.func @rows(%a: tensor<?x2xf32>, %b: tensor<?x2xf32>) -> tensor<?x2xf32> {
   %r = nv_tensor_ir.concatenate %a, %b dimension = 0 : (tensor<?x2xf32>, tensor<?x2xf32>) -> tensor<?x2xf32>

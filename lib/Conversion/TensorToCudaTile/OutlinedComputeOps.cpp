@@ -1,14 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===- OutlinedComputeOps.cpp - Lower explicit TensorIR tiles ------------===//
-//
-// Stateless conversions for compute in an outlined tiled program. The tile
-// shape is part of each ranked-tensor result type and every input tile arrives
-// through the conversion adaptor. No layout-propagation attribute or mutable
-// conversion state is consulted here.
-//
-//===----------------------------------------------------------------------===//
+/// Stateless conversions for compute in an outlined tiled program. The tile
+/// shape is part of each ranked-tensor result type and every input tile arrives
+/// through the conversion adaptor. No layout-propagation attribute or mutable
+/// conversion state is consulted here.
 
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTileInternal.h"
 
@@ -20,10 +16,73 @@
 #include "MinVersionInfo.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
 #include <cmath>
+#include <limits>
 #include <type_traits>
 
 namespace mlir::nv_tensor_ir::tensor_to_cuda_tile {
 namespace {
+
+static cuda_tile::RoundingMode convertRoundingMode(RoundingMode mode) {
+  switch (mode) {
+  case RoundingMode::NEAREST_EVEN:
+    return cuda_tile::RoundingMode::NEAREST_EVEN;
+  case RoundingMode::ZERO:
+    return cuda_tile::RoundingMode::ZERO;
+  case RoundingMode::NEGATIVE_INF:
+    return cuda_tile::RoundingMode::NEGATIVE_INF;
+  case RoundingMode::POSITIVE_INF:
+    return cuda_tile::RoundingMode::POSITIVE_INF;
+  }
+  llvm_unreachable("unknown TensorIR rounding mode");
+}
+
+static cuda_tile::IntegerOverflow convertOverflow(IntegerOverflow overflow) {
+  switch (overflow) {
+  case IntegerOverflow::NONE:
+    return cuda_tile::IntegerOverflow::NONE;
+  case IntegerOverflow::NSW:
+    return cuda_tile::IntegerOverflow::NSW;
+  case IntegerOverflow::NUW:
+    return cuda_tile::IntegerOverflow::NUW;
+  case IntegerOverflow::NW:
+    return cuda_tile::IntegerOverflow::NW;
+  }
+  llvm_unreachable("unknown TensorIR overflow policy");
+}
+
+static LogicalResult lowerShift(Operation *op, Value lhs, Value rhs, bool right,
+                                bool isSigned, IntegerOverflow overflow,
+                                ConversionPatternRewriter &rewriter) {
+  Location loc = op->getLoc();
+  auto type = cast<cuda_tile::TileType>(lhs.getType());
+  int64_t bitWidth = type.getElementType().getIntOrFloatBitWidth();
+  Value maxShift = createConstant(rewriter, loc, type, bitWidth - 1);
+  // Bound the full-width unsigned count before the backend narrows it.
+  Value safeShift = cuda_tile::MinIOp::create(rewriter, loc, rhs, maxShift,
+                                              cuda_tile::Signedness::Unsigned);
+  Value shifted;
+  if (right) {
+    shifted =
+        cuda_tile::ShRIOp::create(rewriter, loc, lhs, safeShift,
+                                  isSigned ? cuda_tile::Signedness::Signed
+                                           : cuda_tile::Signedness::Unsigned);
+  } else {
+    shifted = cuda_tile::ShLIOp::create(rewriter, loc, lhs, safeShift,
+                                        convertOverflow(overflow));
+  }
+  if (right && isSigned) {
+    rewriter.replaceOp(op, shifted);
+    return success();
+  }
+  Value width = createConstant(rewriter, loc, type, bitWidth);
+  Value inRange = cuda_tile::CmpIOp::create(
+      rewriter, loc, cuda_tile::ComparisonPredicate::LESS_THAN, rhs, width,
+      cuda_tile::Signedness::Unsigned);
+  Value zero = createConstant(rewriter, loc, type, int64_t{0});
+  rewriter.replaceOpWithNewOp<cuda_tile::SelectOp>(op, inRange, shifted, zero);
+  return success();
+}
+
 static FailureOr<cuda_tile::TileType>
 getResultType(Operation *op, const TypeConverter &typeConverter) {
   if (op->getNumResults() != 1) {
@@ -224,11 +283,52 @@ public:
         .Case<CosOp>([&](auto) {
           return replaceUnary<cuda_tile::CosOp>(op, input, rewriter);
         })
+        .Case<CoshOp>([&](auto) {
+          return replaceUnary<cuda_tile::CosHOp>(op, input, rewriter);
+        })
         .Case<FloorOp>([&](auto) {
           return replaceUnary<cuda_tile::FloorOp>(op, input, rewriter);
         })
         .Case<LogOp>([&](auto) {
           return replaceUnary<cuda_tile::LogOp>(op, input, rewriter);
+        })
+        .Case<NegIOp>([&](NegIOp neg) {
+          rewriter.replaceOpWithNewOp<cuda_tile::NegIOp>(
+              op, input, convertOverflow(neg.getOverflow()));
+          return success();
+        })
+        .Case<Log1POp>([&](Log1POp op) {
+          // Implements Kahan's method for log(1 + x)
+          // Check if rounded sum of `1 + x` is equal to 1. Use `x` if yes, otherwise use the computed approximation
+          // log1p(x): u = 1 + x;
+          //   select(u == inf, u, select(u == 1, x, log(u) * (x / (u - 1))))
+          // The `u == inf` case is needed since x / (u - 1) = inf / inf = NaN.
+          auto rounding = cuda_tile::RoundingMode::NEAREST_EVEN;
+
+          auto one = createConstant(rewriter, loc, resultType, 1.0);
+          auto u =
+              cuda_tile::AddFOp::create(rewriter, loc, input, one, rounding);
+          auto uMinusOne =
+              cuda_tile::SubFOp::create(rewriter, loc, u, one, rounding);
+          auto rhs = cuda_tile::DivFOp::create(rewriter, loc, input, uMinusOne,
+                                               rounding);
+          auto lhs = cuda_tile::LogOp::create(rewriter, loc, u);
+          auto log1pApprox =
+              cuda_tile::MulFOp::create(rewriter, loc, lhs, rhs, rounding);
+          auto cmp = cuda_tile::CmpFOp::create(
+              rewriter, loc, cuda_tile::ComparisonPredicate::EQUAL,
+              cuda_tile::ComparisonOrdering::ORDERED, u, one);
+          auto approx = cuda_tile::SelectOp::create(rewriter, loc, cmp, input,
+                                                    log1pApprox);
+          auto inf = createConstant(rewriter, loc, resultType,
+                                    std::numeric_limits<double>::infinity());
+          auto isInf = cuda_tile::CmpFOp::create(
+              rewriter, loc, cuda_tile::ComparisonPredicate::EQUAL,
+              cuda_tile::ComparisonOrdering::ORDERED, u, inf);
+          auto result =
+              cuda_tile::SelectOp::create(rewriter, loc, isInf, u, approx);
+          rewriter.replaceOp(op, result);
+          return success();
         })
         .Case<NegOp>([&](auto) {
           return replaceUnary<cuda_tile::NegFOp>(op, input, rewriter);
@@ -238,6 +338,9 @@ public:
         })
         .Case<SinOp>([&](auto) {
           return replaceUnary<cuda_tile::SinOp>(op, input, rewriter);
+        })
+        .Case<SinhOp>([&](auto) {
+          return replaceUnary<cuda_tile::SinHOp>(op, input, rewriter);
         })
         .Case<TanOp>([&](auto) {
           return replaceUnary<cuda_tile::TanOp>(op, input, rewriter);
@@ -250,6 +353,52 @@ public:
                              buildExp(rewriter, loc, input, resultElementType,
                                       exponential.getRoundingMode()));
           return success();
+        })
+        .Case<Exp2Op>([&](Exp2Op exp2) {
+          rewriter.replaceOpWithNewOp<cuda_tile::Exp2Op>(op, input,
+                                                         exp2.getFtz());
+          return success();
+        })
+        .Case<ExpM1Op>([&](ExpM1Op op) {
+          // Implements Kahan's method for exp(x) - 1
+          // expm1(x): u = exp(x);
+          //   select(u == inf, u, select(u == 1, x,
+          //          select(u - 1 == -1, -1, (u - 1) * (x / log(u)))))
+          // The `u == inf` case is needed since x / log(u) = inf / inf = NaN.
+
+          auto rounding = cuda_tile::RoundingMode::NEAREST_EVEN;
+
+          auto one = createConstant(rewriter, loc, resultType, 1.0);
+          auto minusOne = createConstant(rewriter, loc, resultType, -1.0);
+          Value u = buildExp(rewriter, loc, input, resultElementType);
+          auto logU = cuda_tile::LogOp::create(rewriter, loc, u);
+          auto rhs =
+              cuda_tile::DivFOp::create(rewriter, loc, input, logU, rounding);
+          auto um1 = cuda_tile::SubFOp::create(rewriter, loc, u, one, rounding);
+          auto approx0 =
+              cuda_tile::MulFOp::create(rewriter, loc, um1, rhs, rounding);
+          auto cmp0 = cuda_tile::CmpFOp::create(
+              rewriter, loc, cuda_tile::ComparisonPredicate::EQUAL,
+              cuda_tile::ComparisonOrdering::ORDERED, um1, minusOne);
+          auto approx1 = cuda_tile::SelectOp::create(rewriter, loc, cmp0,
+                                                     minusOne, approx0);
+          auto cmp1 = cuda_tile::CmpFOp::create(
+              rewriter, loc, cuda_tile::ComparisonPredicate::EQUAL,
+              cuda_tile::ComparisonOrdering::ORDERED, u, one);
+          auto approx2 =
+              cuda_tile::SelectOp::create(rewriter, loc, cmp1, input, approx1);
+          auto inf = createConstant(rewriter, loc, resultType,
+                                    std::numeric_limits<double>::infinity());
+          auto cmp2 = cuda_tile::CmpFOp::create(
+              rewriter, loc, cuda_tile::ComparisonPredicate::EQUAL,
+              cuda_tile::ComparisonOrdering::ORDERED, u, inf);
+          auto result =
+              cuda_tile::SelectOp::create(rewriter, loc, cmp2, u, approx2);
+          rewriter.replaceOp(op, result);
+          return success();
+        })
+        .Case<Log2Op>([&](auto) {
+          return replaceUnary<cuda_tile::Log2Op>(op, input, rewriter);
         })
         .Case<SqrtOp>([&](auto) {
           rewriter.replaceOpWithNewOp<cuda_tile::SqrtOp>(
@@ -285,6 +434,17 @@ public:
         })
         .Case<MulOp>([&](auto) {
           return lowerMul(op, operands, resultElementType, rewriter);
+        })
+        .Case<MulHighOp>([&](auto) {
+          rewriter.replaceOpWithNewOp<cuda_tile::MulhiIOp>(op, operands[0],
+                                                           operands[1]);
+          return success();
+        })
+        .Case<FmaOp>([&](FmaOp fma) {
+          rewriter.replaceOpWithNewOp<cuda_tile::FmaOp>(
+              op, operands[0], operands[1], operands[2],
+              convertRoundingMode(fma.getRoundingMode()), fma.getFtz());
+          return success();
         })
         .Case<DivOp>([&](auto) {
           return lowerDiv(op, operands, resultElementType, rewriter);
@@ -369,15 +529,29 @@ public:
           }
           return success();
         })
-        .Case<LogicalAndOp>([&](auto) {
+        .Case<AndOp>([&](auto) {
           rewriter.replaceOpWithNewOp<cuda_tile::AndIOp>(op, operands[0],
                                                          operands[1]);
           return success();
         })
-        .Case<LogicalOrOp>([&](auto) {
+        .Case<OrOp>([&](auto) {
           rewriter.replaceOpWithNewOp<cuda_tile::OrIOp>(op, operands[0],
                                                         operands[1]);
           return success();
+        })
+        .Case<XorOp>([&](auto) {
+          rewriter.replaceOpWithNewOp<cuda_tile::XOrIOp>(op, operands[0],
+                                                         operands[1]);
+          return success();
+        })
+        .Case<ShiftLeftOp>([&](ShiftLeftOp shift) {
+          return lowerShift(op, operands[0], operands[1], false, false,
+                            shift.getOverflow(), rewriter);
+        })
+        .Case<ShiftRightOp>([&](auto) {
+          return lowerShift(op, operands[0], operands[1], true,
+                            resultElementType.isSignedInteger(),
+                            IntegerOverflow::NONE, rewriter);
         })
         .Case<BinarySelectOp>([&](auto) {
           rewriter.replaceOpWithNewOp<cuda_tile::SelectOp>(
@@ -863,12 +1037,26 @@ public:
                      [](int64_t stride) { return stride != 1; })) {
       return op.emitError("staged tile slice requires unit strides");
     }
+    // `cuda_tile.extract` numbers sub-tiles of the result shape, so each size
+    // must divide the tile and each start must be a multiple of its size.
+    auto inputType = dyn_cast<cuda_tile::TileType>(input.getType());
+    if (!inputType || !inputType.hasStaticShape()) {
+      return op.emitError("staged slice requires static tile types");
+    }
     auto indexType =
         cuda_tile::TileType::get(ArrayRef<int64_t>{}, rewriter.getI32Type());
     SmallVector<Value> indices;
-    for (int64_t start : op.getStarts()) {
+    for (auto [start, limit, extent] : llvm::zip_equal(
+             op.getStarts(), op.getLimits(), inputType.getShape())) {
+      int64_t size = limit - start;
+      if (size <= 0 || extent % size != 0 || start % size != 0) {
+        return op.emitError()
+               << "staged " << op->getName()
+               << " requires sizes that divide the tile and offsets that are "
+                  "multiples of the sizes";
+      }
       indices.push_back(
-          createConstant(rewriter, op.getLoc(), indexType, start));
+          createConstant(rewriter, op.getLoc(), indexType, start / size));
     }
     rewriter.replaceOpWithNewOp<cuda_tile::ExtractOp>(op, *resultType, input,
                                                       indices);
@@ -1443,16 +1631,16 @@ using ReductionBodyRemF =
 using ReductionBodyMaxSI =
     SignedArithmeticConversion<arith::MaxSIOp, cuda_tile::MaxIOp,
                                cuda_tile::Signedness::Signed>;
-using ReductionBodyMaxUI =
-    SignedArithmeticConversion<arith::MaxUIOp, cuda_tile::MaxIOp,
-                               cuda_tile::Signedness::Unsigned>;
 using ReductionBodyMinSI =
     SignedArithmeticConversion<arith::MinSIOp, cuda_tile::MinIOp,
                                cuda_tile::Signedness::Signed>;
-using ReductionBodyMinUI =
-    SignedArithmeticConversion<arith::MinUIOp, cuda_tile::MinIOp,
-                               cuda_tile::Signedness::Unsigned>;
 
+using MaxUIConversion =
+    SignedArithmeticConversion<arith::MaxUIOp, cuda_tile::MaxIOp,
+                               cuda_tile::Signedness::Unsigned, false>;
+using MinUIConversion =
+    SignedArithmeticConversion<arith::MinUIOp, cuda_tile::MinIOp,
+                               cuda_tile::Signedness::Unsigned, false>;
 using AddIConversion =
     SimpleArithmeticConversion<arith::AddIOp, cuda_tile::AddIOp, false>;
 using SubIConversion =
@@ -1554,8 +1742,8 @@ void registerOutlinedComputePatterns(
                ReductionBodyDivF, ReductionBodyMulF, ReductionBodySubF,
                ReductionBodyAndI, ReductionBodyOrI, ReductionBodyXOrI,
                ReductionBodyMaximumF, ReductionBodyMinimumF, ReductionBodyNegF,
-               ReductionBodyRemF, ReductionBodyMaxSI, ReductionBodyMaxUI,
-               ReductionBodyMinSI, ReductionBodyMinUI>(typeConverter, context);
+               ReductionBodyRemF, ReductionBodyMaxSI, MaxUIConversion,
+               ReductionBodyMinSI, MinUIConversion>(typeConverter, context);
 }
 
 } // namespace mlir::nv_tensor_ir::tensor_to_cuda_tile

@@ -40,18 +40,19 @@ static bool isSupportedTensorIrOp(mlir::Operation *op) {
       // Type conversion.
       ConvertOp,
       // Unary pointwise.
-      AbsOp, CeilOp, FloorOp, NegOp, SqrtOp, RsqrtOp, ExpOp, LogOp, SinOp,
-      CosOp, TanOp, ErfOp,
+      AbsOp, CeilOp, FloorOp, NegOp, NegIOp, SqrtOp, RsqrtOp, ExpOp, Exp2Op,
+      ExpM1Op, LogOp, Log2Op, Log1POp, SinOp, SinhOp, CosOp, CoshOp, TanOp,
+      ErfOp,
       // Activations.
       TanhFwdOp, ReluFwdOp, SigmoidFwdOp, GeluFwdOp, GeluApproxTanhFwdOp,
       ReciprocalOp, SoftplusFwdOp, SwishFwdOp, EluFwdOp,
       // Binary pointwise.
       AddOp, SubOp, MulOp, DivOp, ModOp, RemOp, MaxOp, MinOp, PowOp, Atan2Op,
-      AddSquareOp,
+      AddSquareOp, XorOp, ShiftLeftOp, ShiftRightOp, MulHighOp, FmaOp,
       // Constants and broadcast.
       ConstantOp, SplatOp, IotaOp,
       // Comparison and logical.
-      CmpOp, BinarySelectOp, LogicalAndOp, LogicalOrOp, LogicalNotOp,
+      CmpOp, BinarySelectOp, AndOp, OrOp, LogicalNotOp,
       // Reduction.
       ReduceOp, ReduceUDOp, YieldOp,
       // Matmul.

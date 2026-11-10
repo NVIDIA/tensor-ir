@@ -92,3 +92,32 @@ module {
     }
   }
 }
+
+// -----
+
+// `index` converts to i32: index_cast sign-extends to wider integers,
+// truncates to narrower ones and forwards i32.
+module {
+  gpu.module @kernels {
+    func.func @index_cast(%index: index, %wide: i64, %same: i32, %byte: i8)
+        attributes {gpu.kernel} {
+      // CHECK-LABEL: entry @index_cast(
+      // CHECK-SAME: %[[INDEX:[^:]+]]: tile<i32>, %[[WIDE:[^:]+]]: tile<i64>, %[[SAME:[^:]+]]: tile<i32>, %[[BYTE:[^:]+]]: tile<i8>
+      // CHECK: exti %[[INDEX]] signed : tile<i32> -> tile<i64>
+      %extended = arith.index_cast %index : index to i64
+      // CHECK: trunci %[[INDEX]] : tile<i32> -> tile<i16>
+      %truncated = arith.index_cast %index : index to i16
+      // CHECK: %[[FROM_WIDE:.*]] = trunci %[[WIDE]] : tile<i64> -> tile<i32>
+      %from_wide = arith.index_cast %wide : i64 to index
+      %from_same = arith.index_cast %same : i32 to index
+      // CHECK: %[[FROM_BYTE:.*]] = exti %[[BYTE]] signed : tile<i8> -> tile<i32>
+      %from_byte = arith.index_cast %byte : i8 to index
+      // CHECK: %[[SUM:.*]] = addi %[[FROM_WIDE]], %[[SAME]] : tile<i32>
+      %sum = arith.addi %from_wide, %from_same : index
+      // CHECK: addi %[[SUM]], %[[FROM_BYTE]] : tile<i32>
+      %total = arith.addi %sum, %from_byte : index
+      // CHECK: return
+      return
+    }
+  }
+}

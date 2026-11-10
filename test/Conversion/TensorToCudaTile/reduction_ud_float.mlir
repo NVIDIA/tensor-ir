@@ -4,7 +4,7 @@
 // Arithmetic operations (floating point)
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_add
+// CHECK-LABEL: entry @test_reduce_add(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = addf %[[RHS]], %[[LHS]]
@@ -21,7 +21,7 @@ nv_tensor_ir.graph @test_reduce_add(%arg0: tensor<64x16xf32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_sub
+// CHECK-LABEL: entry @test_reduce_sub(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = subf %[[RHS]], %[[LHS]]
@@ -38,7 +38,7 @@ nv_tensor_ir.graph @test_reduce_sub(%arg0: tensor<64x16xf32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_mul
+// CHECK-LABEL: entry @test_reduce_mul(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[1.000000e+00 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = mulf %[[RHS]], %[[LHS]]
@@ -55,7 +55,7 @@ nv_tensor_ir.graph @test_reduce_mul(%arg0: tensor<64x16xf32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_div
+// CHECK-LABEL: entry @test_reduce_div(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[1.000000e+00 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = divf %[[RHS]], %[[LHS]]
@@ -72,7 +72,7 @@ nv_tensor_ir.graph @test_reduce_div(%arg0: tensor<64x16xf32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_rem
+// CHECK-LABEL: entry @test_reduce_rem(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[1.234500e+04 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = remf %[[RHS]], %[[LHS]]
@@ -89,7 +89,7 @@ nv_tensor_ir.graph @test_reduce_rem(%arg0: tensor<64x16xf32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_max
+// CHECK-LABEL: entry @test_reduce_max(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0xFF800000 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = maxf %[[RHS]], %[[LHS]]
@@ -106,7 +106,7 @@ nv_tensor_ir.graph @test_reduce_max(%arg0: tensor<64x16xf32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_min
+// CHECK-LABEL: entry @test_reduce_min(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0x7F800000 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[RES:.*]] = minf %[[RHS]], %[[LHS]]
@@ -123,7 +123,7 @@ nv_tensor_ir.graph @test_reduce_min(%arg0: tensor<64x16xf32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_neg
+// CHECK-LABEL: entry @test_reduce_neg(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   %[[NEG:.*]] = negf %[[LHS]]
@@ -146,7 +146,7 @@ nv_tensor_ir.graph @test_reduce_neg(%arg0: tensor<64x16xf32>)
 // Comparison operations
 // ============================================================================
 
-// CHECK-LABEL: @test_reduce_compare_ordered
+// CHECK-LABEL: entry @test_reduce_compare_ordered(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   cmpf equal ordered %[[LHS]], %[[RHS]]
@@ -180,7 +180,7 @@ nv_tensor_ir.graph @test_reduce_compare_ordered(%arg0: tensor<64x16xf32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_compare_unordered
+// CHECK-LABEL: entry @test_reduce_compare_unordered(
 // CHECK: %[[REDUCE:.*]] = reduce %{{.*}} dim=1 identities=[0.000000e+00 : f32]
 // CHECK:   (%[[LHS:.*]]: tile<f32>, %[[RHS:.*]]: tile<f32>)
 // CHECK:   cmpf equal unordered %[[LHS]], %[[RHS]]
@@ -214,7 +214,7 @@ nv_tensor_ir.graph @test_reduce_compare_unordered(%arg0: tensor<64x16xf32>)
 
 // -----
 
-// CHECK-LABEL: @test_reduce_with_const
+// CHECK-LABEL: entry @test_reduce_with_const(
 // CHECK-DAG: %[[ZERO_TILE:.*]] = constant <f32: 0.000000e+00> : tile<32x128xf32>
 // CHECK-DAG: constant <f32: 0.000000e+00> : tile<f32>
 // CHECK-DAG: %[[LOOP:.*]] = for {{.*}} iter_values(%[[IARG:.*]] = %[[ZERO_TILE]])

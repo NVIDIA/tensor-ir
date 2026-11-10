@@ -31,6 +31,9 @@ LogicalResult validateBytecodeVersion(ModuleOp module,
 /// Non-default rounding attribute on cuda_tile.exp.
 struct ExpApproxRounding {};
 
+/// Non-default overflow attribute on cuda_tile.negi.
+struct NegIOverflow {};
+
 /// Returns the introduction version of a CUDA Tile operation, attribute, type, or feature.
 /// Keep entries in sync with CUDA Tile's TableGen version metadata. Add explicit
 /// specializations as lowering needs them; unlisted classes have no default.
@@ -55,6 +58,12 @@ template <>
 inline cuda_tile::BytecodeVersion
 getMinCudaTileBytecodeVersion<cuda_tile::FPowIOp>() {
   return *cuda_tile::BytecodeVersion::fromVersion(13, 4);
+}
+
+template <>
+inline cuda_tile::BytecodeVersion
+getMinCudaTileBytecodeVersion<NegIOverflow>() {
+  return *cuda_tile::BytecodeVersion::fromVersion(13, 2);
 }
 
 template <>

@@ -28,6 +28,7 @@ from nv_tensor_ir.runtime import (  # noqa: F401, E402
     Artifact,
     RuntimeKernel,
     CudaTileArtifactKind,
+    RemarkCategory,
     analyze_module,
     can_compile,
     compile,

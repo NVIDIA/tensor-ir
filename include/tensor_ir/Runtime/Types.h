@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Common types for TensorIR Runtime
+/// Common types for TensorIR Runtime
 
 #ifndef TENSOR_IR_RUNTIME_TYPES_H
 #define TENSOR_IR_RUNTIME_TYPES_H
@@ -30,14 +30,6 @@ struct Workspace {
   size_t size = 0;
 };
 
-//===----------------------------------------------------------------------===//
-// PackedArgs - Abstraction for variadic arguments
-//
-// This is a minimal interface that can be backed by:
-//   - TVM FFI PackedArgs (zero-allocation)
-//   - A simple fallback implementation
-//===----------------------------------------------------------------------===//
-
 enum class TypeIndex : int32_t {
   kNone = 0,
   kPointer = 1,
@@ -49,6 +41,7 @@ enum class TypeIndex : int32_t {
 struct TensorView {
   void *data;
   int32_t ndim;
+  /// Array of `ndim` extents. May be null only when `ndim` is zero.
   int64_t *shape;
   int64_t *stride;
 };
@@ -61,9 +54,11 @@ struct ScalarValue {
 };
 
 struct Any {
-  TypeIndex typeIndex; // Type tag
+  /// Type tag
+  TypeIndex typeIndex;
   union {
-    void *ptr; // For DLTensor*, handles, etc.
+    /// For DLTensor*, handles, etc.
+    void *ptr;
     TensorView tensorView;
     ScalarValue scalar;
     // ... other types
@@ -80,8 +75,7 @@ struct Any {
   /// `valuePtr` must be non-null and point to at least `type`'s byte width.
   static Any makeScalarAny(ElementType type, const void *valuePtr) {
     int64_t bits = 0;
-    std::memcpy(&bits, valuePtr,
-                static_cast<size_t>(getElementByteWidth(type)));
+    std::memcpy(&bits, valuePtr, static_cast<size_t>(getScalarByteWidth(type)));
     return Any(type, bits);
   }
 
@@ -112,6 +106,12 @@ private:
       : typeIndex(TypeIndex::kScalar), scalar{type, bits} {}
 };
 
+/// PackedArgs - Abstraction for variadic arguments
+///
+/// This is a minimal interface that can be backed by:
+///   - TVM FFI PackedArgs (zero-allocation)
+///   - A simple fallback implementation
+///
 /// PackedArgs is just a pointer + count - No heap allocation per call.
 class PackedArgs {
   const Any *args_;

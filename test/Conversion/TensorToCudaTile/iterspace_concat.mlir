@@ -51,28 +51,28 @@ nv_tensor_ir.graph @test_concat_across_columns(
 
 // CHECK-LABEL: entry @test_concat_across_rows(
 // CHECK-SAME: %[[IN0:[^,]*]]: tile<ptr<f32>>, %[[IN1:[^,]*]]: tile<ptr<f32>>, %[[OUT:[^)]*]]: tile<ptr<f32>>)
-// CHECK-DAG: %[[C16:.*]] = constant <i32: 16>
+// CHECK-DAG: %[[C5:.*]] = constant <i32: 5>
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[BIDX:.+]], %{{.*}}, %{{.*}} = get_tile_block_id
 // CHECK-DAG: %[[C2:.*]] = constant <i32: 2>
-// CHECK: %[[X_REM_16:.+]] = remi %[[BIDX]], %[[C16]] unsigned
-// CHECK: %[[ROW:.+]] = divi %[[BIDX]], %[[C16]] unsigned
+// CHECK: %[[ROW:.+]] = remi %[[BIDX]], %[[C5]] unsigned
+// CHECK: %[[X:.+]] = divi %[[BIDX]], %[[C5]] unsigned
 // CHECK: %[[CMP:.*]] = cmpi less_than %[[ROW]], %[[C2]], unsigned
 // CHECK: %[[RESULT:.*]] = if %[[CMP]] -> (tile<2x1x16xf32>) {
 // CHECK:   %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [32, 2, 16], strides = [32, 16, 1]
 // CHECK:   %[[PVIEW0:.*]] = make_partition_view %[[VIEW0]]
-// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[X_REM_16]], %[[ROW]], %[[ZERO]]]
+// CHECK:   %[[TILE0:.*]], %{{.*}} = load_view_tko weak %[[PVIEW0]][%[[X]], %[[ROW]], %[[ZERO]]]
 // CHECK:   yield %[[TILE0]]
 // CHECK: } else {
 // CHECK:   %[[IDX:.*]] = subi %[[ROW]], %[[C2]]
 // CHECK:   %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [32, 3, 16], strides = [48, 16, 1]
 // CHECK:   %[[PVIEW1:.*]] = make_partition_view %[[VIEW1]]
-// CHECK:   %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[X_REM_16]], %[[IDX]], %[[ZERO]]]
+// CHECK:   %[[TILE1:.*]], %{{.*}} = load_view_tko weak %[[PVIEW1]][%[[X]], %[[IDX]], %[[ZERO]]]
 // CHECK:   yield %[[TILE1]]
 // CHECK: }
 // CHECK: %[[OUT_VIEW:.*]] = make_tensor_view %[[OUT]], shape = [32, 5, 16], strides = [80, 16, 1]
 // CHECK: %[[OUT_PVIEW:.*]] = make_partition_view %[[OUT_VIEW]]
-// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[X_REM_16]], %[[ROW]], %[[ZERO]]]
+// CHECK: store_view_tko weak %[[RESULT]], %[[OUT_PVIEW]][%[[X]], %[[ROW]], %[[ZERO]]]
 nv_tensor_ir.graph @test_concat_across_rows(
     %arg0: tensor<32x32xf32>,
     %arg1: tensor<32x48xf32>
@@ -205,10 +205,10 @@ nv_tensor_ir.graph @test_concat_nested(
 // CHECK-SAME: %[[IN0:[^,]+]]: tile<ptr<f32>>, %[[IN1:[^,]+]]: tile<ptr<f32>>, %[[OUT:[^)]+]]: tile<ptr<f32>>)
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[ONE:.*]] = constant <i32: 1>
-// CHECK-DAG: %[[TWO:.*]] = constant <i32: 2>
+// CHECK-DAG: %[[EIGHT:.*]] = constant <i32: 8>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[SEL:.*]] = remi %[[BLOCK]], %[[TWO]] unsigned
-// CHECK: %[[COL:.*]] = divi %[[BLOCK]], %[[TWO]] unsigned
+// CHECK: %[[COL:.*]] = remi %[[BLOCK]], %[[EIGHT]] unsigned
+// CHECK: %[[SEL:.*]] = divi %[[BLOCK]], %[[EIGHT]] unsigned
 // CHECK: %[[CMP:.*]] = cmpi less_than %[[SEL]], %[[ONE]], unsigned
 // CHECK: %[[RESULT:.*]] = if %[[CMP]] -> (tile<8x1x1xf32>) {
 // CHECK:   %[[VIEW0:.*]] = make_tensor_view %[[IN0]], shape = [8, 1, 8], strides = [8, 2, 1]
@@ -305,10 +305,9 @@ nv_tensor_ir.graph @fused_concatenate(
 // CHECK-SAME:  (%[[IN0:.+]]: tile<ptr<f32>>, %[[IN1:.+]]: tile<ptr<f32>>, %[[IN2:.+]]: tile<ptr<f32>>, %[[OUT:.+]]: tile<ptr<f32>>)
 // CHECK-DAG:   %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG:   %[[C2:.*]] = constant <i32: 2> : tile<i32>
-// CHECK-DAG:   %[[C5:.*]] = constant <i32: 5> : tile<i32>
 // CHECK:       %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK:       %[[SEL:.*]] = remi %[[BLOCK]], %[[C5]] unsigned
-// CHECK:       %[[COL:.*]] = divi %[[BLOCK]], %[[C5]] unsigned
+// CHECK:       %[[COL:.*]] = remi %[[BLOCK]], %[[C2]] unsigned
+// CHECK:       %[[SEL:.*]] = divi %[[BLOCK]], %[[C2]] unsigned
 // CHECK:       %[[CMP:.*]] = cmpi less_than %[[SEL]], %[[C2]], unsigned
 // CHECK:       %[[RESULT:.*]] = if %[[CMP]] -> (tile<8x1x1xf32>) {
 // CHECK:         %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [8, 2, 2], strides = [4, 2, 1]
@@ -355,10 +354,10 @@ nv_tensor_ir.graph @pruned_concatenate(
 // CHECK-DAG:   %[[HALF:.*]] = constant <f32: 5.000000e-01> : tile<8x1x1xf32>
 // CHECK-DAG:   %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
 // CHECK-DAG:   %[[C4:.*]] = constant <i32: 4> : tile<i32>
-// CHECK-DAG:   %[[C5:.*]] = constant <i32: 5> : tile<i32>
+// CHECK-DAG:   %[[C2:.*]] = constant <i32: 2> : tile<i32>
 // CHECK:       %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK:       %[[SEL:.*]] = remi %[[BLOCK]], %[[C5]] unsigned
-// CHECK:       %[[COL:.*]] = divi %[[BLOCK]], %[[C5]] unsigned
+// CHECK:       %[[COL:.*]] = remi %[[BLOCK]], %[[C2]] unsigned
+// CHECK:       %[[SEL:.*]] = divi %[[BLOCK]], %[[C2]] unsigned
 // CHECK:       %[[CMP:.*]] = cmpi less_than %[[SEL]], %[[C4]], unsigned
 // CHECK:       %[[RESULT:.*]] = if %[[CMP]] -> (tile<8x1x1xf32>) {
 // CHECK:         %[[VIEW1:.*]] = make_tensor_view %[[IN1]], shape = [8, 4, 2], strides = [8, 2, 1]

@@ -1,14 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===- OutlinedKernelImpl.cpp - Lower staged TensorIR kernels -------------===//
-//
-// This file is the conversion boundary for the inspectable tiled-program IR.
-// It deliberately consumes only explicit function arguments, direct TensorIR
-// memory accesses, and standard control-flow/launch operations. In particular,
-// it never reads layout-propagation analysis attributes.
-//
-//===----------------------------------------------------------------------===//
+/// This file is the conversion boundary for the inspectable tiled-program IR.
+/// It deliberately consumes only explicit function arguments, direct TensorIR
+/// memory accesses, and standard control-flow/launch operations. In particular,
+/// it never reads layout-propagation analysis attributes.
 
 #include "tensor_ir/Conversion/TensorToCudaTile/TensorToCudaTileInternal.h"
 
@@ -584,6 +580,8 @@ public:
   }
 };
 
+/// `index` converts to `i32`, so `arith.index_cast` sign-extends to wider
+/// integers, truncates to narrower ones and is the identity on `i32`.
 class IndexCastConversion : public OpConversionPattern<arith::IndexCastOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -604,7 +602,7 @@ public:
       rewriter.replaceOp(op, input);
     } else if (inputWidth < resultWidth) {
       rewriter.replaceOpWithNewOp<cuda_tile::ExtIOp>(
-          op, resultType, input, cuda_tile::Signedness::Unsigned);
+          op, resultType, input, cuda_tile::Signedness::Signed);
     } else {
       rewriter.replaceOpWithNewOp<cuda_tile::TruncIOp>(op, resultType, input);
     }

@@ -10,8 +10,8 @@
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[ROW:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
-// CHECK: %[[COL:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[COL:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[ROW:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [64, 50], strides = [50, 1]
 // CHECK: %[[PVIEW_LHS:.*]] = make_partition_view %[[LHS_VIEW]] : partition_view<tile=(8x64), padding_value = zero, tensor_view<64x50xf32, strides=[50,1]>>
 // CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[PVIEW_LHS]][%[[ROW]], %[[ZERO]]]{{.*}} -> tile<8x64xf32>
@@ -42,8 +42,8 @@ nv_tensor_ir.graph @test_pad_load_no_loop(
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
 // CHECK-DAG: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : [[TILE:tile<8x4xf32>]]
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
-// CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX1:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX0:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
 // CHECK: %[[RESULT:.*]] = for %[[IVAR:.*]] in (%[[ZERO]] to %[[C4]], step %[[ONE]])
 // CHECK-SAME: iter_values(%[[IARG:.*]] = %[[ACCUM]]) -> ([[TILE]])
 // CHECK:   %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [64, 500], strides = [500, 1]
@@ -77,8 +77,8 @@ nv_tensor_ir.graph @test_pad_load_one_loop(
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
 // CHECK-DAG: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : [[TILE:tile<8x4xf32>]]
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
-// CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX1:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX0:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
 // CHECK: %[[RESULT:.*]] = for %[[IVAR1:.*]] in (%[[ZERO]] to %[[C2]], step %[[ONE]])
 // CHECK-SAME: iter_values(%[[IARG1:.*]] = %[[ACCUM]]) -> ([[TILE]])
 // CHECK:   %[[LOOP:.*]] = for %[[IVAR2:.*]] in (%[[ZERO]] to %[[C8]], step %[[ONE]])
@@ -118,8 +118,8 @@ nv_tensor_ir.graph @test_pad_load_two_loops(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[ROW:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
-// CHECK: %[[COL:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[COL:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[ROW:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
 // CHECK: %[[LHS_VIEW:.*]] = make_tensor_view %[[IN0]], shape = [64, 50], strides = [64, 1]
 // CHECK: %[[PVIEW_LHS:.*]] = make_partition_view %[[LHS_VIEW]] : partition_view<tile=(8x64), padding_value = zero, tensor_view<64x50xf32, strides=[64,1]>>
 // CHECK: %[[LHS:.*]], %{{.*}} = load_view_tko weak %[[PVIEW_LHS]][%[[ROW]], %[[ZERO]]]{{.*}} -> tile<8x64xf32>
@@ -159,8 +159,8 @@ nv_tensor_ir.graph @test_pad_load_chain(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
-// CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX1:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX0:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
 // CHECK: %[[IOTA:.*]] = iota : tile<64xi32>
 // CHECK: %[[CMP:.*]] = cmpi less_than %[[IOTA]], %[[C50]], unsigned : tile<64xi32> -> tile<64xi1>
 // CHECK: %[[CMPL:.*]] = reshape %[[CMP]] : tile<64xi1> -> tile<1x64xi1>
@@ -207,8 +207,8 @@ nv_tensor_ir.graph @test_pad_mask_no_loop(
 // CHECK-DAG: %[[RHS_NEUTRAL:.*]] = constant <f32: 0.000000e+00> : [[RHS_TILE:tile<128x4xf32>]]
 // CHECK-DAG: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : [[TILE:tile<8x4xf32>]]
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
-// CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX1:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX0:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
 // CHECK: %[[RESULT:.*]] = for %[[IVAR:.*]] in (%[[ZERO]] to %[[C4]], step %[[ONE]])
 // CHECK-SAME: iter_values(%[[IARG:.*]] = %[[ACCUM]]) -> ([[TILE]])
 // CHECK:   %[[MUL:.*]] = muli %[[IVAR]], %[[C128]] : tile<i32>
@@ -263,8 +263,8 @@ nv_tensor_ir.graph @test_pad_mask_one_loop(
 // CHECK-DAG: %[[RHS_NEUTRAL:.*]] = constant <f32: 0.000000e+00> : [[RHS_TILE:tile<16x8x4xf32>]]
 // CHECK-DAG: %[[ACCUM:.*]] = constant <f32: 0.000000e+00> : [[TILE:tile<8x4xf32>]]
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
-// CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX1:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX0:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
 // CHECK: %[[RESULT:.*]] = for %[[IVAR1:.*]] in (%[[ZERO]] to %[[C2]], step %[[ONE]])
 // CHECK-SAME: iter_values(%[[IARG1:.*]] = %[[ACCUM]]) -> ([[TILE]])
 // CHECK:   %[[A_MUL:.*]] = muli %[[IVAR1]], %[[C16]] : tile<i32>
@@ -333,8 +333,8 @@ nv_tensor_ir.graph @test_pad_mask_two_loops(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
-// CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX1:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX0:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
 // CHECK: %[[IOTA:.*]] = iota : tile<64xi32>
 // CHECK: %[[CMP:.*]] = cmpi less_than %[[IOTA]], %[[C50]], unsigned : tile<64xi32> -> tile<64xi1>
 // CHECK: %[[CMPL:.*]] = reshape %[[CMP]] : tile<64xi1> -> tile<1x64xi1>
@@ -372,8 +372,8 @@ nv_tensor_ir.graph @test_pad_mask_lhs_only(
 // CHECK-DAG: %[[ZERO:.*]] = constant <i32: 0>
 // CHECK-DAG: %[[C8:.*]] = constant <i32: 8>
 // CHECK: %[[BLOCK:.*]], %{{.*}}, %{{.*}} = get_tile_block_id
-// CHECK: %[[IDX0:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
-// CHECK: %[[IDX1:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX1:.*]] = remi %[[BLOCK]], %[[C8]] unsigned
+// CHECK: %[[IDX0:.*]] = divi %[[BLOCK]], %[[C8]] unsigned
 // CHECK: %[[IOTA:.*]] = iota : tile<64xi32>
 // CHECK: %[[CMP:.*]] = cmpi less_than %[[IOTA]], %[[C50]], unsigned : tile<64xi32> -> tile<64xi1>
 // CHECK: %[[CMPR:.*]] = reshape %[[CMP]] : tile<64xi1> -> tile<64x1xi1>

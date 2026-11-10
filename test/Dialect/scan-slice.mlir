@@ -8,8 +8,7 @@
 //   FLOW-SAME: %[[INITIAL:[^:]+]]: tensor<2x8xf32>
 //   FLOW-SAME: %[[VALUES:[^:]+]]: tensor<5x2x8xf32>
 //   FLOW-SAME: %[[OTHER:[^:]+]]: tensor<2x5x8xf32>
-//        FLOW: %[[SCAN_SLICE:.*]]:3 = scan_slice(%[[INITIAL]], %[[VALUES]], %[[OTHER]]) scan_dimensions = [0, 1]
-//   FLOW-SAME: output_dimensions = [0, 1]
+//        FLOW: %[[SCAN_SLICE:.*]]:3 = scan_slice(%[[INITIAL]], %[[VALUES]], %[[OTHER]]) <scan_dimensions = [0, 1], output_dimensions = [0, 1]>
 //    ASM-SAME: {tag = "forward"} : (tensor<2x8xf32>, tensor<5x2x8xf32>, tensor<2x5x8xf32>) {
 //        FLOW: ^bb0(%[[CARRY:.*]]: tensor<2x8xf32>, %[[VALUE:.*]]: tensor<2x8xf32>, %[[EXTRA:.*]]: tensor<2x8xf32>):
 //        FLOW: %[[SUM:.*]] = add %[[CARRY]], %[[VALUE]] : tensor<2x8xf32>
@@ -27,12 +26,12 @@ nv_tensor_ir.graph @forward(%initial: tensor<2x8xf32>,
   //  DEAD-NEXT: ^{{bb[0-9]+}} = live
   //  DEAD-NEXT: region_preds: (all) predecessors:
   //  DEAD-NEXT: %{{[^ ]+}} = nv_tensor_ir.scan_slice(
-  //  DEAD-SAME: scan_dimensions = [0, 1] output_dimensions = [0, 1]
+  //  DEAD-SAME: <scan_dimensions = [0, 1], output_dimensions = [0, 1]>
   //  DEAD-NEXT: nv_tensor_ir.yield %[[NEXT:[^ ,]+]], %[[NEXT]], %[[LOW:[^ ,]+]] : tensor<2x8xf32>, tensor<2x8xf32>, tensor<2x8xbf16>
   //  DEAD-NEXT: op_preds: (all) predecessors:
   //  DEAD-NEXT: nv_tensor_ir.yield %[[NEXT]], %[[NEXT]], %[[LOW]] : tensor<2x8xf32>, tensor<2x8xf32>, tensor<2x8xbf16>
   %final, %history, %low = nv_tensor_ir.scan_slice (%initial, %values, %other)
-      scan_dimensions = [0, 1] output_dimensions = [0, 1] {tag = "forward"}
+      <scan_dimensions = [0, 1], output_dimensions = [0, 1]> {tag = "forward"}
       : (tensor<2x8xf32>, tensor<5x2x8xf32>, tensor<2x5x8xf32>) {
     ^bb0(%carry: tensor<2x8xf32>, %value: tensor<2x8xf32>, %extra: tensor<2x8xf32>):
       %sum = add %carry, %value : tensor<2x8xf32>
@@ -47,8 +46,8 @@ nv_tensor_ir.graph @forward(%initial: tensor<2x8xf32>,
 //  FLOW-LABEL: graph @singleton(
 //   FLOW-SAME: %[[INITIAL:[^:]+]]: tensor<8xsi32>
 //   FLOW-SAME: %[[VALUES:[^:]+]]: tensor<1x8xsi32>
-//        FLOW: %[[SCAN_SLICE:.*]] = scan_slice(%[[INITIAL]], %[[VALUES]]) scan_dimensions = [0] output_dimensions = []
-//    ASM-SAME: {reverse = true, tag = "singleton"} : (tensor<8xsi32>, tensor<1x8xsi32>) {
+//        FLOW: %[[SCAN_SLICE:.*]] = scan_slice(%[[INITIAL]], %[[VALUES]]) <scan_dimensions = [0], output_dimensions = [], reverse = true>
+//    ASM-SAME: {tag = "singleton"} : (tensor<8xsi32>, tensor<1x8xsi32>) {
 //        FLOW: ^bb0(%[[CARRY:.*]]: tensor<8xsi32>, %[[VALUE:.*]]: tensor<8xsi32>):
 //        FLOW: %[[NEXT:.*]] = add %[[CARRY]], %[[VALUE]] : tensor<8xsi32>
 //        FLOW: yield %[[NEXT]] : tensor<8xsi32>
@@ -62,12 +61,12 @@ nv_tensor_ir.graph @singleton(%initial: tensor<8xsi32>,
   //  DEAD-NEXT: ^{{bb[0-9]+}} = live
   //  DEAD-NEXT: region_preds: (all) predecessors:
   //  DEAD-NEXT: %{{[^ ]+}} = nv_tensor_ir.scan_slice(
-  //  DEAD-SAME: scan_dimensions = [0] output_dimensions = [] {reverse = true,
+  //  DEAD-SAME: <scan_dimensions = [0], output_dimensions = [], reverse = true>
   //  DEAD-NEXT: op_preds: (all) predecessors:
   //  DEAD-NEXT: nv_tensor_ir.yield %{{[^ ,]+}} : tensor<8xsi32>
   //   DEAD-NOT: predecessors:
   %final = nv_tensor_ir.scan_slice (%initial, %values)
-      scan_dimensions = [0] output_dimensions = [] {reverse = true, tag = "singleton"}
+      <scan_dimensions = [0], output_dimensions = [], reverse = true> {tag = "singleton"}
       : (tensor<8xsi32>, tensor<1x8xsi32>) {
     ^bb0(%carry: tensor<8xsi32>, %value: tensor<8xsi32>):
       %next = add %carry, %value : tensor<8xsi32>

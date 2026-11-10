@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// TensorIRArtifact - the persistent compile product for TensorIR's CudaTile
-// backend.
+/// TensorIRArtifact - the persistent compile product for TensorIR's CudaTile
+/// backend.
 
 #ifndef TENSOR_IR_ARTIFACT_TENSORIRARTIFACT_H
 #define TENSOR_IR_ARTIFACT_TENSORIRARTIFACT_H
@@ -74,7 +74,7 @@ public:
          const std::optional<std::array<int32_t, 3>> &staticGrid,
          bool usesPDL = false,
          std::optional<HostModule> hostModule = std::nullopt,
-         std::string entrypointName = {});
+         std::string entrypointName = {}, std::string remarksYaml = {});
 
   TensorIRArtifact(const TensorIRArtifact &) = default;
   TensorIRArtifact &operator=(const TensorIRArtifact &) = delete;
@@ -87,7 +87,8 @@ public:
            binary == other.binary && arch == other.arch &&
            argLayout == other.argLayout && staticGrid == other.staticGrid &&
            usesPDL_ == other.usesPDL_ && hostModule == other.hostModule &&
-           entrypointName == other.entrypointName;
+           entrypointName == other.entrypointName &&
+           remarksYaml_ == other.remarksYaml_;
   }
 
   const std::string &getKernelName() const { return kernelName; }
@@ -96,6 +97,10 @@ public:
   /// artifacts. Independent of the display name and device kernel symbol.
   const std::string &getEntrypointName() const { return entrypointName; }
   const std::optional<HostModule> &getHostModule() const { return hostModule; }
+  /// LLVM remark YAML preserved by copying and serialization.
+  /// Empty when disabled or no records were emitted.
+  llvm::StringRef getRemarks() const { return remarksYaml_; }
+
   const Binary &getBinary() const { return binary; }
   ::mlir::nv_tensor_ir::SmTarget getArch() const { return arch; }
   const KernelMetadata &getLaunchMetadata() const { return argLayout; }
@@ -112,7 +117,7 @@ private:
                    KernelMetadata argLayout,
                    const std::optional<std::array<int32_t, 3>> &staticGrid,
                    bool usesPDL, std::optional<HostModule> hostModule,
-                   std::string entrypointName);
+                   std::string entrypointName, std::string remarksYaml);
 
   static ::mlir::nv_tensor_ir::Status
   validateFields(llvm::StringRef kernelName, llvm::StringRef funcName,
@@ -121,6 +126,7 @@ private:
                  const std::optional<HostModule> &hostModule,
                  llvm::StringRef entrypointName);
 
+  std::string remarksYaml_;
   std::string kernelName;
   std::string funcName;
   std::string entrypointName;

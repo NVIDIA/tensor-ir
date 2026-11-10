@@ -6,7 +6,7 @@
 
 // This the minimal example: an empty graph.
 // CHECK: nv_tensor_ir.graph @someGraph() {
-// CHECK-NEX: results
+// CHECK-NEXT: results
 nv_tensor_ir.graph @someGraph() {
   results
 }
@@ -53,9 +53,13 @@ nv_tensor_ir.graph @pointwiseBinaryFloatTestGraph(
   %geluapproxtanh = gelu_approx_tanh_bwd %arg0, %tanh : tensor<10xf32>
   // CHECK: %[[relu:.*]] = relu_bwd %[[arg0]], %[[geluapproxtanh]] : tensor<10xf32>
   %relu = relu_bwd %arg0, %geluapproxtanh : tensor<10xf32>
+  // CHECK: %[[log1p:.*]] = log1p %[[arg0]] : tensor<10xf32>
+  %log1p = log1p %arg0 : tensor<10xf32>
+  // CHECK: %[[expm1:.*]] = expm1 %[[arg0]] : tensor<10xf32>
+  %expm1 = expm1 %arg0 : tensor<10xf32>
 
-  // CHECK: results %[[relu]] : tensor<10xf32>
-  results %relu : tensor<10xf32>
+  // CHECK: results %[[expm1]] : tensor<10xf32>
+  results %expm1 : tensor<10xf32>
 }
 
 // Pointwise binary operations
@@ -289,14 +293,14 @@ nv_tensor_ir.graph @pointwiseCmpiTestGraph(
       tensor<10xi1>, tensor<10xi1>, tensor<10xi1>
 }
 
-// Boolean Operations
-// CHECK-LABEL: nv_tensor_ir.graph @pointwiseBooleanTestGraph
+// Bitwise Operations
+// CHECK-LABEL: nv_tensor_ir.graph @pointwiseBitwiseTestGraph
 // CHECK-SAME: %[[arg0:.*]]: tensor<10xsi8>,
 // CHECK-SAME: %[[arg1:.*]]: tensor<10xsi8>
-nv_tensor_ir.graph @pointwiseBooleanTestGraph(
+nv_tensor_ir.graph @pointwiseBitwiseTestGraph(
   %arg0: tensor<10xsi8>,
   %arg1: tensor<10xsi8>
-) -> (tensor<10xi1>, tensor<10xi1>){
+) -> (tensor<10xsi8>, tensor<10xsi8>){
 
   // CHECK: %[[and:.*]] = and %[[arg0]], %[[arg1]] : tensor<10xsi8>
   %and = and %arg0, %arg1 : tensor<10xsi8>
@@ -304,10 +308,104 @@ nv_tensor_ir.graph @pointwiseBooleanTestGraph(
   // CHECK: %[[or:.*]] = or %[[arg0]], %[[arg1]] : tensor<10xsi8>
   %or = or %arg0, %arg1 : tensor<10xsi8>
 
-  // CHECK: %[[and:.*]] = not %[[or]] : tensor<10xi1>
-  %not = not %or : tensor<10xi1>
+  results %and, %or : tensor<10xsi8>, tensor<10xsi8>
+}
 
-  results %and, %not : tensor<10xi1>, tensor<10xi1>
+// -----
+
+// CHECK-LABEL: @shift_left_overflow
+// CHECK: shift_left %{{.*}}, %{{.*}} : tensor<4xsi32>
+// CHECK: shift_left %{{.*}}, %{{.*}} overflow <no_signed_wrap> : tensor<4xsi32>
+// CHECK: shift_left %{{.*}}, %{{.*}} overflow <no_unsigned_wrap> : tensor<4xsi32>
+// CHECK: shift_left %{{.*}}, %{{.*}} overflow <no_wrap> : tensor<4xsi32>
+nv_tensor_ir.graph @shift_left_overflow(%x: tensor<4xsi32>, %y: tensor<4xsi32>) -> tensor<4xsi32> {
+  %a = shift_left %x, %y overflow <none> : tensor<4xsi32>
+  %b = shift_left %a, %y overflow <no_signed_wrap> : tensor<4xsi32>
+  %c = shift_left %b, %y overflow <no_unsigned_wrap> : tensor<4xsi32>
+  %d = shift_left %c, %y overflow <no_wrap> : tensor<4xsi32>
+  results %d : tensor<4xsi32>
+}
+
+// CHECK-LABEL: @boolean_pointwise
+// CHECK: xor %{{.*}}, %{{.*}} : tensor<4xi1>
+// CHECK: shift_left %{{.*}}, %{{.*}} : tensor<4xi1>
+// CHECK: shift_right %{{.*}}, %{{.*}} : tensor<4xi1>
+// CHECK: mul_high %{{.*}}, %{{.*}} : tensor<4xi1>
+nv_tensor_ir.graph @boolean_pointwise(%x: tensor<4xi1>, %y: tensor<4xi1>) -> tensor<4xi1> {
+  %a = xor %x, %y : tensor<4xi1>
+  %b = shift_left %a, %y : tensor<4xi1>
+  %c = shift_right %b, %y : tensor<4xi1>
+  %d = mul_high %c, %y : tensor<4xi1>
+  results %d : tensor<4xi1>
+}
+
+// CHECK-LABEL: @float_f16
+// CHECK: fma %{{.*}}, %{{.*}}, %{{.*}} : tensor<4xf16>
+// CHECK: exp2 %{{.*}} : tensor<4xf16>
+// CHECK: log2 %{{.*}} : tensor<4xf16>
+// CHECK: sinh %{{.*}} : tensor<4xf16>
+// CHECK: cosh %{{.*}} : tensor<4xf16>
+nv_tensor_ir.graph @float_f16(%x: tensor<4xf16>) -> tensor<4xf16> {
+  %a = fma %x, %x, %x : tensor<4xf16>
+  %b = exp2 %a : tensor<4xf16>
+  %c = log2 %b : tensor<4xf16>
+  %d = sinh %c : tensor<4xf16>
+  %e = cosh %d : tensor<4xf16>
+  results %e : tensor<4xf16>
+}
+
+// CHECK-LABEL: @float_bf16
+// CHECK: fma %{{.*}}, %{{.*}}, %{{.*}} : tensor<4xbf16>
+// CHECK: exp2 %{{.*}} : tensor<4xbf16>
+// CHECK: log2 %{{.*}} : tensor<4xbf16>
+// CHECK: sinh %{{.*}} : tensor<4xbf16>
+// CHECK: cosh %{{.*}} : tensor<4xbf16>
+nv_tensor_ir.graph @float_bf16(%x: tensor<4xbf16>) -> tensor<4xbf16> {
+  %a = fma %x, %x, %x : tensor<4xbf16>
+  %b = exp2 %a : tensor<4xbf16>
+  %c = log2 %b : tensor<4xbf16>
+  %d = sinh %c : tensor<4xbf16>
+  %e = cosh %d : tensor<4xbf16>
+  results %e : tensor<4xbf16>
+}
+
+// CHECK-LABEL: @float_f32
+// CHECK: fma %{{.*}}, %{{.*}}, %{{.*}} : tensor<4xf32>
+// CHECK: exp2 %{{.*}} : tensor<4xf32>
+// CHECK: log2 %{{.*}} : tensor<4xf32>
+// CHECK: sinh %{{.*}} : tensor<4xf32>
+// CHECK: cosh %{{.*}} : tensor<4xf32>
+nv_tensor_ir.graph @float_f32(%x: tensor<4xf32>) -> tensor<4xf32> {
+  %a = fma %x, %x, %x : tensor<4xf32>
+  %b = exp2 %a : tensor<4xf32>
+  %c = log2 %b : tensor<4xf32>
+  %d = sinh %c : tensor<4xf32>
+  %e = cosh %d : tensor<4xf32>
+  results %e : tensor<4xf32>
+}
+
+// CHECK-LABEL: @float_properties
+// CHECK: fma %{{.*}}, %{{.*}}, %{{.*}} <rounding_mode = positive_inf, ftz> : tensor<4xf32>
+// CHECK: exp2 %{{.*}} <ftz> : tensor<4xf32>
+nv_tensor_ir.graph @float_properties(%x: tensor<4xf32>) -> tensor<4xf32> {
+  %a = fma %x, %x, %x <rounding_mode = positive_inf, ftz> : tensor<4xf32>
+  %b = exp2 %a <ftz> : tensor<4xf32>
+  results %b : tensor<4xf32>
+}
+
+// CHECK-LABEL: @float_f64
+// CHECK: fma %{{.*}}, %{{.*}}, %{{.*}} : tensor<4xf64>
+// CHECK: exp2 %{{.*}} : tensor<4xf64>
+// CHECK: log2 %{{.*}} : tensor<4xf64>
+// CHECK: sinh %{{.*}} : tensor<4xf64>
+// CHECK: cosh %{{.*}} : tensor<4xf64>
+nv_tensor_ir.graph @float_f64(%x: tensor<4xf64>) -> tensor<4xf64> {
+  %a = fma %x, %x, %x : tensor<4xf64>
+  %b = exp2 %a : tensor<4xf64>
+  %c = log2 %b : tensor<4xf64>
+  %d = sinh %c : tensor<4xf64>
+  %e = cosh %d : tensor<4xf64>
+  results %e : tensor<4xf64>
 }
 
 // Matmul Operation
@@ -337,9 +435,11 @@ nv_tensor_ir.graph @MatmulAccumulatorTestGraph(
   %Acc: tensor<16x8xf32>
 ) -> tensor<16x8xf32> {
   // CHECK: %[[RESULT:.*]] = matmul(%[[A]], %[[B]]) accum(%[[ACC]] : tensor<16x8xf32>)
+  // CHECK-SAME: <left_triangle = upper, right_triangle = lower>
   // CHECK-SAME: : (tensor<16x32xf32>, tensor<32x8xf32>) -> tensor<16x8xf32>
   // CHECK: results %[[RESULT]] : tensor<16x8xf32>
   %C = matmul(%A, %B) accum(%Acc : tensor<16x8xf32>)
+    <left_triangle = upper, right_triangle = lower>
     : (tensor<16x32xf32>, tensor<32x8xf32>) -> tensor<16x8xf32>
   results %C : tensor<16x8xf32>
 }
@@ -468,6 +568,19 @@ nv_tensor_ir.graph @broadcastTestGraph(
 
 // -----
 
+// A static operand extent refines a corresponding dynamic extent.
+// CHECK-LABEL: nv_tensor_ir.graph @concatenateMergedExtent
+nv_tensor_ir.graph @concatenateMergedExtent(
+  %a: tensor<?x2xf32>,
+  %b: tensor<4x3xf32>
+) -> (tensor<4x5xf32>) {
+  %result = concatenate %a, %b dimension = 1
+      : (tensor<?x2xf32>, tensor<4x3xf32>) -> tensor<4x5xf32>
+  results %result : tensor<4x5xf32>
+}
+
+// -----
+
 // si32 constant operations
 // CHECK-LABEL: nv_tensor_ir.graph @si32_constantOp
 // CHECK: %[[c0:.*]] = constant 1 : si32
@@ -475,7 +588,7 @@ nv_tensor_ir.graph @broadcastTestGraph(
 // CHECK: %[[c2:.*]] = constant dense<1> : tensor<2x2xsi32>
 // CHECK: %[[c3:.*]] = constant dense<[1, 2, 3, 4]> : tensor<4xsi32>
 // CHECK: %[[c4:.*]] =
-// CHECK-SAME{LITERAL} constant dense<[[1, 2], [3, 4]]> : tensor<2x2xsi32>
+// CHECK-SAME{LITERAL}: constant dense<[[1, 2], [3, 4]]> : tensor<2x2xsi32>
 // CHECK: results %[[c1]], %[[c2]], %[[c3]], %[[c4]] :
 // CHECK: tensor<4xsi32>, tensor<2x2xsi32>, tensor<4xsi32>, tensor<2x2xsi32>
 nv_tensor_ir.graph @si32_constantOp() -> (tensor<4xsi32>, tensor<2x2xsi32>, tensor<4xsi32>, tensor<2x2xsi32>) {
@@ -498,7 +611,7 @@ nv_tensor_ir.graph @si32_constantOp() -> (tensor<4xsi32>, tensor<2x2xsi32>, tens
 // CHECK: %[[c2:.*]] = constant dense<1.000000e+00> : tensor<2x2xf32>
 // CHECK: %[[c3:.*]] = constant dense<[1.000000e+00, 2.000000e+00, 3.000000e+00, 4.000000e+00]> : tensor<4xf32>
 // CHECK: %[[c4:.*]] =
-// CHECK-SAME{LITERAL} constant dense<[[1.000000e+00, 2.000000e+00], [3.000000e+00, 4.000000e+00]]> : tensor<2x2xf32>
+// CHECK-SAME{LITERAL}: constant dense<[[1.000000e+00, 2.000000e+00], [3.000000e+00, 4.000000e+00]]> : tensor<2x2xf32>
 // CHECK: results %[[c1]], %[[c2]], %[[c3]], %[[c4]] :
 // CHECK: tensor<4xf32>, tensor<2x2xf32>, tensor<4xf32>, tensor<2x2xf32>
 nv_tensor_ir.graph @f32_constantOp() -> (tensor<4xf32>, tensor<2x2xf32>, tensor<4xf32>, tensor<2x2xf32>) {
@@ -520,7 +633,7 @@ nv_tensor_ir.graph @f32_constantOp() -> (tensor<4xf32>, tensor<2x2xf32>, tensor<
 // CHECK: %[[c2:.*]] = constant dense<1> : tensor<2x2xui32>
 // CHECK: %[[c3:.*]] = constant dense<[1, 2, 3, 4]> : tensor<4xui32>
 // CHECK: %[[c4:.*]] =
-// CHECK-SAME{LITERAL} constant dense<[[1, 2], [3, 4]]> : tensor<2x2xui32>
+// CHECK-SAME{LITERAL}: constant dense<[[1, 2], [3, 4]]> : tensor<2x2xui32>
 // CHECK: results %[[c1]], %[[c2]], %[[c3]], %[[c4]] :
 // CHECK: tensor<4xui32>, tensor<2x2xui32>, tensor<4xui32>, tensor<2x2xui32>
 nv_tensor_ir.graph @ui32_constantOp() -> (tensor<4xui32>, tensor<2x2xui32>, tensor<4xui32>, tensor<2x2xui32>) {
@@ -1018,4 +1131,55 @@ nv_tensor_ir.graph @iotaTestSSANameOpAsmInterface() -> (tensor<2x3xf32>) {
   %1 = iota dimension = 1 : tensor<2x3xf32>
   %add = add %0, %1 : tensor<2x3xf32>
   results %add : tensor<2x3xf32>
+}
+
+// -----
+
+// Graph visibility and argument, result, and graph attributes are printed.
+// CHECK-LABEL: nv_tensor_ir.graph private @privateGraphTestGraph(
+// CHECK-SAME:    %{{.*}}: tensor<2xf32> {test.arg = 7 : i64}) -> (tensor<2xf32> {test.result = "kept"})
+// CHECK-SAME:    attributes {test.graph = "kept"}
+nv_tensor_ir.graph private @privateGraphTestGraph(%a: tensor<2xf32> {test.arg = 7 : i64})
+    -> (tensor<2xf32> {test.result = "kept"}) attributes {test.graph = "kept"} {
+  results %a : tensor<2xf32>
+}
+
+// CHECK-LABEL: nv_tensor_ir.graph nested @nestedGraphTestGraph(
+nv_tensor_ir.graph nested @nestedGraphTestGraph(%a: tensor<2xf32>) -> tensor<2xf32> {
+  results %a : tensor<2xf32>
+}
+
+// -----
+
+// CHECK-LABEL: @integer_negation
+// CHECK: negi %{{.*}} : tensor<4xsi32>
+// CHECK: negi %{{.*}} overflow <no_signed_wrap> : tensor<4xsi32>
+// CHECK: negi %{{.*}} overflow <no_wrap> : tensor<4xsi32>
+nv_tensor_ir.graph @integer_negation(%x: tensor<4xsi32>) -> tensor<4xsi32> {
+  %a = negi %x : tensor<4xsi32>
+  %b = negi %a overflow <no_signed_wrap> : tensor<4xsi32>
+  %c = negi %b overflow <no_wrap> : tensor<4xsi32>
+  results %c : tensor<4xsi32>
+}
+
+// -----
+
+// CHECK-LABEL: @unsigned_storage
+// CHECK: negi %{{.*}} : tensor<4xui8>
+nv_tensor_ir.graph @unsigned_storage(%x: tensor<4xui8>) -> tensor<4xui8> {
+  %r = negi %x overflow <none> : tensor<4xui8>
+  results %r : tensor<4xui8>
+}
+
+// -----
+
+// CHECK-LABEL: @boolean_storage
+// CHECK: negi %{{.*}} : tensor<4xi1>
+// CHECK: negi %{{.*}} overflow <no_signed_wrap> : tensor<4xi1>
+// CHECK: negi %{{.*}} overflow <no_wrap> : tensor<4xi1>
+nv_tensor_ir.graph @boolean_storage(%x: tensor<4xi1>) -> tensor<4xi1> {
+  %a = negi %x : tensor<4xi1>
+  %b = negi %a overflow <no_signed_wrap> : tensor<4xi1>
+  %c = negi %b overflow <no_wrap> : tensor<4xi1>
+  results %c : tensor<4xi1>
 }
